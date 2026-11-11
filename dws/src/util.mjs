@@ -176,3 +176,19 @@ export function selfConvIds(env = process.env) {
     .map((x) => String(x ?? "").trim())
     .filter((x) => /^\d{8,}$/.test(x))
 }
+
+// isFreshTask 判定「点完新建工作任务之后，窗口是不是真的离开了旧会话」。
+// 这是记账层的守卫（不是浏览器侧 NEW_TASK 的成功判据）：必须知道新建前在哪个会话，
+// 并且新建后拿到的 id 与它不同，否则就是没切过去，提示词发进旧会话了。
+//   beforeConvId: 点之前 location.href 里解析出的会话 id
+//   afterConvId:  点之后（或发完首条消息回读时）location.href 里的会话 id
+//   requireNewId: true 时 afterConvId 必须是具体数字 id（发完首条消息回读用）；
+//                 false 时 afterConvId 为空也接受（刚点完停在 /chat 新页、还没发消息）。
+export function isFreshTask(beforeConvId, afterConvId, { requireNewId = false } = {}) {
+  const before = String(beforeConvId ?? "").trim()
+  const after = String(afterConvId ?? "").trim()
+  if (!/^\d{8,}$/.test(before)) return false // 不知道从哪个会话点的，无法判定
+  if (before === after) return false // 根本没离开旧会话
+  if (requireNewId && !/^\d{8,}$/.test(after)) return false // 期望拿到具体新 id 却没拿到
+  return true
+}

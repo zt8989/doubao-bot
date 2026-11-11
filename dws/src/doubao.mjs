@@ -5,7 +5,7 @@ import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
 import { App, Page } from "./cdp.mjs"
-import { sleep } from "./util.mjs"
+import { sleep, isFreshTask } from "./util.mjs"
 
 export const APPS = [
   { name: "豆包工作", mac: "DoubaoWork.app/Contents/MacOS/DoubaoWork", sub: "doubaowork" },
@@ -381,6 +381,10 @@ export class Doubao {
     const page = await this.connect(signal)
     const s = await page.eval(STATE)
     if (!s.signedIn) throw new DoubaoError("豆包没有登录，请先在豆包窗口里登录", "doubao_signed_out")
+    // 记下点「新建工作任务」之前所在的会话 id，等回读时必须确认窗口真的换到了新会话。
+    // 否则 NEW_TASK 哪怕没切走，sendText 也会在旧会话里把提示词发出去，waitReply 还会把
+    // 旧会话的回复当成新会话的回复带回来。
+    const beforeConvId = s.convId
 
     const step = async (expr, what) => {
       const why = await page.eval(expr)
@@ -402,6 +406,15 @@ export class Doubao {
     const baseline = await page.eval(COUNTS)
     await sendText(page, prompt, signal)
     const reply = await this.waitReply({ baseline, signal, onUpdate })
+    // 回读守卫：拿到的会话 id 必须与新建前不同，否则就是没切走。此时提示词很可能发进了
+    // 旧会话，绝不允许把旧 id 当新会话登记。
+    if (!isFreshTask(beforeConvId, reply.convId, { requireNewId: true })) {
+      throw new DoubaoError(
+        `新建工作任务失败：发完首条消息回读到的会话 id 是 ${reply.convId || "(空)"}，` +
+          `与新建前所在的 ${beforeConvId || "(空)"} 相同；窗口没有真正切到新会话，提示词可能已发进旧会话。`,
+        "doubao_new_task"
+      )
+    }
     return { convId: reply.convId, reply }
   }
 

@@ -6,8 +6,8 @@
 // handoff 说明（进展都在分支/提交里，接着干就行）。
 import fs from "node:fs"
 import path from "node:path"
-import { nowIso, readJson, writeJson } from "./util.mjs"
-import { Doubao, STATE, NEW_TASK, NEW_TASK_IN_PROJECT, MODE, COUNTS } from "./doubao.mjs"
+import { nowIso, readJson, writeJson, isFreshTask } from "./util.mjs"
+import { Doubao, DoubaoError, STATE, NEW_TASK, NEW_TASK_IN_PROJECT, MODE, COUNTS } from "./doubao.mjs"
 
 const EMPTY = { version: 1, sessions: {}, issues: {}, active: "" }
 
@@ -109,27 +109,52 @@ export class SessionManager {
   async open(name, { prompt = "", repo = "", mode, model, project = "", signal, onUpdate } = {}) {
     mode = mode ?? this.mode
     model = model ?? this.model
+    // 记账前先记下当前窗口所在的会话 id：新建任务后必须确认窗口已经离开它，
+    // 否则就把旧会话 id 错记到这条新会话头上（foreman-250 事故的根因）。
+    const beforeState = await this.client.state()
+    if (!beforeState.signedIn) throw new DoubaoError("豆包没有登录，请先在豆包窗口里登录", "doubao_signed_out")
+    const beforeConvId = beforeState.convId
+
     let reply = null
     if (prompt) {
+      // openTask 内部已经在 waitReply 回读处做过 isFreshTask 守卫，
+      // 回读到旧会话 id 会抛 doubao_new_task，不会落到下面的记账。
       reply = await this.client.openTask(prompt, { mode, model, project, signal, onUpdate })
     } else {
       const page = await this.client.connect(signal)
-      const st = await page.eval(STATE)
-      if (!st.signedIn) throw Error("豆包没有登录，请先在豆包窗口里登录")
       for (const [expr, what] of [
         [project ? NEW_TASK_IN_PROJECT(project) : NEW_TASK, project ? `在项目 ${project} 下新建工作任务` : "新建工作任务"],
         [MODE(mode === "cloud" ? "云电脑" : "本地电脑"), "切换模式"],
       ]) {
         const why = await page.eval(expr)
-        if (why) throw Error(`豆包${what}失败：${why}`)
+        if (why) throw new DoubaoError(`豆包${what}失败：${why}`, "doubao_ui")
       }
-      reply = { convId: (await page.eval(COUNTS)).convId, reply: null }
+      const counts = await page.eval(COUNTS)
+      // 不发首条消息时新页可能还没有会话 id（停在 /chat），只要离开了旧会话就接受。
+      if (!isFreshTask(beforeConvId, counts.convId)) {
+        throw new DoubaoError(
+          `新建工作任务失败：窗口没有真正离开旧会话（新建前 convId=${beforeConvId || "(空)"}，新建后=${counts.convId || "(空)"}）`,
+          "doubao_new_task"
+        )
+      }
+      reply = { convId: counts.convId, reply: null }
+    }
+
+    const afterConvId = reply?.convId ?? ""
+    // 最后一道记账守卫：绝不再用「当前窗口 convId」兜底——没拿到与旧 id 不同的新 id 就抛错，
+    // 不往 state.json 里落假记录。带 prompt 的情况 openTask 已要求具体新 id；不带 prompt 时
+    // 新页可能还没有 id（空串），但不能等于 beforeConvId。
+    if (!isFreshTask(beforeConvId, afterConvId, { requireNewId: !!prompt })) {
+      throw new DoubaoError(
+        `新建工作任务失败：记账时拿到的会话 id（${afterConvId || "(空)"}）与新建前（${beforeConvId || "(空)"}）相同，拒绝落账。`,
+        "doubao_new_task"
+      )
     }
     const state = await this.client.state()
     this.book.record(name, {
       repo,
       project,
-      convId: reply?.convId || state.convId,
+      convId: afterConvId,
       url: state.url,
       mode,
       model,
