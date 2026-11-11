@@ -21,12 +21,13 @@ herdr 从 origin/<base> 开 worktree（分支 fix/issue-N）
       ↓
 dws 开会话，把工单 + 边界 + RESULT 协议一次发进去
       ↓
-记账 + 登记监听 → 返回 dispatched
+记账 + 登记监听 → 返回 dispatched（会话随后自己改、自测、push、开 PR）
 ```
 
 run 到这里就返回：**不在进程里等回复、不读 RESULT、不验收、不 push/PR、不发通知**。
 会话跑完没有、结果是什么、通知谁，全由常驻服务在后台异步完成（见下一节）。
-`verify` / `publish`（验收、push、开 PR）的代码还在，但当前没接线，run 不自动调用。
+`verify` / `publish`（验收、push、开 PR）的代码还在，但当前没接线，run 不自动调用——
+push 与开 PR 由会话自己在自测通过后做完，foreman 只负责派活、监听、通知。
 
 worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for-human` / `agent-blocked`），返回 blocked。
 

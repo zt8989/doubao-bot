@@ -2,9 +2,9 @@
 import { slugify } from "./util.mjs"
 
 export const RESULT_SPEC = `结束时（而且只在结束时）输出一个 RESULT 块，格式严格如下：
-<RESULT>{"status":"done","branch":"<分支名>","tests":"<你跑过的测试命令与结果，一行>","summary":"<改了什么，50 字内>"}</RESULT>
+<RESULT>{"status":"done","branch":"<分支名>","pr":<PR 编号>,"prUrl":"<PR 链接>","tests":"<你跑过的测试命令与结果，一行>","summary":"<改了什么，50 字内>"}</RESULT>
 status 只有四种：
-- done：改完并自测通过，可以交 PR；
+- done：改完、自测通过、已经 push 并开了 PR（pr 与 prUrl 必填）；
 - need_decision：缺信息或需要人拍板，加 "question" 字段写清楚要问什么，不要猜；
 - blocked：试过了做不了，summary 里写原因；
 - failed：这次没做成但还能再试，summary 写卡在哪。
@@ -20,7 +20,8 @@ export function kickoff({ repo, issue, worktree, branch, base, attempt = 1, last
   const rules = [
     `只在这个工作区里改：${worktree}`,
     `分支已经开好：${branch}（基线 origin/${base}）。不要切分支、不要 rebase、不要动别的目录。`,
-    `不要 push、不要开 PR、不要合并、不要关闭工单——这些由 foreman 统一做。你只管改代码 + 本地提交。`,
+    `改完并在本工作区自测通过后：先 git push -u origin ${branch}，再用 opencli gitea pr --repo ${repo} --base ${base} --head ${branch} --title "fix(#${issue.number}): <一句话>" --body "<自证正文>" 开 PR；PR 正文写清改了啥、测试命令与结果、风险点。开完把 PR 号与链接填进 RESULT 的 pr / prUrl。`,
+    `自测没过就先别 push、别开 PR，按 status 交 RESULT 说明卡在哪。不要合并 PR、不要关闭工单、不要 force push、不要手改基线。`,
     `提交信息用中文，首行写 “fix(#${issue.number}): <一句话>”，正文写清改法与验证方式。`,
     `先读仓库里的 AGENTS.md / docs/agents/ 约定（如果有），按仓库自己的规矩来。`,
     `改完必须自己跑相关测试；跑不了就在 tests 里写清原因，不要假装跑过。`,
@@ -49,7 +50,7 @@ export function resume({ issue, attempt, failure = "" }) {
   return [
     `继续工单 #${issue.number}（第 ${attempt} 次尝试）。`,
     failure ? `上一次的问题：${failure}` : "上一次没有跑完，接着当前工作区状态继续，不要重做已完成的部分。",
-    `还是那条边界：只改代码 + 本地提交，不 push、不开 PR、不关单。`,
+    `还是那条边界：只在这个工作区改；自测通过后自己 git push 并开 PR（--base <base>），把 PR 号/链接写进 RESULT；不合并、不关单、不 force push。`,
     ``,
     RESULT_SPEC,
   ].join("\n")
@@ -84,12 +85,12 @@ export function prBody({ issue, summary, tests, commits, stat, base = "" }) {
     tests ? `- 测试：${tests}` : "- 测试：会话未报告，人工复核",
     ``,
     `## Merge Danger`,
-    `- 由 foreman 自动接单产出：改动边界限定在 worktree 内，只做本地提交；没有 force push、没有手改基线。`,
+    `- 由接单会话自行 push 并开 PR；改动边界限定在 worktree 内，没有 force push、没有手改基线；foreman 不合并。`,
     ``,
     `## 验收判据`,
     `- [x] 工作区干净（无未提交改动）`,
-    `- [x] 分支有提交（origin/${base || "<base>"}..HEAD > 0）`,
-    `- [ ] 人复核 diff`,
+    `- [x] 分支已推送、PR 已开（base ${base || "<base>"}）`,
+    `- [ ] 人复核 diff 后决定是否合并`,
   ]
     .filter((l) => l !== "")
     .join("\n")
@@ -164,6 +165,8 @@ function normalize(o, raw, block) {
   return {
     status,
     branch: String(o.branch ?? ""),
+    pr: Number(o.pr) > 0 ? Number(o.pr) : null,
+    prUrl: String(o.prUrl ?? ""),
     tests: String(o.tests ?? ""),
     summary: String(o.summary ?? o.note ?? ""),
     question: String(o.question ?? ""),

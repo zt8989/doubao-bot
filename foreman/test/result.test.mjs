@@ -37,12 +37,22 @@ test("状态别名归一化", () => {
   assert.equal(parseResult('{"status":"ask","question":"要不要删旧接口"}').status, "need_decision")
 })
 
+test("RESULT 里的 pr / prUrl 会带出来（按键名透传）", () => {
+  const r = parseResult('<RESULT>{"status":"done","branch":"fix/issue-1","pr":12,"prUrl":"http://g/pulls/12","tests":"ok","summary":"x"}</RESULT>')
+  assert.equal(r.status, "done")
+  assert.equal(r.pr, 12)
+  assert.equal(r.prUrl, "http://g/pulls/12")
+  const r2 = parseResult('<RESULT>{"status":"done","summary":"没填 PR"}</RESULT>')
+  assert.equal(r2.pr, null)
+  assert.equal(r2.prUrl, "")
+})
+
 test("分支名：中文标题不加拼音 slug，英文标题加", () => {
   assert.equal(issueBranch({ number: 255 }, "本地 Linux 沙盒模式实现"), "fix/issue-255")
   assert.equal(issueBranch({ number: 12 }, "add retry to cdp client"), "fix/issue-12-add-retry-to-cdp-client")
 })
 
-test("kickoff 里写死了边界（不 push、只在该 worktree 改）", () => {
+test("kickoff 里写死了边界（自测过了自己 push 开 PR、只在该 worktree 改）", () => {
   const p = kickoff({
     repo: "yyzl/win-ai-harness",
     issue: { number: 255, title: "沙盒模式", body: "正文" },
@@ -51,6 +61,9 @@ test("kickoff 里写死了边界（不 push、只在该 worktree 改）", () => 
     base: "dev",
   })
   assert.match(p, /只在这个工作区里改：\/tmp\/wt\/fix-issue-255/)
-  assert.match(p, /不要 push、不要开 PR/)
+  assert.match(p, /自测通过后[^\n]*git push -u origin/)
+  assert.match(p, /opencli gitea pr --repo yyzl\/win-ai-harness --base dev --head fix\/issue-255/)
+  assert.match(p, /把 PR 号与链接填进 RESULT/)
+  assert.match(p, /不要合并 PR、不要关闭工单/)
   assert.match(p, /<RESULT>/)
 })

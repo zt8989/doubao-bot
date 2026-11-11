@@ -1,6 +1,6 @@
 ---
 name: foreman
-description: 接单编排 CLI（项目 foreman，命令 foreman）：用 opencli 读内网 Gitea 的 ready-for-agent 工单、用 herdr 从 origin/<base> 开 worktree、用 dws 把活派给豆包会话后返回（不验收、不 push、不开 PR），常驻服务异步监听会话、跑完回通知。当用户说自动接单、接工单、把工单派给豆包、批量跑 Gitea 工单、看某条工单处理到哪、把卡住的单放回队列，或提到 foreman 时报 app_busy / locked / pr-open 时使用。dws 只管豆包会话、opencli 只管 Gitea、herdr 只管 worktree，串联是 foreman 的事。它带一个常驻服务：CLI 每次启动先跟服务握手，会话由服务异步监听，跑完再回通知（只有异步一条路径，没有同步发送）。整条链路的验收口径见 workflow。提到 foreman 但报「服务没起 / service_unavailable / 监听没收到」也用本技能。
+description: 接单编排 CLI（项目 foreman，命令 foreman）：用 opencli 读内网 Gitea 的 ready-for-agent 工单、用 herdr 从 origin/<base> 开 worktree、用 dws 把活派给豆包会话后立即返回（不验收、不 push、不开 PR：会话自测通过后自己 push 并开 PR），常驻服务异步监听会话、跑完把结论与 PR 回通知。当用户说自动接单、接工单、把工单派给豆包、批量跑 Gitea 工单、看某条工单处理到哪、把卡住的单放回队列，或提到 foreman 时报 app_busy / locked / pr-open 时使用。dws 只管豆包会话、opencli 只管 Gitea、herdr 只管 worktree，串联是 foreman 的事。它带一个常驻服务：CLI 每次启动先跟服务握手，会话由服务异步监听，跑完再回通知（只有异步一条路径，没有同步发送）。整条链路的验收口径见 workflow。提到 foreman 但报「服务没起 / service_unavailable / 监听没收到」也用本技能。
 ---
 
 # foreman：接单编排
@@ -81,18 +81,18 @@ foreman doctor [--start]              # --start 才真的连豆包窗口读状�
 
 1. `opencli gitea search --label <id>` 拉 open 工单，按 `pickup` 过滤（排除人工标签、已处理的、到重试上限的），最老先接。
 2. `herdr worktree create --cwd <repo> --branch fix/issue-N --base origin/<base> --path ~/.foreman/worktrees/<仓库>/fix-issue-N --no-focus`。
-3. `dws open --name foreman-<仓库>-<N>` 发 kickoff：把工单正文、worktree、分支、边界（**只改代码 + 本地提交，不 push/不开 PR**）、`<RESULT>` 协议一次写进去。
-4. run 派活后就返回 `dispatched`：不等回复、不读 RESULT、不验收、不 push/PR。会话跑完由服务在后台轮询判定，用 `dws info` 读最后一条、从里面取最后一个 `<RESULT>` 块映射结论，再发通知。**验收以会话自交的 RESULT 与其自证为准（它跑了什么、输出是什么），调用方不要为了「再确认一遍」重跑单测**——重复验证只会把一轮拖成两轮；只有确实怀疑结果时才跑，并先说明为什么要跑。
-5. 验收三条（工作区干净、`origin/<base>..HEAD > 0`、`verify` 命令全过）+ push + `opencli gitea pr`：`verify`/`publish` 代码还在，但当前没接线、run 不自动调用。要出 PR 时按通知里的分支手动走，（`merge.enabled` 时）再 `pr-merge` + `close` + 清 worktree。
+3. `dws open --name foreman-<仓库>-<N>` 发 kickoff：把工单正文、worktree、分支、边界（**只在这个 worktree 改；自测通过后自己 `git push -u origin <分支>` 并用 `opencli gitea pr --repo <仓库> --base <base> --head <分支>` 开 PR，PR 号/链接写进 RESULT；不合并、不关单、不 force push**）、`<RESULT>` 协议一次写进去。
+4. run 派活后就返回 `dispatched`：不等回复、不读 RESULT、不验收、不 push/PR。会话跑完由服务在后台轮询判定，用 `dws info` 读最后一条、从里面取最后一个 `<RESULT>` 块映射结论，再发通知；RESULT 里的 `pr` / `prUrl` 优先于账本，通知正文直接带 PR 链接。**验收以会话自交的 RESULT 与其自证为准（它跑了什么、输出是什么），调用方不要为了「再确认一遍」重跑单测**——重复验证只会把一轮拖成两轮；只有确实怀疑结果时才跑，并先说明为什么要跑。
+5. 收口是「会话交 PR、服务通知人」：会话 `done` 时必须已 push 且开了 PR，通知里带 PR 号与链接、`tests` 自证。foreman 侧不再 push、不再开 PR；`verify` / `publish` 代码还在但没接线，只在人想复核时手动跑。验收、合并、关单由收到通知的人决定（`merge.enabled: true` 才自动合）。
 6. `need_decision` / `blocked`：结论由服务通知到人，**worktree 留着**；人处理完 `foreman retry <仓库> <N>` 放回队列。
 
 RESULT 协议（只认最后一个块，差一点按失败处理）：
 
 ```
-<RESULT>{"status":"done","branch":"fix/issue-250","tests":"mvn -q test 通过","summary":"改了 A"}</RESULT>
+<RESULT>{"status":"done","branch":"fix/issue-250","pr":251,"prUrl":"http://…/pulls/251","tests":"mvn -q test 通过","summary":"改了 A"}</RESULT>
 ```
 
-`status` 只能是 `done` / `need_decision` / `blocked` / `failed`。
+`status` 只能是 `done` / `need_decision` / `blocked` / `failed`；`done` 必须带 `pr` 与 `prUrl`（会话自己 push + 开 PR 的结果）。
 
 ## 状态与文件
 

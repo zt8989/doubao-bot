@@ -154,6 +154,9 @@ export function notifyDecision({ cfg, watcher, book, env = process.env, result }
     pr = rec.pr ?? null
     prUrl = rec.prUrl ?? ""
   }
+  // 会话自己开了 PR：以 RESULT 里的为准（账本里可能还没有）。
+  if (result?.pr) pr = result.pr
+  if (result?.prUrl) prUrl = result.prUrl
   const issueLike = { repo, number, title }
   const outLike = {
     state: event,

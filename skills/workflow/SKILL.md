@@ -1,6 +1,6 @@
 ---
 name: workflow
-description: 端到端接单工作流（opencli + herdr + dws + foreman）：把内网 Gitea 的 ready-for-agent 工单派给豆包会话，验收后推分支、开 PR 等人验收，并把结论回给调用方会话。当用户说「走一遍工作流」「整条链路」「接单到出 PR 怎么串」「收口通知」「几个工具怎么分工」，或问某一环卡在哪（app_busy / 会话没开起来 / 验收不过 / 卡在 pr-open）时使用。
+description: 端到端接单工作流（opencli + herdr + dws + foreman）：把内网 Gitea 的 ready-for-agent 工单派给豆包会话，会话自测通过后自己 push 并开 PR，foreman 在跑完后把结论与 PR 回给调用方会话。当用户说「走一遍工作流」「整条链路」「接单到出 PR 怎么串」「收口通知」「几个工具怎么分工」，或问某一环卡在哪（app_busy / 会话没开起来 / 验收不过 / 卡在 pr-open）时使用。
 ---
 
 # workflow：一条工单从接到收
@@ -21,13 +21,13 @@ description: 端到端接单工作流（opencli + herdr + dws + foreman）：把
 1. **选单**：`opencli gitea search "" --repo <owner/name> --state open --label 5`
    标签**必须用数字 id**（`ready-for-agent`=5，`needs-triage`=3，`needs-info`=4，`ready-for-human`=6，`wontfix`=7）；按名字过滤会静默捞 0 条。
 2. **建工作区**：`herdr worktree create --cwd <repo> --branch fix/issue-N --base origin/sit-20261126 --path ~/.foreman/worktrees/<仓库>/fix-issue-N --no-focus`；失败退回 `git worktree add`。
-3. **派活**：`dws open --name foreman-<仓库>-N --prompt <kickoff>`。kickoff 把边界写死：只在这个 worktree 改 + 本地提交，**不 push、不开 PR、不关单**，结尾交 `<RESULT>`。
+3. **派活**：`dws open --name foreman-<仓库>-N --prompt <kickoff>`。kickoff 把边界写死：只在这个 worktree 改；**自测通过后自己 `git push -u origin <分支>` + `opencli gitea pr --base sit-20261126 --head <分支>` 开 PR**，把 PR 号/链接写进 RESULT；不合并、不关单、不 force push。
    **派完立刻登记监听**：`foreman watch add <convId> --notify <调用方会话> --repo <owner/name> --number N`。
    不经 `foreman run`、直接 `dws open` 派出去的会话**不会自动被监听**——没这一步，会话跑完也没人通知你。
    并且**必须在归档之前收口**：`dws archive` 会把任务从侧边栏收起，之后 `dws status` 报「侧边栏里没有任务」，监听再也判不出来（只会在 `service.log` 里刷失败）。
-4. **收结果**：只认最后一个 RESULT 块，`status` ∈ `done` / `need_decision` / `blocked` / `failed`。监听正常时这一步由服务通知你，不必轮询。
-5. **验收三条**：工作区干净 + 分支有提交（`origin/<base>..HEAD ≠ 0`）+ `verify` 命令全过。缺一条就回喂重试，到 `maxAttempts` 升级给人。
-6. **出 PR**：push → 开 PR（`--base sit-20261126`）→ **通知调用方** → 人验收 → 合并 → 关单 → 清 worktree 与分支。
+4. **收结果**：只认最后一个 RESULT 块，`status` ∈ `done` / `need_decision` / `blocked` / `failed`；`done` 必带 `pr` / `prUrl` 与 `tests`。监听正常时这一步由服务通知你（正文已带 PR 链接），不必轮询。
+5. **核对（不代劳）**：看 RESULT 与通知——分支已推送、PR 已开（`opencli gitea pr-view <pr> --repo <owner/name>` 可复核）、`tests` 写明自证。缺哪条就回喂重试，到 `maxAttempts` 升级给人；foreman 自己不 push、不开 PR。
+6. **收口**：会话开好 PR → 服务**通知调用方**（结论 + PR 链接 + 自证）→ 人验收 → 合并 → 关单 → 清 worktree 与分支。
 
 ## 通知（异步，只有常驻服务发）
 
@@ -60,7 +60,7 @@ foreman pr list   # 看账本
 
 - **基线统一 `sit-20261126`**，不用 `dev`；PR 一律 `--base sit-20261126`。
 - **不 force merge**：冲突就停下、工单留言、交人。
-- **做完只开 PR 等验收**，不自己合（除非用户当场说"合"）。
+- **会话自测通过就 push 并开 PR，等验收**；foreman 不 push、不开 PR、不合并（除非用户当场说"合"）。
 - 一个工单一个会话名 `foreman-<仓库>-<单号>`，同名会续会话、不会重开。
 - 改仓库文件只 `git add` 自己那几个文件，别 `git add -A`（工作区常同时有别人的改动）。
 
