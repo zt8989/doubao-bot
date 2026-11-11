@@ -1,20 +1,10 @@
 {
-  "name": "doubao-bot",
+  "name": "doubao-bot-workspace",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
-  "description": "一个工程三个命令：dws（豆包会话）、foreman（接单编排，见 foreman/）、opencli gitea（适配器源码见 adapters/gitea）",
-  "bin": {
-    "dws": "./bin/dws.mjs"
-  },
-  "engines": {
-    "node": ">=22"
-  },
+  "description": "一个工程三个命令：dws（豆包会话）、foreman（接单编排）、opencli gitea（适配器）",
   "scripts": {
-    "test": "npm run test:dws && npm run test:foreman",
-    "test:dws": "node --test test/*.test.mjs",
-    "test:foreman": "npm --prefix foreman test",
-    "doctor": "node bin/dws.mjs doctor"
-  },
-  "license": "MIT"
+    "test": "npm --prefix dws test && npm --prefix foreman test",
+    "link:adapter": "bash scripts/link-adapter.sh"
+  }
 }

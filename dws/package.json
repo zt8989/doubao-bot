@@ -1,0 +1,18 @@
+{
+  "name": "dws",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "豆包会话 CLI：开会话、发指令、读状态、取对话；不接单、不碰 PR/git 远端",
+  "bin": {
+    "dws": "./bin/dws.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "doctor": "node bin/dws.mjs doctor"
+  },
+  "license": "MIT"
+}

@@ -5,13 +5,13 @@ description: 驱动 dws（豆包会话 CLI，项目 doubao-bot）：给豆包桌
 
 # dws：把豆包会话当成可脚本化执行器
 
-`dws` 不碰豆包云端 API：它从独立 profile 拉起豆包桌面端、开 CDP 调端口，像人一样新建「工作任务」、填输入、读回复。代码在 `/Users/zhouteng/Documents/workspace/doubao-bot`，已 `npm link` 成全局命令。
+`dws` 不碰豆包云端 API：它从独立 profile 拉起豆包桌面端、开 CDP 调端口，像人一样新建「工作任务」、填输入、读回复。代码在 `/Users/zhouteng/Documents/workspace/doubao-bot/dws`（`doubao-bot` 仓库里的 dws 子包），已 `npm link` 成全局命令。
 
 **边界**：dws 只负责驱动豆包（开会话 / 发指令 / 读状态 / 存档）。工单、标签、worktree、验收、push、PR、合并、关单都已从它身上删掉了，要那些流程得在外面自己组合 dws 与别的工具。
 
 ## 动手前先确认这四条
 
-1. `command -v dws`。没有链接时用 `node /Users/zhouteng/Documents/workspace/doubao-bot/bin/dws.mjs <子命令>`，行为一致。
+1. `command -v dws`。没有链接时用 `node /Users/zhouteng/Documents/workspace/doubao-bot/dws/bin/dws.mjs <子命令>`，行为一致。
 2. **豆包是单实例**：用户自己开着的豆包会占住单实例，必须让用户 **⌘Q 退出**后才能跑会话类命令。报 `app_busy` /「豆包正在用你自己的 profile 运行」时停下来说明并等用户退出，不要换 profile、不要反复重试。
 3. 配置查找顺序：`./config.json` → `~/.dws/config.json`；要指定就用 `-c <文件>` 或 `--config <文件>`（两者等价）。全局配置里 `stateFile` 应写 `"state.json"`（写 `.dws/state.json` 会套成 `~/.dws/.dws/`）。
 4. Node ≥ 22（用到内置 `WebSocket` / `fetch`）。
@@ -59,7 +59,7 @@ dws send review "接着改，先跑一下单测"
 
 ## 状态文件在哪
 
-- 项目：`/Users/zhouteng/Documents/workspace/doubao-bot`（`bin/dws.mjs`、`src/{cdp,doubao,sessions,config,util}.mjs`、`test/`）
+- 项目：`/Users/zhouteng/Documents/workspace/doubao-bot/dws`（`bin/dws.mjs`、`src/{cdp,doubao,sessions,config,util}.mjs`、`test/`）
 - 配置：`./config.json` → `~/.dws/config.json`
 - 状态：`<stateFile>`（默认 `~/.dws/state.json`，键为 `version` / `sessions` / `active`）
 - 归档 `~/.dws/archives/`
