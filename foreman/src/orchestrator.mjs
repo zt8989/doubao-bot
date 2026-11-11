@@ -17,6 +17,35 @@ import { doneComment, holdComment, issueBranch, kickoff, parseResult, prBody, re
 
 export const issueKey = (repo, n) => `${repo}#${n}`
 
+// 收口要通知哪些状态；和 state.json 里的状态名一致。
+export const NOTIFY_EVENTS = ["done", "pr-open", "needs-human", "blocked", "escalated", "failed"]
+
+// 通知目标：显式配了 session 就用它（id 或侧边栏标题都行）；写 auto 时取调用方会话 id。
+export function notifyTarget(notify = {}, env = process.env) {
+  if (!notify || notify.enabled === false) return ""
+  const s = String(notify.session ?? "auto").trim()
+  if (s && s !== "auto") return s
+  return String(env.MCP_VM_CONVERSATION_ID ?? "").trim()
+}
+
+// 这一条结果值不值得通知。
+export function shouldNotify(notify = {}, state = "") {
+  if (!notify || notify.enabled === false) return false
+  const events = Array.isArray(notify.events) ? notify.events : NOTIFY_EVENTS
+  return events.includes(String(state ?? ""))
+}
+
+// 通知正文：一眼能看出哪条单、什么结果、有没有 PR。
+export function notifyText(issue = {}, out = {}) {
+  const title = String(issue.title ?? "").trim()
+  const head = `${issue.repo ? `${issue.repo} ` : ""}#${issue.number}${title ? ` ${title}` : ""}`
+  const lines = [`【foreman】${head}`, `状态：${out.state ?? "unknown"}`]
+  if (out.branch) lines.push(`分支：${out.branch}`)
+  if (out.pr) lines.push(`PR：#${out.pr}${out.prUrl ? ` ${out.prUrl}` : ""}`)
+  if (out.reason) lines.push(`原因：${String(out.reason).slice(0, 200)}`)
+  return lines.join("\n")
+}
+
 // 这些状态说明这条单已经被处理过一遍，不再自动捞。
 export const CLOSED_STATES = new Set(["done", "needs-human", "blocked", "escalated", "pr-open"])
 
@@ -68,17 +97,44 @@ export async function runRound(ctx) {
     for (const it of pool) {
       if (count >= cfg.perRepoPerRound) break
       count++
+      let out
       try {
-        handled.push(await handleIssue(ctx, repoCfg, it))
+        out = await handleIssue(ctx, repoCfg, it)
       } catch (e) {
         if (e.code === "app_unavailable") throw e
         log(`${repoCfg.repo} #${it.number} 处理失败：${e.message}`)
-        handled.push({ repo: repoCfg.repo, number: it.number, state: "failed", reason: e.message })
+        out = { repo: repoCfg.repo, number: it.number, state: "failed", reason: e.message }
       }
+      handled.push(out)
+      await notifyCaller(ctx, repoCfg, it, out)
     }
     if (ctx.once) break
   }
   return handled
+}
+
+// 通知调用方：一条单有结果就用 dws send 回给发起这次接单的会话（默认 MCP_VM_CONVERSATION_ID）。
+// 通知失败只记日志，不影响这一轮结论。
+async function notifyCaller(ctx, repoCfg, issue, out) {
+  const { cfg, dws, log } = ctx
+  if (ctx.dryRun) return
+  if (!shouldNotify(cfg.notify, out.state)) return
+  const target = notifyTarget(cfg.notify)
+  if (!target) {
+    log("notify：没配 session，当前也没有 MCP_VM_CONVERSATION_ID，跳过通知")
+    return
+  }
+  const worker = ctx.book.session(`foreman-${repoCfg.name}-${issue.number}`)
+  if (worker?.convId && String(worker.convId) === target) {
+    log(`notify：调用方会话就是执行会话（${target}），跳过，免得自己通知自己`)
+    return
+  }
+  try {
+    await dws.notify(target, notifyText({ ...issue, repo: repoCfg.repo }, out))
+    log(`notify：${issueKey(repoCfg.repo, issue.number)} 的结果已回给 ${target}`)
+  } catch (e) {
+    log(`notify：通知 ${target} 失败（${e.message}），不影响本轮`)
+  }
 }
 
 export async function handleIssue(ctx, repoCfg, summary) {
@@ -207,7 +263,14 @@ export async function handleIssue(ctx, repoCfg, summary) {
         finishedAt: nowIso(),
       })
       log(`${key}：${pub.state}${pub.pr?.number ? `，PR #${pub.pr.number}` : ""}`)
-      return { repo: repoCfg.repo, number: issue.number, state: pub.state, branch, pr: pub.pr?.number ?? null }
+      return {
+        repo: repoCfg.repo,
+        number: issue.number,
+        state: pub.state,
+        branch,
+        pr: pub.pr?.number ?? null,
+        prUrl: pub.pr?.url ?? "",
+      }
     }
 
     if (result.status === "need_decision" || result.status === "blocked") {

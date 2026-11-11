@@ -12,7 +12,7 @@ import { git, branchExists } from "../src/gitx.mjs"
 const HELP = `foreman — 接单编排（opencli + dws + herdr）
 
 用法：
-  foreman run   [--once] [--dry-run] [--repo <名字|owner/name>] [--every <秒>] [-c <配置>]
+  foreman run   [--once] [--dry-run] [--repo <名字|owner/name>] [--every <秒>] [--notify <会话id|标题>] [--no-notify] [-c <配置>]
   foreman tasks [--json]
   foreman retry <仓库名|owner/name> <工单号> [-c <配置>]
   foreman doctor [-c <配置>] [--start]
@@ -61,6 +61,9 @@ function makeCtx(cfg, extra = {}) {
 async function cmdRun(pos, flags) {
   const cfg = loadConfig(flags.config)
   if (!cfg.repos.length) throw new Error("配置里没有 repos，先写一条：{\"repo\":\"owner/name\",\"dir\":\"~/Documents/workspace/<repo>\"}")
+  // 命令行覆盖配置：--notify <会话id|标题> / --no-notify
+  if (flags.notify && flags.notify !== true) cfg.notify = { ...cfg.notify, session: String(flags.notify) }
+  if (truthy(flags["no-notify"])) cfg.notify = { ...cfg.notify, enabled: false }
   const lockFile = path.join(path.dirname(cfg.stateFile), "run.lock")
 
   const dryRun = truthy(flags["dry-run"])

@@ -77,6 +77,17 @@ export class DwsDriver {
     return r
   }
 
+  // notify：把结果回给调用方会话。不带 handoff（不要往正文里塞接续说明），
+  // 超时也短——通知失败不该把一整轮拖住。
+  async notify(name, text) {
+    const tmp = writeTemp(text)
+    try {
+      return await this.json(["send", name, "--file", tmp, "--handoff", "false"], { timeout: 180000 })
+    } finally {
+      fs.rmSync(tmp, { force: true })
+    }
+  }
+
   async status(name) {
     const r = await this.json(["status", name, "--json"], { timeout: 120000 })
     const list = Array.isArray(r?.status) ? r.status : [r?.status ?? r]

@@ -23,6 +23,14 @@ export const DEFAULTS = {
     order: "oldest",
   },
   merge: { enabled: false, style: "merge", deleteBranch: true },
+  // 收口通知：每条工单处理完，用 dws send 把结果回给「调用方会话」。
+  // session 写 "auto" 就取环境变量 MCP_VM_CONVERSATION_ID（在豆包会话里跑 foreman 时就是那条会话），
+  // 也可以直接写会话 id 或侧边栏标题。
+  notify: {
+    enabled: true,
+    session: "auto",
+    events: ["done", "pr-open", "needs-human", "blocked", "escalated", "failed"],
+  },
   repos: [],
 }
 

@@ -65,6 +65,7 @@ RESULT 协议（只认最后一个块，差一点按失败处理）：
 - **基线统一 `sit-20261126`**（本工程所有分支都从它拉，别用 `dev`）；`repos[].base` 就是它，验收也按 `origin/<base>..HEAD` 算。
 - **`pickup.labelIds` 必须是数字 id**：`opencli gitea search` 的列表结果不回 labels，按名字配会静默捞 0 条；查 id 用 `label-list`（`ready-for-agent` = 5）。配了 `labelIds` 后 foreman 不再拿名字做二次过滤。
 - `merge.enabled` 默认 **false**：只开 PR 不合并，状态停在 `pr-open`——这是预期，不是卡死。
+- **收口通知默认开**：每条单出结论后，用 `dws send` 把结果回给调用方会话（`notify.session: "auto"` 取 `MCP_VM_CONVERSATION_ID`，也可写会话 id/侧边栏标题）；关掉用 `notify.enabled: false` 或 `foreman run --no-notify`，改投用 `--notify <会话id|标题>`。dry-run、`auto` 但环境没 `MCP_VM_CONVERSATION_ID`、目标就是这条单自己的执行会话 `foreman-<仓库>-<N>` 时都不发。
 - `verify` 是逐条 `bash -lc` 跑在 worktree 里的命令；`[]` 表示只查"干净 + 有提交"。
 - `herdr.enabled: false` 或 herdr 报错时退回 `git worktree add`，日志里有原因。
 

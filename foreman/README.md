@@ -37,6 +37,8 @@ push → opencli 开 PR →（merge.enabled 时）合并 + 关单 + 清 worktree
 foreman run --dry-run --once     # 只打印会捞哪条、建在哪、发什么；零副作用
 foreman run --once               # 真跑一轮（每仓库 perRepoPerRound 条）
 foreman run --every 1800         # 常驻，每 1800s 一轮
+foreman run --notify <会话id|标题>  # 这一轮把收口通知改发到指定会话
+foreman run --no-notify          # 这一轮不发通知（连同其它参数一起用）
 foreman tasks                    # 每条工单到哪一步、卡在哪
 foreman retry win-ai-harness 255 # 人工处理完，放回队列（attempts 清零）
 foreman doctor                   # 自检：dws/opencli/herdr/仓库基线
@@ -66,6 +68,11 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
     "order": "oldest"
   },
   "merge": { "enabled": false, "style": "merge", "deleteBranch": true },
+  "notify": {
+    "enabled": true,
+    "session": "auto",
+    "events": ["done", "pr-open", "needs-human", "blocked", "escalated", "failed"]
+  },
   "repos": [
     {
       "name": "win-ai-harness",
@@ -85,6 +92,15 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
   按名字配会静默捞 0 条；`label-list` 能查名→id（`ready-for-agent` 当前是 5）。
 - 配了 `labelIds` 后不再拿名字做二次过滤（列表里本来就没有 labels）。
 - `merge.enabled` 默认 **false**：只开 PR 不合并，状态停在 `pr-open`。
+- **收口通知默认开**：每条工单出结论后，foreman 用 `dws send` 把「哪条单 + 状态 + 分支 + PR 链接」回给**调用方会话**——
+  即发起这轮 `foreman run` 的那条豆包会话（`session: "auto"` 时取环境变量 `MCP_VM_CONVERSATION_ID`）。
+  也可以把 `session` 写成别的会话 id 或侧边栏标题。
+- **怎么关**：配置里 `notify.enabled: false`，或者本轮跑 `foreman run --no-notify`；
+  只想临时改回给另一条会话，用 `foreman run --notify <会话id|标题>`。
+- **什么时候不发**：`--dry-run`；状态不在 `notify.events` 里（默认只发上面那 6 个，`working`/`planned` 不发）；
+  `session: "auto"` 但当前环境没有 `MCP_VM_CONVERSATION_ID`（跳过并在 `run.log` 里记一行，不乱发）；
+  目标会话正好是这条单自己的执行会话 `foreman-<仓库>-<单号>`（免得自己通知自己）。
+  通知本身失败也只写 `run.log`，不影响这一轮的结论和退出码。
 - `verify` 是逐条 `bash -lc` 跑在工作区里的验收命令；空数组表示只查"干净 + 有提交"。
 - `herdr.enabled: false` 时退回原生 `git worktree add`（herdr 报错时也会自动退回，并写日志）。
 
