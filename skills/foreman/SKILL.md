@@ -1,6 +1,6 @@
 ---
 name: foreman
-description: 接单编排 CLI（项目 foreman，命令 foreman）：用 opencli 读内网 Gitea 的 ready-for-agent 工单、用 herdr 从 origin/<base> 开 worktree、用 dws 把活派给豆包会话，等会话交 RESULT 后验收、push、开 PR（可选合并关单）。当用户说自动接单、接工单、把工单派给豆包、批量跑 Gitea 工单、看某条工单处理到哪、把卡住的单放回队列，或提到 foreman 时报 app_busy / locked / pr-open 时使用。dws 只管豆包会话、opencli 只管 Gitea、herdr 只管 worktree，串联是 foreman 的事。收口通知（notify：会话出结论后回给调用方）与整条链路的验收口径见 workflow。
+description: 接单编排 CLI（项目 foreman，命令 foreman）：用 opencli 读内网 Gitea 的 ready-for-agent 工单、用 herdr 从 origin/<base> 开 worktree、用 dws 把活派给豆包会话，等会话交 RESULT 后验收、push、开 PR（可选合并关单）。当用户说自动接单、接工单、把工单派给豆包、批量跑 Gitea 工单、看某条工单处理到哪、把卡住的单放回队列，或提到 foreman 时报 app_busy / locked / pr-open 时使用。dws 只管豆包会话、opencli 只管 Gitea、herdr 只管 worktree，串联是 foreman 的事。它带一个常驻服务：CLI 每次启动先跟服务握手，会话由服务异步监听，跑完再回通知给调用方（只有异步一条路径，没有同步发送）。整条链路的验收口径见 workflow。提到 foreman 但报「服务没起 / service_down / 监听没收到」也用本技能。
 ---
 
 # foreman：接单编排
@@ -14,6 +14,24 @@ description: 接单编排 CLI（项目 foreman，命令 foreman）：用 opencli
 | `opencli gitea` | 工单/PR 读写（复用 Chrome 登录态） | Chrome 里已登录 Gitea；每条命令 20–40s |
 | `herdr` | 建 git worktree（顺带在 herdr 里挂工作区） | `herdr` server 在跑（`herdr status`） |
 | `dws` | 豆包会话（开会话/续说/读状态/读对话） | 豆包**单实例**，用户自己开着时要先 ⌘Q |
+
+## 常驻服务（异步监听）
+
+foreman 是「CLI + 一个常驻服务」：CLI 只负责调度与派活，**谁跑完了、结果是什么、要通知谁，全由服务在后台异步完成**。没有同步通知的第二条路。
+
+```bash
+foreman serve                    # 起服务（前台；也可放后台）
+foreman ping                     # 服务在不在、pid / 版本 / uptime / 在听几条
+foreman watch add <会话id|标题>    # 登记要监听的会话（派活时通常自动登记）
+foreman watch list               # 现在在听哪些
+foreman watch remove <会话id>
+```
+
+- **CLI 启动即检查服务**：任意子命令起来先握手；服务没起就自动拉起并等握手成功，起不来就非零退出并给可执行的修复提示（不要手动猜）。
+- 逃生开关 `--no-service`：跳过握手与自动拉起，只跑这一条命令（测试与排障用）。
+- 服务文件都在 `~/.foreman/` 下：Unix socket（本机 IPC，权限仅本人可连）、pid 文件、`serve.log`。重复启动只返回「已在运行」，不会起第二个。
+- 监听节奏沿用 `pollSeconds`（默认 20s）：对登记会话跑 `dws status`，判定「这一轮真的跑完了」要同时满足「状态已离开 running」与「回复指纹变了」；同一个 `(会话, 指纹)` 只通知一次，去重记录落盘，服务重启不重发。
+- 通知含仓库、单号、结论类别、PR 链接；目标取 `notify.session`（`auto` → `MCP_VM_CONVERSATION_ID`）。目标就是被监听会话自己、没配目标也没环境变量、dry-run 时都不发；发送失败只写日志，不影响继续监听。
 
 ## 动手前
 
@@ -40,7 +58,7 @@ foreman doctor [--start]              # --start 才真的连豆包窗口读状�
 1. `opencli gitea search --label <id>` 拉 open 工单，按 `pickup` 过滤（排除人工标签、已处理的、到重试上限的），最老先接。
 2. `herdr worktree create --cwd <repo> --branch fix/issue-N --base origin/<base> --path ~/.foreman/worktrees/<仓库>/fix-issue-N --no-focus`。
 3. `dws open --name foreman-<仓库>-<N>` 发 kickoff：把工单正文、worktree、分支、边界（**只改代码 + 本地提交，不 push/不开 PR**）、`<RESULT>` 协议一次写进去。
-4. 等回复跑完（`dws status` 轮询 + `dws info` 读最后一条），从里面取最后一个 `<RESULT>` 块。
+4. 等回复跑完（服务监听 + `dws status` / `dws info` 读最后一条），从里面取最后一个 `<RESULT>` 块。**验收以会话自交的 RESULT 与其自证为准（它跑了什么、输出是什么），调用方不要为了「再确认一遍」重跑单测**——重复验证只会把一轮拖成两轮；只有确实怀疑结果时才跑，并先说明为什么要跑。
 5. `done` → 验收三条（工作区干净、`origin/<base>..HEAD > 0`、`verify` 命令全过）→ `git push` → `opencli gitea pr` →（`merge.enabled` 时）`pr-merge` + `close` + 清 worktree。
 6. `need_decision` / `blocked` / 连续失败 → 回帖工单 + 打标签（`ready-for-human` / `agent-blocked`），**worktree 留着**。
 
@@ -65,7 +83,7 @@ RESULT 协议（只认最后一个块，差一点按失败处理）：
 - **基线统一 `sit-20261126`**（本工程所有分支都从它拉，别用 `dev`）；`repos[].base` 就是它，验收也按 `origin/<base>..HEAD` 算。
 - **`pickup.labelIds` 必须是数字 id**：`opencli gitea search` 的列表结果不回 labels，按名字配会静默捞 0 条；查 id 用 `label-list`（`ready-for-agent` = 5）。配了 `labelIds` 后 foreman 不再拿名字做二次过滤。
 - `merge.enabled` 默认 **false**：只开 PR 不合并，状态停在 `pr-open`——这是预期，不是卡死。
-- **收口通知默认开**：每条单出结论后，用 `dws send` 把结果回给调用方会话（`notify.session: "auto"` 取 `MCP_VM_CONVERSATION_ID`，也可写会话 id/侧边栏标题）；关掉用 `notify.enabled: false` 或 `foreman run --no-notify`，改投用 `--notify <会话id|标题>`。dry-run、`auto` 但环境没 `MCP_VM_CONVERSATION_ID`、目标就是这条单自己的执行会话 `foreman-<仓库>-<N>` 时都不发。
+- **收口通知默认开、且只有异步这一条**：会话出结论后由**服务**用 `dws send` 回给调用方会话（`notify.session: "auto"` 取 `MCP_VM_CONVERSATION_ID`，也可写会话 id/侧边栏标题）。`notify.enabled: false` 或 `--no-notify` 表示这一轮派出去的会话**不登记给服务监听、也不发通知**（它是「不通知」，不是「换个方式同步发」）；`--notify <会话id|标题>` 只改投递目标。dry-run、`auto` 但环境没 `MCP_VM_CONVERSATION_ID`、目标就是这条单自己的执行会话 `foreman-<仓库>-<N>` 时都不发。服务不在时通知会丢：先 `foreman watch list` 看登记还在不在，必要时重新登记。
 - `verify` 是逐条 `bash -lc` 跑在 worktree 里的命令；`[]` 表示只查"干净 + 有提交"。
 - `herdr.enabled: false` 或 herdr 报错时退回 `git worktree add`，日志里有原因。
 
@@ -81,6 +99,8 @@ RESULT 协议（只认最后一个块，差一点按失败处理）：
 | 验收失败「分支上没有新提交」 | 会话只看了没改，或改在别的分支 | 同上；必要时进 worktree 手动看一眼 |
 | `opencli ... 失败" | Gitea 登录态 / 权限 | 让用户在 Chrome 登录 Gitea；401 别循环重跑 |
 | herdr 建不动 | server 没起 / 仓库没信任 | `herdr status`；foreman 会退回 `git worktree add` 并写日志 |
+| 报 `service_down` /「服务没起」 | 常驻服务没跑或 socket 连不上 | `foreman ping`；不行就 `foreman serve`，看 `~/.foreman/serve.log`；急着单跑一条用 `--no-service` |
+| 会话跑完却没收到通知 | 服务不在、会话没登记、或没配目标会话 | `foreman watch list` 看有没有它；补 `foreman watch add <会话id>`；再查 `serve.log` 里的发送失败原因 |
 
 收尾：`escalated` 的单、以及被停掉的轮次留下的 worktree，用 `git -C <repo> worktree list` 确认后在仓库里
 `git worktree remove --force <path>`、需要时 `git branch -D fix/issue-N`。
