@@ -1,0 +1,8 @@
+{
+  "stateFile": "state.json",
+  "mode": "local",
+  "model": "auto",
+  "pollSeconds": 4,
+  "idleMinutes": 6,
+  "timeoutMinutes": 45
+}

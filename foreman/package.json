@@ -1,0 +1,15 @@
+{
+  "name": "foreman",
+  "version": "0.1.0",
+  "description": "接单编排：opencli 读工单、herdr 开 worktree、dws 跑豆包会话；验收通过后 push 并开 PR",
+  "type": "module",
+  "bin": {
+    "foreman": "bin/foreman.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
