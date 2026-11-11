@@ -1,4 +1,5 @@
 // 状态账本：~/.foreman/state.json。只记编排需要的东西（工单到哪一步、哪个会话、哪条分支）。
+// 新增顶层键 watch（显式监听）与 notified（已通知指纹），不动 issues/sessions 老记录。
 import fs from "node:fs"
 import path from "node:path"
 import { nowIso } from "./util.mjs"
@@ -15,6 +16,16 @@ export class Book {
 
   get sessions() {
     return this.data.sessions ?? (this.data.sessions = {})
+  }
+
+  // 显式监听列表：[{ target, name, issueKey, repo, number, notifyTo, addedAt }]
+  get watch() {
+    return this.data.watch ?? (this.data.watch = [])
+  }
+
+  // 已通知去重表：{ "<target>": { fingerprint, at, phase, chars } }
+  get notified() {
+    return this.data.notified ?? (this.data.notified = {})
   }
 
   issue(key) {
@@ -41,6 +52,51 @@ export class Book {
 
   names() {
     return Object.keys(this.sessions)
+  }
+
+  // 按 target upsert 一条显式监听。
+  setWatch(entry) {
+    const list = this.watch
+    const i = list.findIndex((w) => String(w.target) === String(entry.target))
+    const merged = {
+      target: String(entry.target),
+      name: String(entry.name ?? entry.target),
+      issueKey: entry.issueKey ?? null,
+      repo: entry.repo ?? "",
+      number: entry.number ?? null,
+      notifyTo: entry.notifyTo ?? "",
+      addedAt: nowIso(),
+    }
+    if (i >= 0) {
+      // 保留旧的 addedAt，其余字段以本次为准。
+      merged.addedAt = list[i].addedAt ?? merged.addedAt
+      list[i] = merged
+    } else {
+      list.push(merged)
+    }
+    this.save()
+    return merged
+  }
+
+  delWatch(target) {
+    const list = this.watch
+    const i = list.findIndex((w) => String(w.target) === String(target))
+    if (i < 0) return false
+    list.splice(i, 1)
+    this.save()
+    return true
+  }
+
+  // 记录 (target, 指纹) 已通知，重启后不再重发。
+  markNotified(target, fingerprint, extra = {}) {
+    this.notified[String(target)] = {
+      fingerprint,
+      at: nowIso(),
+      phase: extra.phase ?? "",
+      chars: extra.chars ?? 0,
+    }
+    this.save()
+    return this.notified[String(target)]
   }
 
   save() {

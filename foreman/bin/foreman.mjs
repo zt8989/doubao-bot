@@ -1,35 +1,44 @@
 #!/usr/bin/env node
-// foreman：接单编排。opencli 管 Gitea、herdr 管 worktree、dws 管豆包会话。
+// foreman：接单编排（opencli + dws + herdr）+ 常驻服务（会话监听与异步通知）。
 import fs from "node:fs"
 import path from "node:path"
+import { fileURLToPath } from "node:url"
+import { spawn } from "node:child_process"
 import { expandHome, parseArgs, sleep, truthy } from "../src/util.mjs"
 import { loadConfig } from "../src/config.mjs"
 import { Book } from "../src/book.mjs"
 import { DwsDriver } from "../src/dwsdrv.mjs"
 import { acquireLock, releaseLock, runRound, issueKey } from "../src/orchestrator.mjs"
 import { git, branchExists } from "../src/gitx.mjs"
+import { ensureService, callRaw, ServiceError } from "../src/svclient.mjs"
+import { startServer, pingOnce } from "../src/service.mjs"
 
-const HELP = `foreman — 接单编排（opencli + dws + herdr）
+const HELP = `foreman — 接单编排 + 常驻服务
 
 用法：
+  foreman serve [--daemon] [-c <配置>]
+  foreman ping [-c <配置>] [--no-service]
+  foreman status [-c <配置>] [--no-service]
+  foreman watch add <会话id|标题> [--notify <会话id|标题>] [--repo <owner/name> --number <N>] [-c] [--no-service]
+  foreman watch list [-c] [--no-service]
+  foreman watch rm <会话id|标题> [-c] [--no-service]
+  foreman watch poll [-c] [--no-service]
   foreman run   [--once] [--dry-run] [--repo <名字|owner/name>] [--every <秒>] [--notify <会话id|标题>] [--no-notify] [-c <配置>]
   foreman tasks [--json]
   foreman retry <仓库名|owner/name> <工单号> [-c <配置>]
   foreman doctor [-c <配置>] [--start]
   foreman help
 
-run       跑一轮（--once 只跑一轮；--dry-run 只打印计划，零副作用）
-tasks     看每条工单处理到哪一步
-retry     人工处理完，把工单放回队列（attempts 清零）
-doctor    自检：dws / opencli / herdr / 各仓库与基线（--start 才真的拉起豆包）
+常驻服务：
+  serve       前台起服务；--daemon 后台起，父进程等握手成功后返回
+  ping/status 问服务状态
+  watch add   登记一条监听（target 是会话 id 或侧边栏标题）
+  watch list/rm/poll   看登记 / 删一条 / 立刻跑一轮（取证排障用）
+  --no-service  跳过自动握手与拉起（逃生口）
 
-每轮流程：对每条 ready-for-agent 的工单——
-  1. opencli 读工单；
-  2. herdr 从 origin/<base> 开 worktree（分支 fix/issue-N）；
-  3. dws 开会话把活派出去，等它交 <RESULT>；
-  4. 验收：工作区干净 + 有提交 + verify 命令全过；
-  5. push → opencli 开 PR；（配置 merge.enabled 时）合并并关单；
-  6. 卡住/要人拍板的，回帖工单 + 打标签，工作区留着等 retry。
+run 现在只派活：建 worktree → dws 开会话派活 → 记账 → 登记监听 → 返回 dispatched。
+不等回复、不验收、不 push/PR、不发通知；跑完由服务异步通知。
+--notify <id|标题>：本轮派出去的会话通知给该目标；--no-notify：本轮不登记监听。
 `
 
 const out = (o) => {
@@ -58,12 +67,123 @@ function makeCtx(cfg, extra = {}) {
   }
 }
 
+// ---- 服务命令 ----
+
+function spawnDetached(cfg) {
+  const here = path.dirname(fileURLToPath(import.meta.url))
+  const bin = path.resolve(here, "foreman.mjs")
+  fs.mkdirSync(path.dirname(cfg.service.logFile), { recursive: true })
+  const fd = fs.openSync(cfg.service.logFile, "a")
+  const args = ["serve"]
+  if (cfg.configPath) args.push("-c", cfg.configPath)
+  const child = spawn(process.execPath, [bin, ...args], {
+    detached: true,
+    stdio: ["ignore", fd, fd],
+  })
+  child.unref()
+  return child
+}
+
+async function cmdServe(pos, flags) {
+  const cfg = loadConfig(flags.config)
+  const log = logTo(cfg.service.logFile)
+
+  // 已经有活的服务在跑？直接报告 already-running。
+  try {
+    const r = await pingOnce(cfg.service.socket, 300)
+    out({ ok: true, skipped: "already-running", pid: r.pid, info: r })
+    return
+  } catch {}
+
+  if (truthy(flags.daemon)) {
+    const child = spawnDetached(cfg)
+    const deadline = Date.now() + (cfg.service.handshakeTimeoutMs ?? 5000)
+    while (Date.now() < deadline) {
+      await sleep(200)
+      try {
+        const r = await pingOnce(cfg.service.socket, 200)
+        out({ ok: true, started: true, pid: child.pid, info: r })
+        return
+      } catch {}
+    }
+    process.stderr.write("✗ foreman 服务没起来：握手超时\n")
+    process.stderr.write(`  手动起看错误：foreman serve（前台）\n  看日志：cat ${cfg.service.logFile}\n`)
+    process.exit(1)
+  }
+
+  // 前台：起 socket 服务，跑轮询，等信号退出。
+  const book = new Book(cfg.stateFile)
+  const dws = new DwsDriver({ bin: cfg.dws?.bin ?? "dws", mode: cfg.dws?.mode, model: cfg.dws?.model, log })
+  const { close } = await startServer({ cfg, book, dws, log })
+  log(`foreman 服务已起：pid=${process.pid} socket=${cfg.service.socket} pidfile=${cfg.service.pidFile}`)
+  let stopping = false
+  const onSig = async (sig) => {
+    if (stopping) return
+    stopping = true
+    log(`收到 ${sig}，关闭服务`)
+    try { await close() } catch {}
+    process.exit(0)
+  }
+  process.on("SIGTERM", () => onSig("SIGTERM"))
+  process.on("SIGINT", () => onSig("SIGINT"))
+}
+
+async function cmdPing(pos, flags) {
+  const cfg = loadConfig(flags.config)
+  const r = await callRaw(cfg.service.socket, { id: "cli", cmd: "ping" }, 3000)
+  out({ ok: true, ...r })
+}
+
+async function cmdStatus(pos, flags) {
+  const cfg = loadConfig(flags.config)
+  const r = await callRaw(cfg.service.socket, { id: "cli", cmd: "status" }, 3000)
+  out({ ok: true, ...r })
+}
+
+async function cmdWatch(pos, flags) {
+  const cfg = loadConfig(flags.config)
+  const sub = pos.shift()
+  if (!sub) throw new Error("用法：foreman watch add|list|rm|poll ...")
+  if (sub === "list") {
+    const r = await callRaw(cfg.service.socket, { id: "cli", cmd: "watch list" }, 3000)
+    return out({ ok: true, ...r })
+  }
+  if (sub === "poll") {
+    const r = await callRaw(cfg.service.socket, { id: "cli", cmd: "poll" }, 60000)
+    return out({ ok: true, ...r })
+  }
+  if (sub === "add") {
+    const target = pos.shift()
+    if (!target) throw new Error("用法：foreman watch add <会话id|标题> [--notify <目标>] [--repo <owner/name> --number <N>]")
+    const req = {
+      id: "cli",
+      cmd: "watch add",
+      target,
+      notifyTo: flags.notify && flags.notify !== true ? String(flags.notify) : "",
+      repo: flags.repo && flags.repo !== true ? String(flags.repo) : "",
+      number: flags.number && flags.number !== true ? Number(flags.number) : null,
+    }
+    const r = await callRaw(cfg.service.socket, req, 3000)
+    return out({ ok: true, ...r })
+  }
+  if (sub === "rm" || sub === "remove") {
+    const target = pos.shift()
+    if (!target) throw new Error("用法：foreman watch rm <会话id|标题>")
+    const r = await callRaw(cfg.service.socket, { id: "cli", cmd: "watch remove", target }, 3000)
+    return out({ ok: true, ...r })
+  }
+  throw new Error(`未知 watch 子命令：${sub}（add|list|rm|poll）`)
+}
+
+
+// ---- 原有命令 ----
+
 async function cmdRun(pos, flags) {
   const cfg = loadConfig(flags.config)
   if (!cfg.repos.length) throw new Error("配置里没有 repos，先写一条：{\"repo\":\"owner/name\",\"dir\":\"~/Documents/workspace/<repo>\"}")
-  // 命令行覆盖配置：--notify <会话id|标题> / --no-notify
-  if (flags.notify && flags.notify !== true) cfg.notify = { ...cfg.notify, session: String(flags.notify) }
-  if (truthy(flags["no-notify"])) cfg.notify = { ...cfg.notify, enabled: false }
+  // --notify <目标> / --no-notify 只管本轮派出去的会话要不要登记监听。
+  const notifyTo = flags.notify && flags.notify !== true ? String(flags.notify) : ""
+  const noNotify = truthy(flags["no-notify"])
   const lockFile = path.join(path.dirname(cfg.stateFile), "run.lock")
 
   const dryRun = truthy(flags["dry-run"])
@@ -71,6 +191,8 @@ async function cmdRun(pos, flags) {
     dryRun,
     once: truthy(flags.once, true),
     only: flags.repo && flags.repo !== true ? String(flags.repo) : "",
+    notifyTo,
+    noNotify,
   })
 
   if (!dryRun) {
@@ -96,7 +218,7 @@ async function cmdRun(pos, flags) {
     out({
       ok: true,
       dryRun,
-      handled: handled.map((h) => ({ repo: h.repo, number: h.number, state: h.state, pr: h.pr ?? null })),
+      handled: handled.map((h) => ({ repo: h.repo, number: h.number, state: h.state, branch: h.branch ?? null, convId: h.convId ?? null })),
       summary: summarize(handled),
     })
   } catch (e) {
@@ -210,7 +332,32 @@ async function main() {
   if (!argv.length || ["-h", "--help", "help"].includes(argv[0])) return process.stdout.write(HELP)
   const { pos, flags } = parseArgs(argv, { c: "config" })
   const cmd = pos.shift()
+
+  // 除 serve / help 外，所有子命令启动先握手（--no-service 或 cfg.service.enabled===false 时跳过）。
+  if (!["serve", "help"].includes(cmd)) {
+    const cfg = loadConfig(flags.config)
+    const noService = truthy(flags["no-service"])
+    if (!noService && cfg.service?.enabled !== false) {
+      try {
+        await ensureService({ cfg, noService: false })
+      } catch (e) {
+        const msg = e instanceof ServiceError ? e.message : String(e.message || e)
+        process.stderr.write(`✗ foreman 服务没起来：${msg}\n`)
+        process.stderr.write(`  手动起：foreman serve\n  看日志：cat ${cfg.service.logFile}\n`)
+        process.exit(1)
+      }
+    }
+  }
+
   switch (cmd) {
+    case "serve":
+      return cmdServe(pos, flags)
+    case "ping":
+      return cmdPing(pos, flags)
+    case "status":
+      return cmdStatus(pos, flags)
+    case "watch":
+      return cmdWatch(pos, flags)
     case "run":
       return cmdRun(pos, flags)
     case "tasks":

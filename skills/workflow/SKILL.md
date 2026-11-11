@@ -26,9 +26,9 @@ description: 端到端接单工作流（opencli + herdr + dws + foreman）：把
 5. **验收三条**：工作区干净 + 分支有提交（`origin/<base>..HEAD ≠ 0`）+ `verify` 命令全过。缺一条就回喂重试，到 `maxAttempts` 升级给人。
 6. **出 PR**：push → 开 PR（`--base sit-20261126`）→ **通知调用方** → 人验收 → 合并 → 关单 → 清 worktree 与分支。
 
-## 收口通知（foreman 的新参数）
+## 通知（异步，只有常驻服务发）
 
-一条单出结论后，foreman 通过 `dws send` 把结果回给**发起这次接单的会话**：
+run 派完活就返回，不发通知。会话跑完后，由常驻服务轮询 `dws status` 判定，再用 `dws send` 把结论回给登记的通知目标：
 
 ```json
 "notify": {
@@ -39,9 +39,10 @@ description: 端到端接单工作流（opencli + herdr + dws + foreman）：把
 ```
 
 - `session` 写 `auto` → 取环境变量 `MCP_VM_CONVERSATION_ID`（在豆包会话里跑 foreman 时就是那条会话）；也可以写会话 id 或侧边栏标题。
-- 命令行一次性覆盖：`--notify <会话id|标题>`，要关就 `--no-notify`。
-- 三种情况**不发**：dry-run、目标会话就是执行会话本身（防自己通知自己）、没配目标也没有环境变量。
-- 发走 `dws send <目标> --file … --handoff false`，超时 180s；通知失败只写 `run.log`，不影响这一轮结论。
+- `--notify <会话id|标题>` 只表示：这一轮派出去的会话，登记监听时通知目标写谁；`--no-notify` 表示这一轮**不登记监听**，因此不会有通知。
+- 三种情况**不发**：`notify.enabled: false`、目标会话就是被监听会话自己（防自己通知自己）、没配目标也没有环境变量；结论不在 `notify.events` 白名单也不发（显式盯的 `session-done` 例外）。
+- 正文含仓库、单号、结论类别、PR 链接（有则带）；发送失败只写 `service.log`、计 `dwsErrors`，不打断轮询。
+- **服务没在跑时通知会丢**（异步的代价，不是 bug）：`foreman watch list` 看登记在不在 → `foreman watch poll` 立刻重放一轮（已跑完、未通知的会补发）→ `foreman status` 看 `lastPollAt` / `pollCount` / `dwsErrors`。
 
 ## 铁律
 
@@ -61,6 +62,7 @@ description: 端到端接单工作流（opencli + herdr + dws + foreman）：把
 | 卡在 `pr-open` | `merge.enabled=false` | 正常，等人验收；要自动合就改配置 |
 | worktree 已存在 / `already checked out` | 上次没清干净 | `git worktree list` 确认不是在跑的工单，再 `remove` + `branch -D` |
 | `skipped: locked` | 另一轮还在跑 | 看 `~/.foreman/run.lock` 的 pid 探活；进程死了下轮自动接管 |
+| 服务未启动 / 监听丢事件 | 常驻服务没跑或中途挂了，跑完的会话没人通知 | `foreman ping` 确认；不行就 `foreman serve`；`foreman watch list` 看登记在不在，`foreman watch poll` 补一轮，`foreman status` 看 `lastPollAt` / `pollCount` / `dwsErrors` |
 
 ## 状态在哪
 

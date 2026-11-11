@@ -31,6 +31,16 @@ export const DEFAULTS = {
     session: "auto",
     events: ["done", "pr-open", "needs-human", "blocked", "escalated", "failed"],
   },
+  // 常驻服务：unix socket 行式 JSON，按 pollSeconds 轮询 dws status，跑完才异步通知。
+  // socket/pidFile/logFile 的相对路径解析到配置文件同目录；~ 展开。
+  service: {
+    enabled: true,
+    socket: "~/.foreman/foreman.sock",
+    pidFile: "~/.foreman/foreman.pid",
+    logFile: "~/.foreman/service.log",
+    handshakeTimeoutMs: 5000,
+    stopTimeoutMs: 5000,
+  },
   repos: [],
 }
 
@@ -92,5 +102,20 @@ export function loadConfig(explicit) {
     path.isAbsolute(cfg.stateFile) ? cfg.stateFile : path.join(path.dirname(file), cfg.stateFile)
   )
   if (!path.isAbsolute(cfg.stateFile)) cfg.stateFile = path.resolve(cfg.stateFile)
+
+  // 服务三路径：同 stateFile 的解析规则（~ 展开；相对路径落到配置文件同目录）。
+  const baseDir = fs.existsSync(file) ? path.dirname(file) : process.cwd()
+  for (const key of ["socket", "pidFile", "logFile"]) {
+    const raw = cfg.service[key]
+    cfg.service[key] = expandHome(
+      path.isAbsolute(raw) ? raw : path.join(baseDir, raw)
+    )
+  }
+  for (const key of ["handshakeTimeoutMs", "stopTimeoutMs"]) {
+    const n = Number(cfg.service[key])
+    if (!Number.isFinite(n) || n <= 0) throw new Error(`配置项 service.${key} 要是正数，现在是：${cfg.service[key]}`)
+    cfg.service[key] = n
+  }
+
   return cfg
 }

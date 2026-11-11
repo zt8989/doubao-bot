@@ -1,9 +1,11 @@
-// 编排：捞单 → herdr 建工作区 → dws 开会话派活 → 读 RESULT → 验收 → push/PR/合并关单。
-// 三个工具各管一段：opencli 管 Gitea，herdr 管 worktree，dws 管豆包会话。
+// 编排：捞单 → herdr 建工作区 → dws 开会话派活 → 记账 → 登记监听 → 返回。
+// run 现在只派活：不等会话回复、不读 RESULT、不验收、不 push/PR、不发通知。
+// 通知由常驻服务按 pollSeconds 轮询 dws status 后异步发出（见 service.mjs）。
+// 三个工具各管一段：gitea 管工单，herdr 管 worktree，dws 管豆包会话。
 import fs from "node:fs"
 import path from "node:path"
 import { exec, nowIso } from "./util.mjs"
-import { closeIssue, commentIssue, createPr, editLabels, listIssues, mergePr, viewIssue } from "./gitea.mjs"
+import * as realGitea from "./gitea.mjs"
 import {
   commitsAhead,
   createWorktree,
@@ -13,11 +15,11 @@ import {
   statusPorcelain,
   worktreeRemove,
 } from "./gitx.mjs"
-import { doneComment, holdComment, issueBranch, kickoff, parseResult, prBody, resume } from "./prompts.mjs"
+import { doneComment, holdComment, issueBranch, kickoff, prBody, resume } from "./prompts.mjs"
 
 export const issueKey = (repo, n) => `${repo}#${n}`
 
-// 收口要通知哪些状态；和 state.json 里的状态名一致。
+// 收口要通知哪些状态；和 state.json 里的状态名一致（服务侧复用）。
 export const NOTIFY_EVENTS = ["done", "pr-open", "needs-human", "blocked", "escalated", "failed"]
 
 // 通知目标：显式配了 session 就用它（id 或侧边栏标题都行）；写 auto 时取调用方会话 id。
@@ -51,8 +53,6 @@ export const CLOSED_STATES = new Set(["done", "needs-human", "blocked", "escalat
 
 export function eligible(issues, repoCfg, cfg, book) {
   const exclude = new Set((cfg.pickup.excludeLabels ?? []).map((s) => String(s).toLowerCase()))
-  // labelIds 已经在服务端过滤过；此时列表里没有 labels 可用，不能再拿名字做二次过滤，
-  // 否则会一条都捞不到。
   const require = cfg.pickup.labelIds?.length ? [] : (cfg.pickup.labels ?? []).map((s) => String(s).toLowerCase())
   const extra = (repoCfg.labels ?? []).map((s) => String(s).toLowerCase())
   return (issues ?? []).filter((it) => {
@@ -74,9 +74,10 @@ export function sortIssues(issues, order = "oldest") {
   return [...issues].sort((a, b) => (order === "newest" ? t(b) - t(a) : t(a) - t(b)))
 }
 
-// 一轮：每个仓库各自捞、各自做，做完一条接一条。
+// 一轮：每个仓库各自捞、各自做，做完一条接一条。只派活，不等结果。
 export async function runRound(ctx) {
   const { cfg, book, log } = ctx
+  const gitea = ctx.gitea ?? realGitea
   const handled = []
   for (const repoCfg of cfg.repos) {
     if (ctx.only && ![repoCfg.name, repoCfg.repo].includes(ctx.only)) continue
@@ -85,7 +86,7 @@ export async function runRound(ctx) {
     const labelQuery = (repoCfg.labelIds ?? cfg.pickup.labelIds ?? []).join(",")
     let list = []
     try {
-      list = await listIssues(repoCfg.repo, { label: labelQuery })
+      list = await gitea.listIssues(repoCfg.repo, { label: labelQuery })
     } catch (e) {
       log(`拉 ${repoCfg.repo} 的工单失败，跳过这个仓库：${e.message}`)
       continue
@@ -102,48 +103,26 @@ export async function runRound(ctx) {
         out = await handleIssue(ctx, repoCfg, it)
       } catch (e) {
         if (e.code === "app_unavailable") throw e
-        log(`${repoCfg.repo} #${it.number} 处理失败：${e.message}`)
+        log(`${repoCfg.repo} #${it.number} 派活失败：${e.message}`)
         out = { repo: repoCfg.repo, number: it.number, state: "failed", reason: e.message }
       }
       handled.push(out)
-      await notifyCaller(ctx, repoCfg, it, out)
     }
     if (ctx.once) break
   }
   return handled
 }
 
-// 通知调用方：一条单有结果就用 dws send 回给发起这次接单的会话（默认 MCP_VM_CONVERSATION_ID）。
-// 通知失败只记日志，不影响这一轮结论。
-async function notifyCaller(ctx, repoCfg, issue, out) {
-  const { cfg, dws, log } = ctx
-  if (ctx.dryRun) return
-  if (!shouldNotify(cfg.notify, out.state)) return
-  const target = notifyTarget(cfg.notify)
-  if (!target) {
-    log("notify：没配 session，当前也没有 MCP_VM_CONVERSATION_ID，跳过通知")
-    return
-  }
-  const worker = ctx.book.session(`foreman-${repoCfg.name}-${issue.number}`)
-  if (worker?.convId && String(worker.convId) === target) {
-    log(`notify：调用方会话就是执行会话（${target}），跳过，免得自己通知自己`)
-    return
-  }
-  try {
-    await dws.notify(target, notifyText({ ...issue, repo: repoCfg.repo }, out))
-    log(`notify：${issueKey(repoCfg.repo, issue.number)} 的结果已回给 ${target}`)
-  } catch (e) {
-    log(`notify：通知 ${target} 失败（${e.message}），不影响本轮`)
-  }
-}
-
+// 派活：读工单 → 建/复用 worktree → 记账 working → dws.open/send 派出去 → 记账会话 → 登记监听。
+// 返回 { repo, number, state:"dispatched", branch, convId }。不 waitFinished、不 info、不验收、不 PR。
 export async function handleIssue(ctx, repoCfg, summary) {
   const { cfg, book, dws, log } = ctx
+  const gitea = ctx.gitea ?? realGitea
   const key = issueKey(repoCfg.repo, summary.number)
   const prev = book.issue(key) ?? {}
   const name = `foreman-${repoCfg.name}-${summary.number}`
 
-  const issue = await viewIssue(repoCfg.repo, summary.number)
+  const issue = await gitea.viewIssue(repoCfg.repo, summary.number)
   issue.number = summary.number
   issue.title ||= summary.title
   issue.url ||= summary.url
@@ -187,109 +166,71 @@ export async function handleIssue(ctx, repoCfg, summary) {
     return { repo: repoCfg.repo, number: issue.number, state: "blocked", reason: "workspace" }
   }
 
-  let attempt = prev.attempts ?? 0
-  let lastFailure = prev.lastFailure ?? ""
+  const attempt = (prev.attempts ?? 0) + 1
+  book.setIssue(key, {
+    state: "working",
+    issue: issue.number,
+    title: issue.title,
+    url: issue.url,
+    branch,
+    worktree: wt.path,
+    attempts: attempt,
+    lastFailure: "",
+  })
 
-  while (attempt < cfg.maxAttempts) {
-    attempt++
-    book.setIssue(key, {
-      state: "working",
-      issue: issue.number,
-      title: issue.title,
-      url: issue.url,
-      branch,
-      worktree: wt.path,
-      attempts: attempt,
-      lastFailure,
-    })
-
-    let text = ""
-    try {
-      if (book.session(name)?.convId) {
-        log(`${key}：第 ${attempt} 次，续会话 ${name}`)
-        await dws.send(name, resume({ issue, attempt, failure: lastFailure }))
-      } else {
-        log(`${key}：第 ${attempt} 次，开新会话 ${name}`)
-        const opened = await dws.open({
-          name,
-          repo: repoCfg.repo,
-          prompt: kickoff({
-            repo: repoCfg.repo,
-            issue,
-            worktree: wt.path,
-            branch,
-            base: repoCfg.base,
-            attempt,
-            lastFailure,
-          }),
-        })
-        book.record(name, { convId: opened.convId ?? "", issue: issue.number })
-      }
-      await dws.waitFinished(name, {
-        timeoutMs: cfg.timeoutMinutes * 60000,
-        pollMs: cfg.pollSeconds * 1000,
-        onTick: (s) => log(`  ${name}：${s?.reply?.streaming ? "还在生成" : s?.reply?.finished ? "已跑完" : "还没开始"}（${s?.reply?.chars ?? 0} 字）`),
-      })
-      const info = await dws.info(name)
-      text = info.lastReply || ""
-      book.record(name, { lastReply: text.slice(-4000) })
-    } catch (e) {
-      if (e.code === "app_unavailable") {
-        book.setIssue(key, { state: "blocked", lastFailure: e.message })
-        throw e
-      }
-      lastFailure = `会话没跑通：${e.message}`
-      book.setIssue(key, { lastFailure })
-      log(`${key}：${lastFailure}`)
-      continue
-    }
-
-    const result = parseResult(text)
-
-    if (result.status === "done") {
-      const check = await verify(ctx, wt.path, repoCfg)
-      if (!check.ok) {
-        lastFailure = check.why
-        book.setIssue(key, { lastFailure })
-        log(`${key}：验收没过 —— ${lastFailure}`)
-        continue
-      }
-      const pub = await publish(ctx, repoCfg, issue, { ...wt, path: wt.path }, result, check, key)
-      book.setIssue(key, {
-        state: pub.state,
-        pr: pub.pr?.number ?? null,
-        prUrl: pub.pr?.url ?? "",
-        lastFailure: "",
-        finishedAt: nowIso(),
-      })
-      log(`${key}：${pub.state}${pub.pr?.number ? `，PR #${pub.pr.number}` : ""}`)
-      return {
+  // 派活：有 convId 就 send 续会话，否则 open 新开。dws 自身会等第一轮回复，那是 dws 的语义。
+  let convId = book.session(name)?.convId ?? ""
+  try {
+    if (convId) {
+      log(`${key}：续会话 ${name}（attempt ${attempt}）`)
+      await dws.send(name, resume({ issue, attempt, failure: prev.lastFailure ?? "" }))
+    } else {
+      log(`${key}：开新会话 ${name}（attempt ${attempt}）`)
+      const opened = await dws.open({
+        name,
         repo: repoCfg.repo,
-        number: issue.number,
-        state: pub.state,
-        branch,
-        pr: pub.pr?.number ?? null,
-        prUrl: pub.pr?.url ?? "",
-      }
+        prompt: kickoff({
+          repo: repoCfg.repo,
+          issue,
+          worktree: wt.path,
+          branch,
+          base: repoCfg.base,
+          attempt,
+          lastFailure: prev.lastFailure ?? "",
+        }),
+      })
+      convId = opened.convId ?? ""
     }
-
-    if (result.status === "need_decision" || result.status === "blocked") {
-      const state = result.status === "need_decision" ? "needs-human" : "blocked"
-      await hold(ctx, repoCfg, issue, result, wt.path, key, state)
-      log(`${key}：${state} —— ${result.question || result.summary || "（没写原因）"}`)
-      return { repo: repoCfg.repo, number: issue.number, state, reason: result.summary || result.question }
+  } catch (e) {
+    if (e.code === "app_unavailable") {
+      book.setIssue(key, { state: "blocked", lastFailure: e.message })
+      throw e
     }
-
-    lastFailure = result.status === "none" ? "会话结束但没有交 RESULT 块" : result.summary || "RESULT 说 failed"
-    book.setIssue(key, { lastFailure })
-    log(`${key}：第 ${attempt} 次没成 —— ${lastFailure}`)
+    book.setIssue(key, { lastFailure: `会话没跑通：${e.message}` })
+    log(`${key}：派活失败 —— ${e.message}`)
+    return { repo: repoCfg.repo, number: issue.number, state: "failed", reason: e.message }
   }
 
-  await hold(ctx, repoCfg, issue, { status: "failed", summary: `试了 ${attempt} 次没成：${lastFailure}` }, wt.path, key, "escalated")
-  return { repo: repoCfg.repo, number: issue.number, state: "escalated", reason: lastFailure }
+  // --no-notify：不登记监听，同时 book.record 标 notify:false，免得被 sessions 自动纳入规则捞回来。
+  const noNotify = !!ctx.noNotify
+  book.record(name, { convId, issue: issue.number, notify: noNotify ? false : true })
+
+  if (!noNotify && convId) {
+    book.setWatch({
+      target: convId,
+      name,
+      issueKey: key,
+      repo: repoCfg.repo,
+      number: issue.number,
+      notifyTo: ctx.notifyTo ?? "",
+    })
+  }
+
+  log(`${key}：已派活 → ${convId || name}${noNotify ? "（不登记监听）" : ""}`)
+  return { repo: repoCfg.repo, number: issue.number, state: "dispatched", branch, convId }
 }
 
-// 验收三条：工作区干净、分支有提交、配置里的 verify 命令全过。
+// 验收三条：工作区干净、分支有提交、配置里的 verify 命令全过。（保留能力，run 不再自动调用）
 export async function verify(ctx, wt, repoCfg) {
   const dirty = await statusPorcelain(wt)
   if (dirty) return { ok: false, why: `工作区还有未提交/未清理的改动：${dirty.split("\n").slice(0, 5).join(" / ")}` }
@@ -308,6 +249,7 @@ export async function verify(ctx, wt, repoCfg) {
   return { ok: true, ahead }
 }
 
+// push/PR/合并/关单。（保留能力，run 不再自动调用）
 async function publish(ctx, repoCfg, issue, wt, result, check, key) {
   const { cfg, log } = ctx
   const commits = await recentCommits(wt.path, repoCfg.base)
@@ -316,7 +258,7 @@ async function publish(ctx, repoCfg, issue, wt, result, check, key) {
   await pushBranch(wt.path, wt.branch)
   log(`${key}：已 push ${wt.branch}`)
 
-  const pr = await createPr({
+  const pr = await realGitea.createPr({
     repo: repoCfg.repo,
     base: repoCfg.base,
     head: wt.branch,
@@ -327,18 +269,18 @@ async function publish(ctx, repoCfg, issue, wt, result, check, key) {
 
   let state = "pr-open"
   if (cfg.merge?.enabled) {
-    await mergePr(repoCfg.repo, pr.number, {
+    await realGitea.mergePr(repoCfg.repo, pr.number, {
       style: cfg.merge.style ?? "merge",
       deleteBranch: cfg.merge.deleteBranch !== false,
     })
-    await closeIssue(repoCfg.repo, issue.number)
+    await realGitea.closeIssue(repoCfg.repo, issue.number)
     state = "done"
   }
 
-  await commentIssue(repoCfg.repo, issue.number, doneComment({ pr, tests: result.tests, summary: result.summary })).catch(
-    (e) => log(`${key}：回帖工单失败（不影响主流程）：${e.message}`)
-  )
-  await editLabels(repoCfg.repo, issue.number, { remove: "ready-for-agent" }).catch(() => {})
+  await realGitea
+    .commentIssue(repoCfg.repo, issue.number, doneComment({ pr, tests: result.tests, summary: result.summary }))
+    .catch((e) => log(`${key}：回帖工单失败（不影响主流程）：${e.message}`))
+  await realGitea.editLabels(repoCfg.repo, issue.number, { remove: "ready-for-agent" }).catch(() => {})
 
   if (state === "done") {
     await worktreeRemove(repoCfg.dir, wt.path)
@@ -347,17 +289,19 @@ async function publish(ctx, repoCfg, issue, wt, result, check, key) {
   return { state, pr }
 }
 
+// 挂起：回帖 + 打标签 + 账本记 state。
 async function hold(ctx, repoCfg, issue, result, worktree, key, state) {
   const { book, log } = ctx
+  const gitea = ctx.gitea ?? realGitea
   const body = holdComment({
     status: result.status,
     note: result.summary,
     question: result.question,
     worktree,
   })
-  await commentIssue(repoCfg.repo, issue.number, body).catch((e) => log(`${key}：挂起留言失败：${e.message}`))
+  await gitea.commentIssue(repoCfg.repo, issue.number, body).catch((e) => log(`${key}：挂起留言失败：${e.message}`))
   const label = state === "needs-human" ? "ready-for-human" : state === "blocked" ? "agent-blocked" : "needs-human"
-  await editLabels(repoCfg.repo, issue.number, { add: label, remove: "ready-for-agent" }).catch(() => {})
+  await gitea.editLabels(repoCfg.repo, issue.number, { add: label, remove: "ready-for-agent" }).catch(() => {})
   book.setIssue(key, {
     state,
     lastFailure: result.summary || result.question || result.status,
