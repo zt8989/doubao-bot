@@ -25,7 +25,7 @@ bash "$SKILL_DIR/scripts/gitea.sh" pr-view 217 --repo yyzl/win-ai-harness
 | `…/issues/N` | `issue-view N --repo <owner/name>` |
 | `…/pulls` / `…/issues`（列表页） | `search "" --repo <owner/name> --state open` 或 `explore pull-requests` |
 | `…/src/branch/<name>`、commit 链接 | 归 git：`git log` / `git diff`，不走 gitea |
-| 只给编号、没给仓库 | 默认 `yyzl/win-ai-harness`；换仓库才问 |
+| 只给编号、没给仓库 | 取 foreman 配置 `repos[]` 里的仓库；不确定就问 |
 
 `<owner/name>` 取 URL 路径第 1、2 段。**`--repo` 必填**，漏了直接报错。
 
@@ -71,7 +71,7 @@ git log --oneline <base>..<head>   # 空 = 0 提交
 在 agent / 编排链路里，PR 与工单的**写**操作必须走 foreman，不要直接 `opencli gitea pr|issue-comment|close`：
 
 ```bash
-foreman pr open --repo R --base sit-20261126 --head <分支> --title "…" --body "…" --issue N
+foreman pr open --repo R --head <分支> --title "…" --body "…" --issue N   # 基线取配置 repos[].base
 foreman issue comment <N> --repo R --body "…"
 foreman issue close <N> --repo R
 ```

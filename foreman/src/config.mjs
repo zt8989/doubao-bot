@@ -21,7 +21,8 @@ export const DEFAULTS = {
     excludeLabels: [...DEFAULT_EXCLUDE],
     onlyUnassigned: false,
     // 接单优先级三档：我的（作者是我）→ 无人认领 → 他人。改数组即可调整先后。
-    me: "233151",
+    // 自己的 Gitea 用户名：从配置文件读（pickup.me），不在代码里写死；留空时用 prWatch.ignoreAuthors[0]。
+    me: "",
     priority: ["mine", "unassigned", "others"],
     order: "oldest",
   },
@@ -38,14 +39,17 @@ export const DEFAULTS = {
     events: ["done", "pr-open", "needs-human", "blocked", "escalated", "failed"],
   },
   // PR 监听：每 intervalSeconds 扫一遍各仓库 open PR，把作者不在 ignoreAuthors 里的单
-  // 通知给「最早登记的调用方」；只通知不合并。默认 5 分钟一次。
+  // 别人家的 PR 只通知「最早登记的调用方」（编排 agent），由它核对工单后合并。默认 5 分钟一次。
   prWatch: {
     enabled: true,
     intervalSeconds: 300,
     state: "open",
     maxPages: 3,
-    ignoreAuthors: ["233151"],
+    // 自己的账号也在这里（跳过自己的 PR），loadConfig 会用 pickup.me 补齐。
+    ignoreAuthors: [],
     notifyTarget: "earliest",
+    // 默认过滤有冲突的 PR（合不了，报了没用）；设 false 则照报。
+    filterConflicts: true,
   },
   // 常驻服务：只有 HTTP 一条通道（CLI 的 RPC + 控制台页面同端口），按 pollSeconds 轮询。
   // pidFile/logFile 的相对路径解析到配置文件同目录；~ 展开。
@@ -91,11 +95,13 @@ export function normalizeRepos(cfg) {
     if (!r || typeof r === "string") throw new Error(`repos 里每一项要是对象：{"repo":"owner/name",...}`)
     if (!r.repo || !/^[^/\s]+\/[^/\s]+$/.test(r.repo)) throw new Error(`repos[].repo 要是 owner/name：${r.repo}`)
     if (!r.dir) throw new Error(`repos[].dir 必填（本地 clone 路径）：${r.repo}`)
+    if (!r.base) throw new Error(`repos[].base 必填（基线分支写在配置里，代码不写死）：${r.repo}`)
     return {
       name: r.name || r.repo.split("/")[1],
       repo: r.repo,
       dir: expandHome(r.dir),
-      base: r.base || "dev",
+      // 基线分支必须由配置给（repos[].base），不再默认 dev/sit。
+      base: r.base || "",
       verify: r.verify ?? [],
       labels: r.labels ?? null,
     }
@@ -120,6 +126,15 @@ export function loadConfig(explicit) {
     cfg[key] = n
   }
   cfg.repos = normalizeRepos(cfg)
+  // 身份（自己的 Gitea 账号）与基线都从配置来：me 与 ignoreAuthors 互相补齐，缺了就留空。
+  const me = String(cfg.pickup?.me ?? "").trim() || String((cfg.prWatch?.ignoreAuthors ?? []).map(String).find((x) => x.trim()) ?? "").trim()
+  if (me) {
+    cfg.pickup.me = me
+    const ignore = new Set((cfg.prWatch.ignoreAuthors ?? []).map((x) => String(x).trim()).filter(Boolean))
+    ignore.add(me)
+    cfg.prWatch.ignoreAuthors = [...ignore]
+  }
+  cfg.prWatch.ignoreAuthors = (cfg.prWatch.ignoreAuthors ?? []).map((x) => String(x).trim()).filter(Boolean)
   // 先展开 ~ 再判绝对路径：反过来会把 "~/x" 当成相对路径拼成 "<dir>/~/x"。
   cfg.stateFile = expandHome(cfg.stateFile)
   if (!path.isAbsolute(cfg.stateFile)) cfg.stateFile = path.resolve(path.dirname(file), cfg.stateFile)

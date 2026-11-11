@@ -139,11 +139,12 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 服务里还有一条独立定时器，每 `prWatch.intervalSeconds`（默认 300s）扫一遍 `repos[]` 下各仓库的 open PR：
 
 - 列表走 `opencli gitea pull-list --repo <owner/name> --state open`（新加的只读适配器命令，带回 `author`）。
-- 作者在 `prWatch.ignoreAuthors`（默认 `["233151"]`，就是自己的账号）里的 PR 跳过，只记一笔 `skipped: "self"`。
+- 作者在 `prWatch.ignoreAuthors`（自己的账号，由 `pickup.me` 补齐）里的 PR 跳过，只记一笔 `skipped: "self"`。
 - 其余 PR 合成一条消息，用 `dws notify` 发给 `prWatch.notifyTarget`：
   - `earliest`（默认）= 账本 `sessions` 里**最早登记**、有 `convId` 的那个会话，即第一个调用方；
   - 也可以直接写死会话 id 或侧边栏标题。
-- 正文带 `仓库#编号`、标题、作者、PR 链接和合并命令；**只通知不合并**，合不合由收到通知的人决定。
+- 有冲突的 PR 默认过滤（`prWatch.filterConflicts`，查 `pr-view` 的 `mergeNote`），不合也不报。
+- 作者不是自己的 PR **只通知、监听里不合**（看不到关联工单）；通知带 `foreman pr merge <N> --repo R`，由编排 agent 核对工单后合并，合不了回理由。
 - 去重记在 `state.json` 的 `prWatch` 键（`<repo>#<number>`），**发成功才盖 `notifiedAt`**；发送失败下一轮重试，重启不重发。
 - 账本里还没有调用方会话时这轮不发、也不记账，等有调用方了下一轮补发。
 - 起服务 1s 后先扫一遍，之后按间隔跑。
@@ -165,7 +166,7 @@ foreman run --no-notify          # 这一轮不登记监听，因此不会有通
 foreman tasks                    # 每条工单到哪一步、卡在哪
 foreman pr poll                  # 立刻扫一轮 PR（别人的单报给最早登记的调用方）
 foreman pr list                  # 看 PR 监听账本
-foreman pr open --repo R --base sit-20261126 --head <分支> --title "…" --body "…" --issue N   # 建 PR（唯一入口，记账+落库）
+foreman pr open --repo R --head <分支> --title "…" --body "…" --issue N   # 建 PR（唯一入口；--base 省略取配置 repos[].base）
 foreman issue comment <N> --repo R --body "…"   # 评论工单（记账）
 foreman issue close <N> --repo R                # 关单（记账）
 foreman retry win-ai-harness 255 # 人工处理完，放回队列（attempts 清零）
@@ -174,6 +175,14 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 ```
 
 `-c <文件>` 等价 `--config <文件>`。
+
+### 续接调度（planner）
+
+`planner.enabled: true` 时，服务把续接内容**并进这条结论通知**（一次只发一条）：
+
+- 结论 `done` + 在跑单 `< maxRunning`（默认 2）+ 队列还有可接工单 → 发「可以继续接单」，正文带工单列表（`listLimit` 条，默认 5）
+- 结论不是 `done` → 发「需要你看一下」，带状态/原因/分支/PR 和 `foreman retry` 提示
+- 同一 `(会话, 指纹)` 只提醒一次（账本 `planner.lastKey`）；目标 `planner.target`（默认 `auto` = 最早登记的调用方）
 
 ## 配置
 
@@ -214,7 +223,7 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
     "intervalSeconds": 300,
     "state": "open",
     "maxPages": 3,
-    "ignoreAuthors": ["233151"],
+    "ignoreAuthors": ["<你的 Gitea 用户名>"],
     "notifyTarget": "earliest"
   },
   "repos": [
@@ -231,7 +240,7 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 
 要点：
 
-- **本工程基线统一 `sit-20261126`**，不要用 `dev`：分支、worktree、验收的 `origin/<base>..HEAD` 都按它算。
+- **基线写在 `repos[].base`**（本工程当前 `sit-20261126`），代码不写死；分支、worktree、验收的 `origin/<base>..HEAD` 都按它算。
 - **`pickup.labelIds` 必须用数字 id，别用名字**。opencli 的列表接口不回 labels，
   按名字配会静默捞 0 条；`label-list` 能查名→id（`ready-for-agent` 当前是 5）。
 - 配了 `labelIds` 后不再拿名字做二次过滤（列表里本来就没有 labels）。

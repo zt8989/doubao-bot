@@ -42,8 +42,9 @@ const HELP = `foreman — 接单编排 + 常驻服务
   watch add   登记一条监听（target 是会话 id 或侧边栏标题）
   watch list/rm/poll   看登记 / 删一条 / 立刻跑一轮（取证排障用）
   pr list     看 PR 监听账本（哪些 PR 见过/已通知）
-  pr poll     立刻扫一轮 PR（作者不是 233151 的报给最早登记的调用方）
+  pr poll     立刻扫一轮 PR（作者不是自己的（pickup.me）报给最早登记的调用方）
   pr open     建 PR（唯一入口：agent 也走它，账本/控制台才记得到）
+  pr merge <N> --repo R [--issue <单号>]   合并 PR（唯一入口：先核对关联工单再合；失败回理由）
   issue comment|close   评论/关单（同上，走服务记账）
   --no-service  跳过自动握手与拉起（逃生口）
 
@@ -218,10 +219,11 @@ async function cmdPr(pos, flags) {
   }
   if (sub === "open") {
     const repo = strFlag(flags.repo)
-    const base = strFlag(flags.base)
     const head = strFlag(flags.head)
     const title = strFlag(flags.title)
-    if (!repo || !base || !head || !title) throw new Error("用法：foreman pr open --repo R --base sit-20261126 --head <分支> --title <标题> [--body <正文>] [--issue <单号>]")
+    // 基线不写死在命令里：没给 --base 就用配置里这条仓库的 repos[].base。
+    const base = strFlag(flags.base) || (cfg.repos ?? []).find((r) => r.repo === repo)?.base || ""
+    if (!repo || !base || !head || !title) throw new Error("用法：foreman pr open --repo R [--base <基线>] --head <分支> --title <标题> [--body <正文>] [--issue <单号>]（--base 不写取配置 repos[].base）")
     const r = await callRaw(resolvePort(cfg), {
       id: "cli",
       cmd: "pr open",
@@ -232,7 +234,22 @@ async function cmdPr(pos, flags) {
     if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
     return out({ ok: true, ...r })
   }
-  throw new Error(`未知 pr 子命令：${sub}（list|poll|open）`)
+  if (sub === "merge") {
+    const number = Number(pos.shift())
+    const repo = strFlag(flags.repo)
+    if (!number || !repo) throw new Error("用法：foreman pr merge <N> --repo R [--issue <单号>] [--style merge|rebase|squash] [--delete-branch]")
+    const r = await callRaw(resolvePort(cfg), {
+      id: "cli",
+      cmd: "pr merge",
+      repo, number,
+      issue: Number(strFlag(flags.issue)) || 0,
+      style: strFlag(flags.style) || undefined,
+      deleteBranch: flags["no-delete-branch"] ? false : undefined,
+    }, 300000)
+    if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
+    return out({ ok: true, ...r })
+  }
+  throw new Error(`未知 pr 子命令：${sub}（list|poll|open|merge）`)
 }
 
 // ---- 原有命令 ----

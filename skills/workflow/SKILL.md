@@ -20,13 +20,14 @@ description: 端到端接单工作流，入口统一是 foreman：派活、建�
 
 1. **看计划**：`foreman run --dry-run --once`（可加 `--repo <名字|owner/name>`）。
    打印会捞哪条、worktree 建在哪、首句提示词长什么样；不建工作区、不动会话。
-   接单顺序由配置决定：**我的（作者 `pickup.me`，默认 233151）→ 无人认领 → 他人**，同档最老先接。
+   接单顺序由配置决定：**我的（作者 `pickup.me`）→ 无人认领 → 他人**，同档最老先接。
 2. **派活**：`foreman run --once`（常驻用 `foreman run --every 1800`）。
    foreman 内部依次做：选单（`opencli gitea search`，标签用数字 id）→ 建 worktree（`herdr`，失败退回 `git worktree add`）→ `dws open --name foreman-<仓库>-<N>` 发 kickoff → 账本记 `working` + `agent` → 登记监听。**派完只返回 `dispatched`，不等回复。**
    kickoff 已经把边界写死：只在这个 worktree 改；自测通过后 `git push -u origin <分支>`，再用 `foreman pr open … --issue N` 开 PR；不合并、不 force push。
-3. **会话侧产出**：只在 worktree 改代码 → 本地提交 → 自测 → push → `foreman pr open --repo <仓库> --base sit-20261126 --head <分支> --title "fix(#N): …" --body "<自证>" --issue N`。
+3. **会话侧产出**：只在 worktree 改代码 → 本地提交 → 自测 → push → `foreman pr open --repo <仓库> --head <分支> --title "fix(#N): …" --body "<自证>" --issue N`（基线取配置 `repos[].base`，不写死）。
    PR / 工单的写操作**只走 foreman**（`pr open`、`issue comment|close`），它写账本、立刻落 SQLite 控制台。最后交 RESULT：`done` 必带 `pr` / `prUrl` / `tests`。
 4. **收结果**：服务在后台轮询 `dws status` + `dws info`，取最后一个 `<RESULT>` 块，把结论用 `dws send` 回给登记的调用方。
+   `planner.enabled: true` 时**同一条通知**里还会带上：跑完是 `done`、在跑单 < `maxRunning`、队列里还有活 → 「可以继续接单」+ 工单列表；不是 `done` → 「需要你看一下」+ 原因与 retry 提示。
    看进度用 `foreman tasks`，看服务用 `foreman status`；**不要拿 `dws status` 手工判**（那是服务内部的事）。
 5. **合并**：`merge.enabled: true` 时 **foreman 自己合并**（`pr-merge` + `close`），每张 PR 只合一次（账本 `mergeAsk`），`tests` 为空不自动合，冲突只记录不 force merge。通知正文会带「合并：已合并 PR #N」或「合并失败：…」。
    要人工决定就 `enabled: false`（默认），PR 停在 `pr-open` 等人。
@@ -52,7 +53,7 @@ description: 端到端接单工作流，入口统一是 foreman：派活、建�
 
 ## PR 监听（服务里 5 分钟一轮）
 
-服务另有定时器：每 `prWatch.intervalSeconds`（默认 300s）扫各仓库 open PR，把**作者不是 233151** 的单报给 `prWatch.notifyTarget`（默认 `earliest`，最早登记的调用方会话）。**只通知不合并**。命令：
+服务另有定时器：每 `prWatch.intervalSeconds`（默认 300s）扫各仓库 open PR，**作者不是自己的（`pickup.me`）** 的单先过一遍冲突（有冲突的默认不报，`filterConflicts`），剩下的**只通知**编排 agent（`prWatch.notifyTarget` 默认 `earliest`，最早登记的调用方会话），通知里带 `foreman pr merge <N> --repo R`；合并由编排 agent 核对工单后执行，合不了 foreman 回理由。命令：
 
 ```bash
 foreman pr poll   # 立刻扫一轮（checked / notified / target）
@@ -62,7 +63,7 @@ foreman pr list   # 看 PR 监听账本
 ## 铁律
 
 - **一律用 foreman 命令**：接单 `foreman run`、建 PR `foreman pr open`、评论/关单 `foreman issue comment|close`、看进度 `foreman tasks`、回炉 `foreman retry`、服务 `foreman ping|status|serve`。不要手敲 `opencli gitea` / `herdr` / `dws` 去串联流程。
-- **基线统一 `sit-20261126`**，不用 `dev`；PR 一律 `--base sit-20261126`。
+- **基线由配置 `repos[].base` 决定**（本工程当前 `sit-20261126`），不用 `dev`；`foreman pr open` 不写 `--base` 就取它。
 - **不 force merge**：冲突就停下、留记录、交人。
 - **会话自测通过就 push，再用 `foreman pr open` 开 PR，不合并**；`merge.enabled: true` 时由 foreman 合并。
 - **写操作只走 foreman**；直接 `opencli gitea pr|close` 写会让账本与控制台统计断档。

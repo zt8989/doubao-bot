@@ -17,6 +17,8 @@ function ctxOf(dir) {
     },
     commentIssue: async (repo, n, body) => { created.push({ kind: "comment", repo, n, body }) },
     closeIssue: async (repo, n) => { created.push({ kind: "close", repo, n }) },
+    mergePr: async (repo, n, opts) => { created.push({ kind: "merge", repo, n, opts }) },
+    viewPr: async () => ({ state: "open", mergeNote: "" }),
   }
   const cfg = { stateFile: path.join(dir, "state.json"), pickup: { me: "233151" } }
   const consoleStore = new ConsoleStore(path.join(dir, "console.db"))
@@ -96,3 +98,77 @@ test("派活会话写进 tasks.agent，能按 agent 统计", async () => {
 function cfgOf(dir) {
   return path.join(dir, "state.json")
 }
+
+test("pr open：不传 base 时取配置 repos[].base", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-pr-"))
+  const created = []
+  const consoleStore = new ConsoleStore(path.join(dir, "console.db"))
+  const ctx = {
+    cfg: {
+      stateFile: path.join(dir, "state.json"),
+      pickup: { me: "233151" },
+      repos: [{ repo: "demo/demo", base: "sit-20261126" }],
+    },
+    state: {},
+    consoleStore,
+    log: () => {},
+    gitea: {
+      createPr: async ({ repo, base, head, title }) => {
+        created.push({ repo, base, head, title })
+        return { number: 14, url: `http://gitea/${repo}/pulls/14` }
+      },
+    },
+  }
+  try {
+    const r = await handleRequest(ctx, { id: "cli", cmd: "pr open", repo: "demo/demo", head: "fix/x", title: "改好了" })
+    assert.equal(r.ok, true)
+    assert.equal(created[0].base, "sit-20261126", "基线来自配置，不在 CLI 写死")
+  } finally {
+    consoleStore.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("pr merge：合并成功、可选关单，账本记 merged", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-merge-"))
+  const { ctx, created, consoleStore } = ctxOf(dir)
+  try {
+    const r = await handleRequest(ctx, { id: "cli", cmd: "pr merge", repo: "demo/demo", number: 12, issue: 9 })
+    assert.equal(r.ok, true)
+    assert.equal(r.merged, true)
+    assert.equal(r.issue, 9)
+    assert.equal(created.find((c) => c.kind === "merge").opts.style, "merge")
+    assert.equal(new Book(cfgOf(dir)).mergeAsk["demo/demo#12"].status, "merged")
+    assert.equal(new Book(cfgOf(dir)).issue("demo/demo#9").state, "done")
+    assert.ok(consoleStore.snapshot().tasks.some((t) => t.key === "demo/demo#9" && t.state === "done"))
+  } finally {
+    consoleStore.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("pr merge：合不了回理由（pr-merge 报错 + mergeNote）", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-merge-"))
+  const consoleStore = new ConsoleStore(path.join(dir, "console.db"))
+  const ctx = {
+    cfg: { stateFile: path.join(dir, "state.json"), pickup: { me: "233151" } },
+    state: {},
+    consoleStore,
+    log: () => {},
+    gitea: {
+      mergePr: async () => { throw new Error("此分支存在冲突，无法自动合并") },
+      viewPr: async () => ({ state: "open", mergeNote: "目标分支有新提交，需要先 rebase" }),
+    },
+  }
+  try {
+    const r = await handleRequest(ctx, { id: "cli", cmd: "pr merge", repo: "demo/demo", number: 13 })
+    assert.equal(r.ok, false)
+    assert.equal(r.error, "merge-failed")
+    assert.match(r.message, /存在冲突/)
+    assert.match(r.message, /需要先 rebase/)
+    assert.equal(new Book(cfgOf(dir)).mergeAsk["demo/demo#13"].status, "failed")
+  } finally {
+    consoleStore.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

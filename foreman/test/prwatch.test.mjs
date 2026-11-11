@@ -68,16 +68,16 @@ test("prWatchTarget：写死目标优先，earliest/auto 回落最早调用方",
   assert.equal(prWatchTarget({}, book), "conv-first")
 })
 
-test("prNotifyText：带仓库编号、作者、链接、合并命令，并写明只通知不合并", () => {
+test("prNotifyText：列出待合并 PR 并给「核对工单后合并」入口", () => {
   const text = prNotifyText([{ repo: "demo/demo", number: 2, title: "改了点东西", author: "zhangsan", url: "http://x/pulls/2" }])
-  assert.match(text, /发现 1 条待合并 PR/)
+  assert.match(text, /等你核对工单后合并/)
   assert.match(text, /demo\/demo#2 改了点东西/)
   assert.match(text, /作者：zhangsan/)
-  assert.match(text, /opencli gitea pr-merge 2 --repo demo\/demo/)
-  assert.match(text, /只通知不合并/)
+  assert.match(text, /foreman pr merge 2 --repo demo\/demo/)
+  assert.doesNotMatch(text, /已自动合并/)
 })
 
-test("prWatchOnce：别人的 PR 发一次、自己的不报、重复扫描不重发", async () => {
+test("prWatchOnce：别人的 PR 报一次、自己的不报、重复扫描不重发", async () => {
   const dir = tmpDir()
   try {
     const cfg = baseCfg(dir)
@@ -91,9 +91,7 @@ test("prWatchOnce：别人的 PR 发一次、自己的不报、重复扫描不�
       ],
       2: [],
     }
-    const gitea = {
-      listPulls: async (_repo, { page }) => pages[page] ?? [],
-    }
+    const gitea = { listPulls: async (_repo, { page }) => pages[page] ?? [] }
     const sent = []
     const dws = { notify: async (target, text) => sent.push({ target, text }) }
     const log = () => {}
@@ -106,13 +104,11 @@ test("prWatchOnce：别人的 PR 发一次、自己的不报、重复扫描不�
     assert.match(sent[0].text, /demo\/demo#2 别人的/)
     assert.doesNotMatch(sent[0].text, /demo\/demo#1 /)
 
-    // 自己的 PR 记账但不通知
     const seen = new Book(cfg.stateFile).prSeen
     assert.equal(seen["demo/demo#1"].skipped, "self")
     assert.equal(seen["demo/demo#1"].notifiedAt, "")
     assert.ok(seen["demo/demo#2"].notifiedAt)
 
-    // 再扫一轮：都见过了，不再发
     r = await prWatchOnce({ cfg, gitea, dws, log })
     assert.equal(r.notified, 0)
     assert.equal(sent.length, 1)
@@ -161,11 +157,82 @@ test("服务里 prPoll：起服务后能手动跑一轮，状态里带 PR 计数
     assert.equal(r.notified, 1)
     assert.equal(sent[0].target, "conv-first")
 
-    // 服务里再跑一轮：去重后 0 条
     const again = await server.prPoll()
     assert.equal(again.notified, 0)
   } finally {
     if (server) await server.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("prWatchOnce：通知失败下一轮补发，发成功后不再重发", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = baseCfg(dir)
+    new Book(cfg.stateFile).record("caller-1", { convId: "conv-first" })
+    let notifyFails = 1
+    const gitea = { listPulls: async () => [{ repo: "demo/demo", number: 6, title: "别人的", author: "zhangsan", url: "http://x/pulls/6" }] }
+    const sent = []
+    const dws = { notify: async (target, text) => { if (notifyFails-- > 0) throw new Error("dws 没开"); sent.push(text) } }
+
+    const r1 = await prWatchOnce({ cfg, gitea, dws, log: () => {} })
+    assert.equal(r1.notified, 0)
+    assert.equal(r1.failedNotify, true)
+    assert.equal(sent.length, 0)
+
+    const r2 = await prWatchOnce({ cfg, gitea, dws, log: () => {} })
+    assert.equal(r2.notified, 1)
+    assert.equal(sent.length, 1)
+
+    const r3 = await prWatchOnce({ cfg, gitea, dws, log: () => {} })
+    assert.equal(r3.notified, 0)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("prWatchOnce：默认过滤有冲突的 PR，不通知", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = baseCfg(dir)
+    new Book(cfg.stateFile).record("caller-1", { convId: "conv-first" })
+    const gitea = {
+      listPulls: async () => [
+        { repo: "demo/demo", number: 8, title: "冲突单", author: "zhangsan", url: "http://x/pulls/8" },
+        { repo: "demo/demo", number: 9, title: "正常单", author: "zhangsan", url: "http://x/pulls/9" },
+      ],
+      viewPr: async (_repo, n) => (n === 8
+        ? { mergeNote: "此分支存在冲突，无法自动合并", state: "open" }
+        : { mergeNote: "可以合并", state: "open" }),
+    }
+    const sent = []
+    const dws = { notify: async (target, text) => sent.push(text) }
+    const r = await prWatchOnce({ cfg, gitea, dws, log: () => {} })
+    assert.equal(r.notified, 1)
+    assert.equal(r.conflicting, 1)
+    assert.match(sent[0], /demo\/demo#9/)
+    assert.doesNotMatch(sent[0], /demo\/demo#8 /)
+    assert.equal(new Book(cfg.stateFile).prSeen["demo/demo#8"].skipped, "conflict")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("prWatchOnce：filterConflicts=false 时冲突单照报", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = baseCfg(dir)
+    cfg.prWatch.filterConflicts = false
+    new Book(cfg.stateFile).record("caller-1", { convId: "conv-first" })
+    const gitea = {
+      listPulls: async () => [{ repo: "demo/demo", number: 10, title: "冲突单", author: "zhangsan", url: "http://x/pulls/10" }],
+      viewPr: async () => ({ mergeNote: "存在冲突", state: "open" }),
+    }
+    const sent = []
+    const r = await prWatchOnce({ cfg, gitea, dws: { notify: async (_t, text) => sent.push(text) }, log: () => {} })
+    assert.equal(r.notified, 1)
+    assert.match(sent[0], /demo\/demo#10/)
+  } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })

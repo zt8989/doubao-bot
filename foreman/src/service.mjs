@@ -8,7 +8,8 @@ import { nowIso, sleep } from "./util.mjs"
 import { Book } from "./book.mjs"
 import { parseResult } from "./prompts.mjs"
 import { notifyTarget, shouldNotify, notifyText } from "./orchestrator.mjs"
-import { prWatchOnce, prWatchTarget } from "./prwatch.mjs"
+import { prWatchOnce, prWatchTarget, mergeFailureReason } from "./prwatch.mjs"
+import { plannerDecision, plannerTarget, plannerText, loadQueue } from "./planner.mjs"
 import { listPulls, mergePr, closeIssue, createPr, commentIssue } from "./gitea.mjs"
 import { ConsoleStore } from "./console.mjs"
 import { startConsoleHttp } from "./consolehttp.mjs"
@@ -464,6 +465,19 @@ export async function pollOnce(ctx) {
         log(`dws info ${w.target} 失败：${e.message}`)
       }
 
+      // 出结论就推进工单状态：done → pr-open/done，其余进各自的停态（failed 还能 retry）。
+      if (result && w.issueKey) {
+        const st = result.status === "done" ? (Number(result.pr) ? "pr-open" : "done")
+          : result.status === "need_decision" ? "needs-human"
+          : result.status === "blocked" ? "blocked"
+          : result.status === "failed" ? "failed" : ""
+        if (st) {
+          const patch = { state: st }
+          if (Number(result.pr)) { patch.pr = Number(result.pr); patch.prUrl = result.prUrl ?? "" }
+          new Book(cfg.stateFile).setIssue(w.issueKey, patch)
+        }
+      }
+
       // 会话自己 push + 开 PR；合并由编排做（冲突/失败只记日志、不 force merge）。
       const bookM = new Book(cfg.stateFile)
       const md = mergeDecision({ cfg, watcher: w, book: bookM, result })
@@ -482,10 +496,10 @@ export async function pollOnce(ctx) {
           out.merged = (out.merged ?? 0) + 1
           log(`已合并 ${md.repo}#${md.pr}（${md.key}）`)
         } catch (e) {
-          mergeError = e.message
+          mergeError = await mergeFailureReason({ gitea, repo: md.repo, pr: md.pr, error: e })
           // 失败也记账：不 force merge，也不每轮重试同一张 PR。
-          bookM.markMergeAsked(md.key, { pr: md.pr, url: md.prUrl, status: "failed", error: e.message })
-          log(`合并失败 ${md.repo}#${md.pr}：${e.message}`)
+          bookM.markMergeAsked(md.key, { pr: md.pr, url: md.prUrl, status: "failed", error: mergeError })
+          log(`合并失败 ${md.repo}#${md.pr}：${mergeError}`)
         }
       } else if (md.reason && !["disabled", "already-asked"].includes(md.reason)) {
         log(`跳过自动合并 ${w.target}：${md.reason}`)
@@ -494,8 +508,39 @@ export async function pollOnce(ctx) {
 
       const book2 = new Book(cfg.stateFile)
       const nd = notifyDecision({ cfg, watcher: w, book: book2, env: process.env, result: resultOut })
-      if (!nd.send) {
-        log(`通知跳过 ${w.target}：${nd.reason}`)
+
+      // 续接内容并进同一条通知：done 就带 PR + 剩余列表，不是 done 就带“去看一下”。
+      let planBlock = ""
+      let planNote = ""
+      let planKind = ""
+      const planKey = `${w.target}#${decision.fingerprint}`
+      try {
+        const pb = new Book(cfg.stateFile)
+        const pd = plannerDecision({ cfg, book: pb, result: resultOut, key: planKey })
+        if (pd.send) {
+          let issues = []
+          if (pd.kind === "continue") {
+            issues = await loadQueue({ cfg, book: pb, gitea, limit: Number(cfg.planner?.listLimit) || 5 })
+            if (!issues.length) pd.send = false
+          }
+          if (pd.send) {
+            planBlock = plannerText({
+              cfg, kind: pd.kind, watcher: w, result: resultOut,
+              running: pd.running, maxRunning: pd.maxRunning, issues,
+            })
+            planKind = pd.kind
+            planNote = pd.kind === "continue" ? `续接 ${issues.length} 条` : "催查看"
+          }
+        }
+      } catch (e) {
+        state.dwsErrors++
+        log(`续接内容生成失败：${e.message}`)
+      }
+
+      const target = String(nd.send ? nd.target : "") || (planBlock ? plannerTarget(cfg, new Book(cfg.stateFile), process.env) : "")
+      const text = [nd.send ? nd.text : "", planBlock].filter(Boolean).join("\n\n")
+      if (!target || target === String(w.target) || !text) {
+        log(`通知跳过 ${w.target}：${nd.reason || "no-target"}`)
         continue
       }
       // 先记账再发：发送本身可能几十秒，崩溃/假失败时不能让下一轮从零重发。
@@ -504,15 +549,16 @@ export async function pollOnce(ctx) {
         chars: status?.chars ?? 0,
       })
       try {
-        await dws.notify(nd.target, nd.text)
+        await dws.notify(target, text)
         book2.markNotified(w.target, decision.fingerprint, {
           phase: decision.phase,
           chars: status?.chars ?? 0,
         })
+        if (planBlock) new Book(cfg.stateFile).markPlanner(planKey, { kind: planKind, target })
         state.notifiedCount++
         out.notified++
         rec.notifiedAt = nowIso()
-        log(`已通知 ${nd.target}：${w.target} 跑完（${decision.phase}/${nd.event}）`)
+        log(`已通知 ${target}：${w.target} 跑完（${decision.phase}/${nd.event}）${planNote ? `，${planNote}` : ""}`)
       } catch (e) {
         state.dwsErrors++
         const n = notifyMaxAttempts(cfg)
@@ -553,6 +599,7 @@ export async function handleRequest(ctx, req) {
       startedAt: ctx.state.startedAt,
       pollSeconds: ctx.cfg.pollSeconds,
       watchers: ctx.state.watchers.size,
+      planner: { enabled: ctx.cfg.planner?.enabled === true, maxRunning: Number(ctx.cfg.planner?.maxRunning) || 2 },
       http: ctx.httpUrl || "",
       port: ctx.state.port ?? null,
       portFile: ctx.cfg.service?.http?.portFile ?? "",
@@ -562,10 +609,12 @@ export async function handleRequest(ctx, req) {
   // PR / 工单写操作收口到 foreman：agent 只调这几个，账本与控制台才有数据。
   if (cmd === "pr open") {
     const repo = String(req.repo ?? "").trim()
-    const base = String(req.base ?? "").trim()
+    // 基线取配置 repos[].base；请求里显式给了才覆盖。
+    const base = String(req.base ?? "").trim() || (ctx.cfg.repos ?? []).find((r) => r.repo === repo)?.base || ""
     const head = String(req.head ?? "").trim()
     const title = String(req.title ?? "").trim()
-    if (!repo || !base || !head || !title) return fail("bad-request", "pr open 需要 repo / base / head / title")
+    if (!repo || !head || !title) return fail("bad-request", "pr open 需要 repo / head / title")
+    if (!base) return fail("bad-request", `配置里没有 ${repo} 的 repos[].base，也没给 --base`)
     let pr
     try {
       pr = await ctx.gitea.createPr({ repo, base, head, title, body: String(req.body ?? "") })
@@ -589,6 +638,34 @@ export async function handleRequest(ctx, req) {
     try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
     ctx.log?.(`PR 建好 ${repo}#${number} ${pr.url ?? ""}（走 foreman）`)
     return ok({ repo, pr: number, url: pr.url ?? "", issue: issueNo || null })
+  }
+
+  if (cmd === "pr merge") {
+    const repo = String(req.repo ?? "").trim()
+    const number = Number(req.number ?? 0)
+    if (!repo || !number) return fail("bad-request", "pr merge 需要 repo / number")
+    const style = String(req.style ?? ctx.cfg.merge?.style ?? "merge")
+    const deleteBranch = req.deleteBranch !== undefined ? req.deleteBranch !== false : ctx.cfg.merge?.deleteBranch !== false
+    try {
+      await ctx.gitea.mergePr(repo, number, { style, deleteBranch })
+    } catch (e) {
+      const reason = await mergeFailureReason({ gitea: ctx.gitea, repo, pr: number, error: e })
+      try {
+        new Book(ctx.cfg.stateFile).markMergeAsked(`${repo}#${number}`, { pr: number, status: "failed", error: reason })
+      } catch {}
+      ctx.log?.(`合并失败 ${repo}#${number}：${reason}`)
+      return fail("merge-failed", reason)
+    }
+    const issueNo = Number(req.issue ?? 0)
+    const b = new Book(ctx.cfg.stateFile)
+    b.markMergeAsked(`${repo}#${number}`, { pr: number, url: String(req.url ?? ""), status: "merged" })
+    if (issueNo) {
+      try { await ctx.gitea.closeIssue(repo, issueNo) } catch (e) { ctx.log?.(`关单 ${repo}#${issueNo} 失败：${e.message}`) }
+      b.setIssue(`${repo}#${issueNo}`, { state: "done", pr: number })
+    }
+    try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
+    ctx.log?.(`已合并 ${repo}#${number}${issueNo ? `，关单 #${issueNo}` : ""}（走 foreman）`)
+    return ok({ repo, number, merged: true, issue: issueNo || null })
   }
 
   if (cmd === "issue comment") {

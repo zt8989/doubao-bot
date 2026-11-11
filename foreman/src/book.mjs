@@ -47,9 +47,26 @@ export class Book {
       seenAt: prev.seenAt ?? nowIso(),
       notifiedTo: pr.notifiedTo ?? prev.notifiedTo ?? "",
       notifiedAt: pr.notifiedTo ? nowIso() : prev.notifiedAt ?? "",
+      merged: pr.merged ?? prev.merged ?? false,
+      mergeError: pr.mergeError ?? prev.mergeError ?? "",
     }
     this.save()
     return this.prSeen[key]
+  }
+
+  // 续接提醒去重：{ lastKey, at }，同一个 (会话#指纹) 只提醒一次。
+  get planner() {
+    return this.data.planner ?? (this.data.planner = {})
+  }
+
+  markPlanner(key, extra = {}) {
+    this.reload()
+    this.planner.lastKey = String(key)
+    this.planner.at = nowIso()
+    this.planner.kind = extra.kind ?? ""
+    this.planner.target = extra.target ?? ""
+    this.save()
+    return this.planner
   }
 
   // 已下发过“去合并”指令的 PR：{ "<repo>#<number>": { at, target, pr } }
