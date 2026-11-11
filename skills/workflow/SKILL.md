@@ -22,7 +22,10 @@ description: 端到端接单工作流（opencli + herdr + dws + foreman）：把
    标签**必须用数字 id**（`ready-for-agent`=5，`needs-triage`=3，`needs-info`=4，`ready-for-human`=6，`wontfix`=7）；按名字过滤会静默捞 0 条。
 2. **建工作区**：`herdr worktree create --cwd <repo> --branch fix/issue-N --base origin/sit-20261126 --path ~/.foreman/worktrees/<仓库>/fix-issue-N --no-focus`；失败退回 `git worktree add`。
 3. **派活**：`dws open --name foreman-<仓库>-N --prompt <kickoff>`。kickoff 把边界写死：只在这个 worktree 改 + 本地提交，**不 push、不开 PR、不关单**，结尾交 `<RESULT>`。
-4. **收结果**：只认最后一个 RESULT 块，`status` ∈ `done` / `need_decision` / `blocked` / `failed`。
+   **派完立刻登记监听**：`foreman watch add <convId> --notify <调用方会话> --repo <owner/name> --number N`。
+   不经 `foreman run`、直接 `dws open` 派出去的会话**不会自动被监听**——没这一步，会话跑完也没人通知你。
+   并且**必须在归档之前收口**：`dws archive` 会把任务从侧边栏收起，之后 `dws status` 报「侧边栏里没有任务」，监听再也判不出来（只会在 `service.log` 里刷失败）。
+4. **收结果**：只认最后一个 RESULT 块，`status` ∈ `done` / `need_decision` / `blocked` / `failed`。监听正常时这一步由服务通知你，不必轮询。
 5. **验收三条**：工作区干净 + 分支有提交（`origin/<base>..HEAD ≠ 0`）+ `verify` 命令全过。缺一条就回喂重试，到 `maxAttempts` 升级给人。
 6. **出 PR**：push → 开 PR（`--base sit-20261126`）→ **通知调用方** → 人验收 → 合并 → 关单 → 清 worktree 与分支。
 
