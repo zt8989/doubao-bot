@@ -285,8 +285,7 @@ export class SessionManager {
   }
 }
 
-export function transcript(convo) {
-  const lines = []
+export function transcript(convo) {  const lines = []
   for (const m of convo.messages ?? []) {
     lines.push(
       `### ${m.role === "user" ? "我" : "豆包"}${m.finished ? "" : "（未完成）"}${
@@ -298,6 +297,19 @@ export function transcript(convo) {
     lines.push("")
   }
   return lines.join("\n")
+}
+
+// matchTask 按标题在侧边栏任务里找一条：先精确匹配，再唯一包含匹配。
+// 找不到或命中多条都返回 null，由调用方决定是报错还是列出候选。
+export function matchTask(tasks, target) {
+  const want = String(target ?? "").trim()
+  if (!want) return null
+  const list = (tasks ?? []).filter((t) => t && t.id)
+  const exact = list.filter((t) => String(t.title ?? "").trim() === want)
+  if (exact.length === 1) return exact[0]
+  if (exact.length > 1) return null
+  const loose = list.filter((t) => String(t.title ?? "").includes(want))
+  return loose.length === 1 ? loose[0] : null
 }
 
 export function ensureStateDir(file) {

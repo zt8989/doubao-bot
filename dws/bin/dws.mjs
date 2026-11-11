@@ -5,7 +5,7 @@ import fs from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { loadConfig, ConfigError } from "../src/config.mjs"
-import { SessionBook, SessionManager, transcript } from "../src/sessions.mjs"
+import { SessionBook, SessionManager, transcript, matchTask } from "../src/sessions.mjs"
 import { Doubao } from "../src/doubao.mjs"
 import { isTruthy, log, parseArgs, printJson } from "../src/util.mjs"
 
@@ -31,6 +31,9 @@ const HELP = `dws ${VERSION} —— 豆包会话 CLI（开启会话 / 会话状�
 
 公共参数：
   -c, --config <文件>   配置文件（默认 ./config.json，其次 ~/.dws/config.json）
+
+会话名可以是本地记录的名字，也可以是豆包侧边栏里的任务标题：按标题精确匹配，
+其次唯一包含匹配；命中后命令输出里会写明实际操作的「任务 <id>」，多条重名则不猜、直接报错。
 
 边界：
   dws 只负责驱动豆包桌面端（开会话、发指令、读状态）。它不碰工单、不碰 PR、
@@ -214,6 +217,24 @@ function taskIdOf(s) {
   return String(s).trim().match(/(\d{8,})$/)[1]
 }
 
+// 目标解析：任务 id 直接用；会话名先查本地记录，再按标题匹配豆包侧边栏任务。
+// 返回 { id, name, title, from }，from = "id" | "local" | "window"。
+async function resolveTarget({ book, session }, target) {
+  if (isTaskId(target)) return { id: taskIdOf(target), name: "", title: "", from: "id" }
+  const local = book.session(target)
+  if (local?.convId) return { id: local.convId, name: target, title: local.title || target, from: "local" }
+  const hit = matchTask(await session.windowTasks().catch(() => []), target)
+  if (hit) return { id: String(hit.id), name: target, title: hit.title || target, from: "window" }
+  throw Error(`不是任务 id，也没找到这个会话：${target}（先 dws list 看看有什么）`)
+}
+
+// 找到 id 时顺手把来源说清楚，免得用户不知道自己刚动的是哪条任务。
+function whereFrom(r) {
+  if (r.from === "window") return `（按标题「${r.title}」在窗口中匹配到）`
+  if (r.from === "local") return `（本地会话 ${r.name}）`
+  return ""
+}
+
 async function cmdProjects() {
   const { session } = ctx()
   const projects = (await session.windowProjects()) ?? []
@@ -285,17 +306,15 @@ async function cmdUse() {
   const target = pos[0]
   if (!target) throw Error("用法：dws use <任务id|会话名>")
   const { book, session } = ctx()
-  const id = isTaskId(target) ? taskIdOf(target) : book.session(target)?.convId
-  if (!id) throw Error(`不是任务 id，也没找到这个会话：${target}（先 dws list 看看有什么）`)
-  const name = isTaskId(target) ? "" : target
-  log(`切到任务 ${id}${name ? `（会话 ${name}）` : ""}……`)
-  await session.use(id, { name })
-  const s = await session.convStatus(id)
+  const r = await resolveTarget({ book, session }, target)
+  log(`切到任务 ${r.id}${whereFrom(r)}……`)
+  await session.use(r.id, { name: r.from === "local" ? r.name : "" })
+  const s = await session.convStatus(r.id)
   say(
     [
-      `已切到任务 ${id}：${s.streaming ? "还在生成" : s.finished ? "已跑完" : "还没开始"}`,
+        `已切到任务 ${r.id}${r.title ? `「${r.title}」` : ""}：${s.streaming ? "还在生成" : s.finished ? "已跑完" : "还没开始"}`,
       `  最近回复 ${s.chars} 字${s.head ? `：${s.head.slice(0, 80)}` : ""}`,
-      `  看内容：dws info ${id}`,
+      `  看内容：dws info ${r.id}`,
     ].join("\n")
   )
 }
@@ -304,22 +323,14 @@ async function cmdArchive() {
   const target = pos[0]
   if (!target) throw Error("用法：dws archive <任务id|会话名>")
   const { cfg, book, session } = ctx()
-  let id, name = ""
-  if (isTaskId(target)) {
-    id = taskIdOf(target)
-  } else {
-    const s = book.session(target)
-    if (!s?.convId) throw Error(`不是任务 id，也没找到这个会话：${target}（先 dws list 看看有什么）`)
-    id = s.convId
-    name = target
-  }
+  const tgt = await resolveTarget({ book, session }, target)
   const dir = path.join(path.dirname(cfg?.stateFile ?? ".dws/state.json"), "archives")
-  log(`归档任务 ${id}${name ? `（会话 ${name}）` : ""}……`)
-  const r = await session.archive(id, { name, dir })
+  log(`归档任务 ${tgt.id}${whereFrom(tgt)}……`)
+  const r = await session.archive(tgt.id, { name: tgt.from === "local" ? tgt.name : "", dir })
   say(
     [
       r.file ? `对话已存档：${r.file}（${r.messages} 条消息）` : `对话未落盘`,
-      `豆包窗口里的任务 ${id} 已归档收起`,
+      `豆包窗口里的任务 ${tgt.id} 已归档收起`,
       r.title ? `标题：${r.title}` : "",
     ]
       .filter(Boolean)
@@ -331,18 +342,10 @@ async function cmdStop() {
   const target = pos[0]
   if (!target) throw Error("用法：dws stop <任务id|会话名>")
   const { book, session } = ctx()
-  let id, name = ""
-  if (isTaskId(target)) {
-    id = taskIdOf(target)
-  } else {
-    const s = book.session(target)
-    if (!s?.convId) throw Error(`不是任务 id，也没找到这个会话：${target}`)
-    id = s.convId
-    name = target
-  }
-  log(`停止任务 ${id}${name ? `（会话 ${name}）` : ""}……`)
-  const r = await session.stop(id, { name })
-  say(r.stopped ? `任务 ${id} 已中断（点了「结束任务」）` : `任务 ${id} 没在跑，无需停止`)
+  const tgt = await resolveTarget({ book, session }, target)
+  log(`停止任务 ${tgt.id}${whereFrom(tgt)}……`)
+  const r = await session.stop(tgt.id, { name: tgt.from === "local" ? tgt.name : "" })
+  say(r.stopped ? `任务 ${tgt.id} 已中断（点了「结束任务」）` : `任务 ${tgt.id} 没在跑，无需停止`)
 }
 
 async function cmdSteer() {
@@ -351,32 +354,33 @@ async function cmdSteer() {
   const { book, session } = ctx()
   const text = (await promptOf()) || pos.slice(1).join(" ")
   if (!text) throw Error("要追加的内容为空")
-  let id = isTaskId(target) ? taskIdOf(target) : book.session(target)?.convId
-  if (!id) throw Error(`不是任务 id，也没找到这个会话：${target}`)
-  log(`向任务 ${id} 追加指令（Command+Enter，不打断当前任务）……`)
-  const r = await session.convSteer(id, text)
-  printJson({ ok: true, convId: id, sends: r.sends, note: "已追加，任务继续跑" })
+  const tgt = await resolveTarget({ book, session }, target)
+  log(`向任务 ${tgt.id}${whereFrom(tgt)} 追加指令（Command+Enter，不打断当前任务）……`)
+  const r = await session.convSteer(tgt.id, text)
+  printJson({ ok: true, convId: tgt.id, title: tgt.title || undefined, sends: r.sends, note: "已追加，任务继续跑" })
 }
 
 async function cmdStatus() {
   const { book, session } = ctx()
   const target = pos[0]
-  if (target && isTaskId(target)) {
-    const id = taskIdOf(target)
-    const s = await session.convStatus(id)
+  if (target) {
+    const tgt = await resolveTarget({ book, session }, target)
+    const s = await session.convStatus(tgt.id)
     say(
       [
-        `任务 ${id}：${s.streaming ? "正在生成" : s.finished ? "已跑完" : "还没开始"}`,
+        `任务 ${tgt.id}${tgt.title && tgt.from !== "local" ? `「${tgt.title}」` : ""}：${
+          s.streaming ? "正在生成" : s.finished ? "已跑完" : "还没开始"
+        }`,
         `  回复长度 ${s.chars} 字${s.error ? `，错误：${s.error}` : ""}${s.status ? `，状态 ${s.status}` : ""}`,
         s.head ? `  最近回复：${s.head.slice(0, 100)}` : "",
-        `  看内容：dws info ${id}`,
+        `  看内容：dws info ${tgt.id}`,
       ]
         .filter(Boolean)
         .join("\n")
     )
     return
   }
-  const names = target ? [target] : book.names().length ? book.names() : []
+  const names = book.names().length ? book.names() : []
   if (!names.length) {
     say(`本地还没有会话记录。窗口里的任务用 dws list 看（按任务 id 查：dws status <任务id>）。`)
     return
@@ -429,10 +433,10 @@ async function cmdInfo() {
     say(`本地还没有会话记录；窗口里的任务用 dws list 查，按 id 看用 dws info <任务id>。`)
     return
   }
-  const info = isTaskId(target)
-    ? await session.convInfo(taskIdOf(target))
-    : await session.info(target)
-  const label = isTaskId(target) ? `任务 ${taskIdOf(target)}` : target
+  const tgt = await resolveTarget({ book, session }, target)
+  const info = await session.convInfo(tgt.id)
+  const label =
+    tgt.from === "local" ? `${tgt.name} · 任务 ${tgt.id}` : `任务 ${tgt.id}${tgt.title ? `「${tgt.title}」` : ""}`
   if (flags.json) {
     if (flags.out) {
       fs.writeFileSync(String(flags.out), JSON.stringify(info, null, 2) + "\n")
@@ -448,7 +452,7 @@ async function cmdInfo() {
     fs.writeFileSync(String(flags.out), text + "\n")
     return say(`已写入 ${flags.out}（${info.messages.length} 条消息）`)
   }
-  say(`# ${label}${isTaskId(target) ? "" : ` · 任务 ${info.convId}`} · ${info.messages.length} 条消息\n\n${text}`)
+  say(`# ${label} · ${info.messages.length} 条消息\n\n${text}`)
 }
 
 async function cmdSend() {
@@ -458,29 +462,31 @@ async function cmdSend() {
   const text = (await promptOf()) || pos.slice(1).join(" ")
   if (!text) throw Error("要发的内容为空")
 
-  if (isTaskId(target)) {
-    const id = taskIdOf(target)
-    log(`续任务 ${id}……`)
-    const r = await session.convSend(id, text)
+  const tgt = await resolveTarget({ book, session }, target)
+
+  if (tgt.from === "local") {
+    const handoff = isTruthy(flags.handoff, true)
+      ? `（接续 dws 会话 ${tgt.name}：进展都在工作区的提交里，先 git log / git status 看一眼再动手。）`
+      : ""
+    log(`续会话 ${tgt.name}（任务 ${tgt.id}）……`)
+    const r = await session.send(tgt.name, text, { handoff })
     printJson({
       ok: true,
-      convId: r.convId,
+      session: tgt.name,
+      reattached: r.reattached,
+      convId: r.reply?.convId ?? tgt.id,
       finished: !!r.reply?.finished,
       chars: (r.reply?.text ?? "").length,
     })
     return
   }
 
-  if (!book.session(target)) throw Error(`本地没有这个会话：${target}；窗口里的任务按 id 发：dws send <任务id> "<文字>"`)
-  const handoff = isTruthy(flags.handoff, true)
-    ? `（接续 dws 会话 ${target}：进展都在工作区的提交里，先 git log / git status 看一眼再动手。）`
-    : ""
-  log(`续会话 ${target}……`)
-  const r = await session.send(target, text, { handoff })
+  log(`续任务 ${tgt.id}${whereFrom(tgt)}……`)
+  const r = await session.convSend(tgt.id, text)
   printJson({
     ok: true,
-    reattached: r.reattached,
-    convId: r.reply?.convId ?? book.session(target)?.convId,
+    convId: r.convId,
+    title: tgt.title || undefined,
     finished: !!r.reply?.finished,
     chars: (r.reply?.text ?? "").length,
   })
