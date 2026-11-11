@@ -13,10 +13,12 @@ doubao-bot/
 ├── dws/                  # dws 包：bin/dws.mjs、src/、test/、README、package.json
 ├── foreman/              # foreman 包：bin/foreman.mjs、src/、test/、README、package.json
 ├── adapters/gitea/       # opencli 的 gitea 站点适配器源码（22 条命令）
-├── skills/               # dws / foreman / gitea-opencli 三个技能
+├── skills/               # dws / foreman / gitea-opencli / workflow 四个技能
 ├── scripts/link-adapter.sh
 └── package.json          # 只有 test / link:adapter 两个脚本，不放任何 CLI
 ```
+
+技能与链路的对应：`dws` 只管会话、`gitea-opencli` 只管工单读写、`foreman` 管串联、`workflow` 写整条链路（选单→worktree→派活→验收→PR→通知调用方）。
 
 三个工具互不代偿：dws 不碰工单和 PR，opencli 不碰豆包会话，herdr 只管 worktree，
 串联只发生在 `foreman` 里。
@@ -25,7 +27,7 @@ doubao-bot/
 
 - **命令**：`dws`、`foreman` 各自 `npm link`，改源码立即生效
   （`cd dws && npm link`；`cd foreman && npm link`）。
-- **技能**：`.user_skills/{dws,foreman,gitea-opencli}` 都是指向 `skills/*` 的软链。
+- **技能**：`.user_skills/{dws,foreman,gitea-opencli,workflow}` 都是指向 `skills/*` 的软链。
 - **gitea 适配器**：`~/.opencli/clis/gitea` 必须保持**真目录**（opencli 的发现逻辑
   只扫 `entry.isDirectory()`，目录整体软链会让整条 `gitea` 命令消失），里面的 `.js`
   逐个软链到 `adapters/gitea`。新增/删除适配器文件后跑一次：

@@ -1,6 +1,6 @@
 ---
 name: gitea-opencli
-description: 通过 opencli 浏览器自动化操作内网 Gitea（http://106.54.199.229:3000，仓库 yyzl/win-ai-harness）。当用户给出该域名下的任意链接（/pulls/N、/issues/N、/src/…、仓库首页）、或提到 win-ai-harness 的工单/PR 编号、或要求建单、看单、评论、打标签、指派、合并/关闭 PR 时使用。看到 106.54.199.229:3000 的链接即直接执行对应命令，不要反问用户，也不要用 web_fetch/curl 抓页面（私有库会返回 404）。
+description: 通过 opencli 浏览器自动化操作内网 Gitea（http://106.54.199.229:3000，仓库 yyzl/win-ai-harness）。当用户给出该域名下的任意链接（/pulls/N、/issues/N、/src/…、仓库首页）、或提到 win-ai-harness 的工单/PR 编号、或要求建单、看单、评论、打标签、指派、合并/关闭 PR 时使用。看到 106.54.199.229:3000 的链接即直接执行对应命令，不要反问用户，也不要用 web_fetch/curl 抓页面（私有库会返回 404）。它只负责读写，接单编排见 foreman、整条链路见 workflow。
 ---
 
 # Gitea（内网 106.54.199.229:3000）

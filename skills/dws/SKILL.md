@@ -1,6 +1,6 @@
 ---
 name: dws
-description: 驱动 dws（豆包会话 CLI，项目 doubao-bot）：给豆包桌面端开会话、发指令、查/取会话信息、续说、打断、归档。当用户提到 dws、doubao-bot、给豆包会话派活、看某条会话跑到哪、续会话/打断会话，或遇到 dws 报 app_busy、豆包没登录、status 说不在当前窗口时使用。dws 只管豆包会话，不接工单、不碰 PR/git 远端；要自动接单请用 foreman。
+description: 驱动 dws（豆包会话 CLI，项目 doubao-bot）：给豆包桌面端开会话、发指令、查/取会话信息、续说、打断、归档。当用户提到 dws、doubao-bot、给豆包会话派活、看某条会话跑到哪、续会话/打断会话，或遇到 dws 报 app_busy、豆包没登录、status 说不在当前窗口时使用。dws 只管豆包会话，不接工单、不碰 PR/git 远端；要自动接单请用 foreman，整条链路（选单→worktree→派活→验收→PR→通知调用方）见 workflow。
 ---
 
 # dws：把豆包会话当成可脚本化执行器
