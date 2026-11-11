@@ -9,8 +9,15 @@
 | `opencli gitea` | `adapters/gitea/` | 内网 Gitea 读写（复用 Chrome 登录态） |
 
 技能在 `skills/`：`dws`、`foreman`、`gitea-opencli`。skill root 下的同名目录都是
-指向这里的**软链**，改这里就等于改技能；`~/.opencli/clis/gitea` 同样软链到
-`adapters/gitea`，改适配器立刻生效。
+指向这里的**软链**，改这里就等于改技能。
+
+gitea 适配器是**文件级软链**：`~/.opencli/clis/gitea` 必须保持真目录（opencli 的发现
+逻辑只扫 `entry.isDirectory()`，目录整体软链会让整条 `gitea` 命令消失），里面的 `.js`
+逐个软链到 `adapters/gitea`。克隆或新增/删除适配器文件后跑一次：
+
+```bash
+bash scripts/link-adapter.sh     # 建文件软链 + 让适配器 import 能解析到全局 opencli 包
+```
 
 `dws` 与 `foreman` 都 `npm link` 成了全局命令，源码改动不需要重装。
 

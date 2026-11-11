@@ -12,8 +12,10 @@ opencli 复用 **Chrome 已登录会话**做页面自动化，无需 token。统
 bash "$SKILL_DIR/scripts/gitea.sh" pr-view 217 --repo yyzl/win-ai-harness
 ```
 
-适配器源码在 `~/Documents/workspace/doubao-bot/adapters/gitea`，`~/.opencli/clis/gitea`
-是指向它的软链——改适配器就直接改仓库里的文件，`opencli` 立刻生效。
+适配器源码在 `~/Documents/workspace/doubao-bot/adapters/gitea`；`~/.opencli/clis/gitea` 是真目录，
+里面每个 `.js` 都软链回仓库（opencli 的发现逻辑只认真目录，目录整体软链会让 gitea 命令整条消失）。
+改适配器直接改仓库里的文件，`opencli` 下次调用立刻生效；新增/删除文件后跑一次
+`bash ~/Documents/workspace/doubao-bot/scripts/link-adapter.sh` 补链。
 
 ## URL → 命令路由
 
