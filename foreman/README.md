@@ -71,7 +71,7 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
       "name": "win-ai-harness",
       "repo": "yyzl/win-ai-harness",
       "dir": "~/Documents/workspace/win-ai-harness",
-      "base": "dev",
+      "base": "sit-20261126",
       "verify": ["mvn -q -DskipTests=false test"]
     }
   ]
@@ -80,6 +80,7 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 
 要点：
 
+- **本工程基线统一 `sit-20261126`**，不要用 `dev`：分支、worktree、验收的 `origin/<base>..HEAD` 都按它算。
 - **`pickup.labelIds` 必须用数字 id，别用名字**。opencli 的列表接口不回 labels，
   按名字配会静默捞 0 条；`label-list` 能查名→id（`ready-for-agent` 当前是 5）。
 - 配了 `labelIds` 后不再拿名字做二次过滤（列表里本来就没有 labels）。
