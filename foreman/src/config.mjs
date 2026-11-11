@@ -19,7 +19,10 @@ export const DEFAULTS = {
     labelIds: [],
     labels: [],
     excludeLabels: [...DEFAULT_EXCLUDE],
-    onlyUnassigned: true,
+    onlyUnassigned: false,
+    // 接单优先级三档：我的（作者是我）→ 无人认领 → 他人。改数组即可调整先后。
+    me: "233151",
+    priority: ["mine", "unassigned", "others"],
     order: "oldest",
   },
   merge: { enabled: false, style: "merge", deleteBranch: true },

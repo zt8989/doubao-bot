@@ -5,6 +5,8 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { spawn } from "node:child_process"
 import { expandHome, parseArgs, sleep, truthy } from "../src/util.mjs"
+
+const strFlag = (v) => (v === undefined || v === null || v === true || v === false ? "" : String(v))
 import { loadConfig } from "../src/config.mjs"
 import { Book } from "../src/book.mjs"
 import { DwsDriver } from "../src/dwsdrv.mjs"
@@ -25,6 +27,9 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman watch poll [-c] [--no-service]
   foreman pr list [-c] [--no-service]
   foreman pr poll [-c] [--no-service]
+  foreman pr open --repo R --base <基线> --head <分支> --title <标题> [--body <正文>] [--issue <单号>]
+  foreman issue comment <N> --repo R --body <正文>
+  foreman issue close <N> --repo R
   foreman run   [--once] [--dry-run] [--repo <名字|owner/name>] [--every <秒>] [--notify <会话id|标题>] [--no-notify] [-c <配置>]
   foreman tasks [--json]
   foreman retry <仓库名|owner/name> <工单号> [-c <配置>]
@@ -38,6 +43,8 @@ const HELP = `foreman — 接单编排 + 常驻服务
   watch list/rm/poll   看登记 / 删一条 / 立刻跑一轮（取证排障用）
   pr list     看 PR 监听账本（哪些 PR 见过/已通知）
   pr poll     立刻扫一轮 PR（作者不是 233151 的报给最早登记的调用方）
+  pr open     建 PR（唯一入口：agent 也走它，账本/控制台才记得到）
+  issue comment|close   评论/关单（同上，走服务记账）
   --no-service  跳过自动握手与拉起（逃生口）
 
 run 现在只派活：建 worktree → dws 开会话派活 → 记账 → 登记监听 → 返回 dispatched。
@@ -209,10 +216,48 @@ async function cmdPr(pos, flags) {
     const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "pr poll" }, 300000)
     return out({ ok: true, ...r })
   }
-  throw new Error(`未知 pr 子命令：${sub}（list|poll）`)
+  if (sub === "open") {
+    const repo = strFlag(flags.repo)
+    const base = strFlag(flags.base)
+    const head = strFlag(flags.head)
+    const title = strFlag(flags.title)
+    if (!repo || !base || !head || !title) throw new Error("用法：foreman pr open --repo R --base sit-20261126 --head <分支> --title <标题> [--body <正文>] [--issue <单号>]")
+    const r = await callRaw(resolvePort(cfg), {
+      id: "cli",
+      cmd: "pr open",
+      repo, base, head, title,
+      body: strFlag(flags.body),
+      issue: Number(strFlag(flags.issue)) || 0,
+    }, 300000)
+    if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
+    return out({ ok: true, ...r })
+  }
+  throw new Error(`未知 pr 子命令：${sub}（list|poll|open）`)
 }
 
 // ---- 原有命令 ----
+
+async function cmdIssue(pos, flags) {
+  const cfg = loadConfig(flags.config)
+  const sub = pos.shift()
+  const repo = strFlag(flags.repo)
+  const number = Number(pos[0] ?? strFlag(flags.number)) || 0
+  if (!sub) throw new Error("用法：foreman issue comment <N> --repo R --body <正文> | foreman issue close <N> --repo R")
+  if (!repo || !number) throw new Error("issue 子命令需要 --repo 与工单号")
+  if (sub === "comment") {
+    const body = strFlag(flags.body) || pos.slice(1).join(" ")
+    if (!body.trim()) throw new Error("issue comment 需要 --body <正文>")
+    const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "issue comment", repo, number, body }, 300000)
+    if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
+    return out({ ok: true, ...r })
+  }
+  if (sub === "close") {
+    const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "issue close", repo, number }, 300000)
+    if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
+    return out({ ok: true, ...r })
+  }
+  throw new Error(`未知 issue 子命令：${sub}（comment|close）`)
+}
 
 async function cmdRun(pos, flags) {
   const cfg = loadConfig(flags.config)
@@ -396,6 +441,8 @@ async function main() {
       return cmdWatch(pos, flags)
     case "pr":
       return cmdPr(pos, flags)
+    case "issue":
+      return cmdIssue(pos, flags)
     case "run":
       return cmdRun(pos, flags)
     case "tasks":

@@ -66,6 +66,18 @@ git log --oneline <base>..<head>   # 空 = 0 提交
 典型成因：**同一分支开了两次 PR**，先合的把提交带进目标分支，后开的自然无可合并。
 处置：关闭重复单 + 评论写「重复于 #X，分支已由 #X 合入 <base>」。
 
+## 写操作收口（重要）
+
+在 agent / 编排链路里，PR 与工单的**写**操作必须走 foreman，不要直接 `opencli gitea pr|issue-comment|close`：
+
+```bash
+foreman pr open --repo R --base sit-20261126 --head <分支> --title "…" --body "…" --issue N
+foreman issue comment <N> --repo R --body "…"
+foreman issue close <N> --repo R
+```
+
+直接写 Gitea 会让 foreman 的账本与 SQLite 控制台统计断档、工作流状态不流转。opencli 的写命令只用于人工兜底（例如清理重复单、补标签）。
+
 ## 执行注意
 
 - **耗时**：每条 20–40s（要开浏览器）。用 `run_in_background: true` + `TaskOutput(block=true, timeout=120000)`，别用 15s 前台等待。

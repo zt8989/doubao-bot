@@ -165,6 +165,9 @@ foreman run --no-notify          # 这一轮不登记监听，因此不会有通
 foreman tasks                    # 每条工单到哪一步、卡在哪
 foreman pr poll                  # 立刻扫一轮 PR（别人的单报给最早登记的调用方）
 foreman pr list                  # 看 PR 监听账本
+foreman pr open --repo R --base sit-20261126 --head <分支> --title "…" --body "…" --issue N   # 建 PR（唯一入口，记账+落库）
+foreman issue comment <N> --repo R --body "…"   # 评论工单（记账）
+foreman issue close <N> --repo R                # 关单（记账）
 foreman retry win-ai-harness 255 # 人工处理完，放回队列（attempts 清零）
 foreman doctor                   # 自检：dws/opencli/herdr/仓库基线
 foreman doctor --start            # 额外读一次豆包窗口状态（会连窗口，不新建任务）
@@ -232,7 +235,9 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 - **`pickup.labelIds` 必须用数字 id，别用名字**。opencli 的列表接口不回 labels，
   按名字配会静默捞 0 条；`label-list` 能查名→id（`ready-for-agent` 当前是 5）。
 - 配了 `labelIds` 后不再拿名字做二次过滤（列表里本来就没有 labels）。
-- `merge.enabled` 默认 **false**：只开 PR 不合并，状态停在 `pr-open`。
+- `merge.enabled` 默认 **false**：只开 PR 不合并，状态停在 `pr-open`。设为 `true` 即自动合并，
+  合并由**编排自己**执行（`merge.by: foreman`，默认）：服务在会话 `done` + 带 PR + 自证非空时直接 `pr-merge` + `close`，
+  每张 PR 只合一次（账本 `mergeAsk` 记 `merged`/`failed`），冲突只记录并通知、不 force merge。
 - **通知默认开、且只有常驻服务这一条路**：会话跑完后，由服务用 `dws send` 把「哪条单 + 结论类别 + 分支 + PR 链接（有则带）」
   回给登记的通知目标——默认取 `notify.session`（`auto` 时取环境变量 `MCP_VM_CONVERSATION_ID`，
   也可以写成别的会话 id 或侧边栏标题）。run 自己不发通知。
@@ -259,7 +264,8 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 
 ## 边界
 
-- 会话只负责"在 worktree 里改 + 本地提交"，边界写进首句提示词；push/PR/合并/关单不在 run 里自动做（`verify`/`publish` 代码保留但没接线）。
+- 会话负责"在 worktree 里改 + 自测 + `git push` + `foreman pr open` 开 PR"，边界写进首句提示词；PR / 工单的写操作只走 foreman（`pr open`、`issue comment|close`），直接 `opencli gitea` 写会让账本与控制台统计断档。
+- 合并由服务在 `merge.enabled: true` 时执行（`merge.by: foreman`，默认），会话不合并；`verify` / `publish` 代码保留但没接线。
 - 不做 force merge：合并失败就停下，工单留言交人。
 - 豆包是单实例：用户自己开着豆包时 dws 会报 `app_busy`，整轮终止（不逐条重试），让对方 ⌘Q 后再跑。
 - 用户正在用的工作区一行不动：所有改动都落在 worktree 里。

@@ -73,12 +73,14 @@ export class ConsoleStore {
     this.file = file
     this.db = new DatabaseSync(file)
     this.db.exec(SCHEMA)
+    // 老库补列：接单派给了哪个会话，统计要靠它。
+    try { this.db.exec("ALTER TABLE tasks ADD COLUMN agent TEXT DEFAULT ''") } catch {}
 
     this.q = {
       upsertTask: this.db.prepare(`
-        INSERT INTO tasks (key, repo, number, title, url, state, branch, worktree, attempts, note,
+        INSERT INTO tasks (key, repo, number, title, url, state, branch, worktree, attempts, note, agent,
                            first_seen_at, last_seen_at, last_update_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(key) DO UPDATE SET
           title          = excluded.title,
           url            = excluded.url,
@@ -87,6 +89,7 @@ export class ConsoleStore {
           worktree       = excluded.worktree,
           attempts       = excluded.attempts,
           note           = excluded.note,
+          agent          = excluded.agent,
           last_seen_at   = excluded.last_seen_at,
           last_update_at = excluded.last_update_at
       `),
@@ -139,6 +142,7 @@ export class ConsoleStore {
         it.worktree || "",
         Number(it.attempts) || 0,
         it.note || "",
+        it.agent || "",
         it.updatedAt || at,
         at,
         it.updatedAt || at
@@ -214,6 +218,7 @@ export class ConsoleStore {
         worktree: r.worktree,
         attempts: r.attempts,
         note: r.note,
+        agent: r.agent || "",
         updatedAt: r.last_update_at,
         updatedAtClock: clockOf(r.last_update_at),
         firstSeenClock: clockOf(r.first_seen_at),

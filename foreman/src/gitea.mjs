@@ -47,6 +47,7 @@ export async function listIssues(repo, { state = "open", label = "", page = 1 } 
     state: x.state ?? "",
     labels: (x.labels ?? []).map((l) => (typeof l === "string" ? l : l.name)).filter(Boolean),
     assignees: (x.assignees ?? []).map((a) => (typeof a === "string" ? a : a.name ?? a.username)).filter(Boolean),
+    author: x.author?.name ?? x.author?.username ?? x.creator?.name ?? x.creator ?? "",
     url: x.url ?? "",
     createdAt: x.createdAt ?? x.created_at ?? "",
   }))
@@ -102,6 +103,7 @@ export async function listPulls(repo, { state = "open", page = 1 } = {}) {
     author: x.author ?? null,
     labels: (x.labels ?? []).map((l) => (typeof l === "string" ? l : l.name)).filter(Boolean),
     assignees: (x.assignees ?? []).map((a) => (typeof a === "string" ? a : a.name ?? a.username)).filter(Boolean),
+    author: x.author?.name ?? x.author?.username ?? x.creator?.name ?? x.creator ?? "",
     url: x.url ?? "",
     createdAt: x.createdAt ?? x.created_at ?? "",
     updatedAt: x.updatedAt ?? x.updated_at ?? "",

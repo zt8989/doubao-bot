@@ -9,7 +9,7 @@ import { Book } from "./book.mjs"
 import { parseResult } from "./prompts.mjs"
 import { notifyTarget, shouldNotify, notifyText } from "./orchestrator.mjs"
 import { prWatchOnce, prWatchTarget } from "./prwatch.mjs"
-import { listPulls } from "./gitea.mjs"
+import { listPulls, mergePr, closeIssue, createPr, commentIssue } from "./gitea.mjs"
 import { ConsoleStore } from "./console.mjs"
 import { startConsoleHttp } from "./consolehttp.mjs"
 import { fileURLToPath } from "node:url"
@@ -163,9 +163,38 @@ export function notifyDecision({ cfg, watcher, book, env = process.env, result }
     branch,
     pr,
     prUrl,
+    merged: !!result?.merged,
+    mergeError: result?.mergeError || "",
     reason: result?.summary || result?.question || "",
   }
   return { send: true, target, event, reason: "", text: notifyText(issueLike, outLike) }
+}
+
+// done + 带 PR + 有自证时，由编排（foreman 自己）合并：不再让执行会话去合。
+export function mergeDecision({ cfg, watcher, book, result }) {
+  const merge = cfg?.merge ?? {}
+  if (merge.enabled !== true) return { send: false, reason: "disabled" }
+  if ((merge.by ?? "foreman") !== "foreman") return { send: false, reason: `by-${merge.by}` }
+  if (result?.status !== "done") return { send: false, reason: "not-done" }
+  const pr = Number(result.pr) || 0
+  if (!pr) return { send: false, reason: "no-pr" }
+  // 没有自证就不自动合：测试没跑过/没写结果的，交给人看。
+  if (!String(result.tests ?? "").trim()) return { send: false, reason: "no-self-test" }
+  const repo = watcher?.repo || String(watcher?.issueKey ?? "").split("#")[0]
+  if (!repo) return { send: false, reason: "no-repo" }
+  const key = `${repo}#${pr}`
+  if (book?.mergeAsk?.[key]) return { send: false, key, reason: "already-asked" }
+  const number = watcher?.number ?? (Number(String(watcher?.issueKey ?? "").split("#")[1]) || null)
+  return {
+    send: true,
+    key,
+    repo,
+    pr,
+    issueNumber: number,
+    prUrl: result.prUrl ?? "",
+    style: merge.style ?? "merge",
+    deleteBranch: merge.deleteBranch !== false,
+  }
 }
 
 // ---- 服务进程 ----
@@ -210,7 +239,7 @@ export function singleInstanceGuard(pidFile) {
 // 起服务：HTTP 单通道（CLI 的 RPC + 控制台页面同一个端口），端口写到文件里给 CLI 读。
 // book 参数只用于初始加载，poll/write 时一律 new Book 重开。
 // gitea 只在 PR 监听里用，测试可直接注入假的 { listPulls }。
-export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea = { listPulls } }) {
+export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea = { listPulls, mergePr, closeIssue, createPr, commentIssue } }) {
   const paths = servicePaths(cfg)
   fs.mkdirSync(path.dirname(paths.pidFile), { recursive: true })
   fs.mkdirSync(path.dirname(paths.logFile), { recursive: true })
@@ -394,7 +423,7 @@ export async function prPollOnce(ctx) {
 
 // 跑一轮：现读 book → 对每个 watcher 跑 dws.status → 该通知就 dws.info + dws.notify + 落 notified。
 export async function pollOnce(ctx) {
-  const { state, cfg, dws, log } = ctx
+  const { state, cfg, dws, log, gitea } = ctx
   if (state.polling) return { checked: 0, settled: 0, notified: 0, skipped: "busy" }
   state.polling = true
   const out = { checked: 0, settled: 0, notified: 0 }
@@ -435,8 +464,36 @@ export async function pollOnce(ctx) {
         log(`dws info ${w.target} 失败：${e.message}`)
       }
 
+      // 会话自己 push + 开 PR；合并由编排做（冲突/失败只记日志、不 force merge）。
+      const bookM = new Book(cfg.stateFile)
+      const md = mergeDecision({ cfg, watcher: w, book: bookM, result })
+      let merged = false
+      let mergeError = ""
+      if (md.send) {
+        try {
+          await gitea.mergePr(md.repo, md.pr, { style: md.style, deleteBranch: md.deleteBranch })
+          if (md.issueNumber) {
+            try { await gitea.closeIssue(md.repo, md.issueNumber) } catch (e) {
+              log(`合并后关单失败 ${md.repo}#${md.issueNumber}：${e.message}`)
+            }
+          }
+          bookM.markMergeAsked(md.key, { pr: md.pr, url: md.prUrl, status: "merged" })
+          merged = true
+          out.merged = (out.merged ?? 0) + 1
+          log(`已合并 ${md.repo}#${md.pr}（${md.key}）`)
+        } catch (e) {
+          mergeError = e.message
+          // 失败也记账：不 force merge，也不每轮重试同一张 PR。
+          bookM.markMergeAsked(md.key, { pr: md.pr, url: md.prUrl, status: "failed", error: e.message })
+          log(`合并失败 ${md.repo}#${md.pr}：${e.message}`)
+        }
+      } else if (md.reason && !["disabled", "already-asked"].includes(md.reason)) {
+        log(`跳过自动合并 ${w.target}：${md.reason}`)
+      }
+      const resultOut = result ? { ...result, merged, mergeError } : result
+
       const book2 = new Book(cfg.stateFile)
-      const nd = notifyDecision({ cfg, watcher: w, book: book2, env: process.env, result })
+      const nd = notifyDecision({ cfg, watcher: w, book: book2, env: process.env, result: resultOut })
       if (!nd.send) {
         log(`通知跳过 ${w.target}：${nd.reason}`)
         continue
@@ -500,6 +557,67 @@ export async function handleRequest(ctx, req) {
       port: ctx.state.port ?? null,
       portFile: ctx.cfg.service?.http?.portFile ?? "",
     })
+  }
+
+  // PR / 工单写操作收口到 foreman：agent 只调这几个，账本与控制台才有数据。
+  if (cmd === "pr open") {
+    const repo = String(req.repo ?? "").trim()
+    const base = String(req.base ?? "").trim()
+    const head = String(req.head ?? "").trim()
+    const title = String(req.title ?? "").trim()
+    if (!repo || !base || !head || !title) return fail("bad-request", "pr open 需要 repo / base / head / title")
+    let pr
+    try {
+      pr = await ctx.gitea.createPr({ repo, base, head, title, body: String(req.body ?? "") })
+    } catch (e) {
+      return fail("gitea-error", e.message)
+    }
+    const number = Number(pr.number ?? 0)
+    if (!number) return fail("no-pr-number", `PR 建了但拿不到编号：${pr.url ?? ""}`)
+    const b = new Book(ctx.cfg.stateFile)
+    b.markPrSeen(`${repo}#${number}`, {
+      repo,
+      number,
+      title,
+      url: pr.url ?? "",
+      author: ctx.cfg.pickup?.me ?? "",
+      skipped: "self",
+    })
+    const issueNo = Number(req.issue ?? 0)
+    if (issueNo) b.setIssue(`${repo}#${issueNo}`, { state: "pr-open", title, pr: number, prUrl: pr.url ?? "", branch: head })
+    // 立刻落库，控制台不用等下一轮同步。
+    try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
+    ctx.log?.(`PR 建好 ${repo}#${number} ${pr.url ?? ""}（走 foreman）`)
+    return ok({ repo, pr: number, url: pr.url ?? "", issue: issueNo || null })
+  }
+
+  if (cmd === "issue comment") {
+    const repo = String(req.repo ?? "").trim()
+    const number = Number(req.number ?? 0)
+    const body = String(req.body ?? "")
+    if (!repo || !number || !body.trim()) return fail("bad-request", "issue comment 需要 repo / number / body")
+    try {
+      await ctx.gitea.commentIssue(repo, number, body)
+    } catch (e) {
+      return fail("gitea-error", e.message)
+    }
+    new Book(ctx.cfg.stateFile).setIssue(`${repo}#${number}`, { note: body.slice(0, 300) })
+    try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
+    return ok({ repo, number, commented: true })
+  }
+
+  if (cmd === "issue close") {
+    const repo = String(req.repo ?? "").trim()
+    const number = Number(req.number ?? 0)
+    if (!repo || !number) return fail("bad-request", "issue close 需要 repo / number")
+    try {
+      await ctx.gitea.closeIssue(repo, number)
+    } catch (e) {
+      return fail("gitea-error", e.message)
+    }
+    new Book(ctx.cfg.stateFile).setIssue(`${repo}#${number}`, { state: "done" })
+    try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
+    return ok({ repo, number, closed: true })
   }
 
   if (cmd === "status") {

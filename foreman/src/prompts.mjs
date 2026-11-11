@@ -20,8 +20,8 @@ export function kickoff({ repo, issue, worktree, branch, base, attempt = 1, last
   const rules = [
     `只在这个工作区里改：${worktree}`,
     `分支已经开好：${branch}（基线 origin/${base}）。不要切分支、不要 rebase、不要动别的目录。`,
-    `改完并在本工作区自测通过后：先 git push -u origin ${branch}，再用 opencli gitea pr --repo ${repo} --base ${base} --head ${branch} --title "fix(#${issue.number}): <一句话>" --body "<自证正文>" 开 PR；PR 正文写清改了啥、测试命令与结果、风险点。开完把 PR 号与链接填进 RESULT 的 pr / prUrl。`,
-    `自测没过就先别 push、别开 PR，按 status 交 RESULT 说明卡在哪。不要合并 PR、不要关闭工单、不要 force push、不要手改基线。`,
+    `改完并在本工作区自测通过后：先 git push -u origin ${branch}，再用 foreman pr open --repo ${repo} --base ${base} --head ${branch} --title "fix(#${issue.number}): <一句话>" --body "<自证正文>" --issue ${issue.number} 开 PR。PR 必须走 foreman（它记账、同步控制台），不要直接 opencli gitea pr；输出里的 pr 与 url 填进 RESULT 的 pr / prUrl。`,
+    `自测没过就先别 push、别开 PR，按 status 交 RESULT 说明卡在哪。工单评论/关单也只能用 foreman issue comment|close，不要直接 opencli gitea 写；合并由 foreman 做，你不要合。不要 force push、不要手改基线。`,
     `提交信息用中文，首行写 “fix(#${issue.number}): <一句话>”，正文写清改法与验证方式。`,
     `先读仓库里的 AGENTS.md / docs/agents/ 约定（如果有），按仓库自己的规矩来。`,
     `改完必须自己跑相关测试；跑不了就在 tests 里写清原因，不要假装跑过。`,
@@ -50,7 +50,7 @@ export function resume({ issue, attempt, failure = "" }) {
   return [
     `继续工单 #${issue.number}（第 ${attempt} 次尝试）。`,
     failure ? `上一次的问题：${failure}` : "上一次没有跑完，接着当前工作区状态继续，不要重做已完成的部分。",
-    `还是那条边界：只在这个工作区改；自测通过后自己 git push 并开 PR（--base <base>），把 PR 号/链接写进 RESULT；不合并、不关单、不 force push。`,
+    `还是那条边界：只在这个工作区改；自测通过后自己 git push + foreman pr open 开 PR（--base ${base} --issue ${issue.number}），把 PR 号/链接写进 RESULT；不合并、不直接调 opencli gitea 写、不 force push。`,
     ``,
     RESULT_SPEC,
   ].join("\n")

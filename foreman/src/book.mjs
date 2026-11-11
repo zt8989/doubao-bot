@@ -52,6 +52,27 @@ export class Book {
     return this.prSeen[key]
   }
 
+  // 已下发过“去合并”指令的 PR：{ "<repo>#<number>": { at, target, pr } }
+  get mergeAsk() {
+    return this.data.mergeAsk ?? (this.data.mergeAsk = {})
+  }
+
+  markMergeAsked(key, info = {}) {
+    this.reload()
+    const prev = this.mergeAsk[key] ?? {}
+    this.mergeAsk[key] = {
+      ...prev,
+      at: nowIso(),
+      target: info.target ?? prev.target ?? "",
+      pr: info.pr ?? prev.pr ?? null,
+      url: info.url ?? prev.url ?? "",
+      status: info.status ?? prev.status ?? "",
+      error: info.error ?? prev.error ?? "",
+    }
+    this.save()
+    return this.mergeAsk[key]
+  }
+
   issue(key) {
     return this.issues[key] ?? null
   }

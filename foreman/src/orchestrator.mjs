@@ -44,6 +44,8 @@ export function notifyText(issue = {}, out = {}) {
   const lines = [`【foreman】${head}`, `状态：${out.state ?? "unknown"}`]
   if (out.branch) lines.push(`分支：${out.branch}`)
   if (out.pr) lines.push(`PR：#${out.pr}${out.prUrl ? ` ${out.prUrl}` : ""}`)
+  if (out.merged) lines.push(`合并：已合并 PR #${out.pr}`)
+  else if (out.mergeError) lines.push(`合并失败：${String(out.mergeError).slice(0, 200)}`)
   if (out.reason) lines.push(`原因：${String(out.reason).slice(0, 200)}`)
   return lines.join("\n")
 }
@@ -69,9 +71,20 @@ export function eligible(issues, repoCfg, cfg, book) {
   })
 }
 
-export function sortIssues(issues, order = "oldest") {
+// 三档：mine（作者是我）、unassigned（无人认领）、others（别人认领）。不同档先按 priority 排，同档按时间。
+export function bucketOf(issue = {}, me = "") {
+  if (me && String(issue.author ?? "") === String(me)) return "mine"
+  if (!(issue.assignees ?? []).length) return "unassigned"
+  return "others"
+}
+
+export function sortIssues(issues, order = "oldest", { me = "", priority = ["mine", "unassigned", "others"] } = {}) {
   const t = (x) => new Date(x.createdAt || 0).getTime()
-  return [...issues].sort((a, b) => (order === "newest" ? t(b) - t(a) : t(a) - t(b)))
+  const rank = (x) => {
+    const i = priority.indexOf(bucketOf(x, me))
+    return i < 0 ? priority.length : i
+  }
+  return [...issues].sort((a, b) => rank(a) - rank(b) || (order === "newest" ? t(b) - t(a) : t(a) - t(b)))
 }
 
 // 一轮：每个仓库各自捞、各自做，做完一条接一条。只派活，不等结果。
@@ -91,7 +104,7 @@ export async function runRound(ctx) {
       log(`拉 ${repoCfg.repo} 的工单失败，跳过这个仓库：${e.message}`)
       continue
     }
-    const pool = sortIssues(eligible(list, repoCfg, cfg, book), cfg.pickup.order)
+    const pool = sortIssues(eligible(list, repoCfg, cfg, book), cfg.pickup.order, { me: cfg.pickup.me, priority: cfg.pickup.priority })
     log(`${repoCfg.repo}：open ${list.length} 条，可接 ${pool.length} 条`)
 
     let count = 0
@@ -169,6 +182,7 @@ export async function handleIssue(ctx, repoCfg, summary) {
   const attempt = (prev.attempts ?? 0) + 1
   book.setIssue(key, {
     state: "working",
+    agent: name,
     issue: issue.number,
     title: issue.title,
     url: issue.url,
