@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url"
 import { loadConfig, ConfigError } from "../src/config.mjs"
 import { SessionBook, SessionManager, transcript, matchTask } from "../src/sessions.mjs"
 import { Doubao } from "../src/doubao.mjs"
-import { isTruthy, log, parseArgs, printJson } from "../src/util.mjs"
+import { isTruthy, log, parseArgs, printJson, selfConvIds } from "../src/util.mjs"
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const VERSION = JSON.parse(fs.readFileSync(path.join(HERE, "..", "package.json"), "utf8")).version
@@ -35,6 +35,9 @@ const HELP = `dws ${VERSION} —— 豆包会话 CLI（开启会话 / 会话状�
 会话名可以是本地记录的名字，也可以是豆包侧边栏里的任务标题：按标题精确匹配，
 其次唯一包含匹配；命中后命令输出里会写明实际操作的「任务 <id>」，多条重名则不猜、直接报错。
 
+自我保护：dws archive / dws stop 会拒绝操作「发出这条命令的会话自己」
+（从 MCP_VM_CONVERSATION_ID 等环境变量认出来），避免把自己归档或中断掉；确实要动就加 --force。
+
 边界：
   dws 只负责驱动豆包桌面端（开会话、发指令、读状态）。它不碰工单、不碰 PR、
   不碰 git 远端；这些由别的工具做。
@@ -57,10 +60,13 @@ const HELP_BY_CMD = {
   list: ["dws list", "列出豆包窗口里的全部工作任务 + 本地记录的会话。"],
   use: ["dws use <任务id|会话名>", "把豆包窗口切到那条任务。会切走用户当前的窗口，用户正在用时不要调。"],
   archive: [
-    "dws archive <任务id|会话名>",
-    "整段对话存到本地 archives/，并把豆包侧边栏里的任务归档收起。",
+    "dws archive <任务id|会话名> [--force]",
+    "整段对话存到本地 archives/，并把豆包侧边栏里的任务归档收起。目标是发出命令的会话自己时会被拒绝（防止把自己归档掉），确认要这么做加 --force。",
   ],
-  stop: ["dws stop <任务id|会话名>", "中断正在跑的任务（双击 Esc）；没在跑会如实说。"],
+  stop: [
+    "dws stop <任务id|会话名> [--force]",
+    "中断正在跑的任务（双击 Esc）；没在跑会如实说。目标是发出命令的会话自己时会被拒绝，确认要这么做加 --force。",
+  ],
   steer: [
     "dws steer <任务id|会话名> <文字>",
     "跑动中追加指令（Command+Enter），不打断当前任务。",
@@ -235,6 +241,17 @@ function whereFrom(r) {
   return ""
 }
 
+// 发出命令的这一侧自己是谁：豆包 side 里跑命令时环境变量带着当前会话 id，
+// 用来挡住「把自己归档/中断」这种误伤。终端里手跑时通常没有，只能靠人工判断。
+function guardSelf(tgt, action) {
+  if (flags.force) return
+  if (!selfConvIds().includes(tgt.id)) return
+  throw Error(
+    `拒绝${action}：任务 ${tgt.id}${tgt.title ? `「${tgt.title}」` : ""} 就是发出这条命令的会话自己。` +
+      `对它动手会把你正在用的窗口和上下文一起收掉；确认要这么做就加 --force。`
+  )
+}
+
 async function cmdProjects() {
   const { session } = ctx()
   const projects = (await session.windowProjects()) ?? []
@@ -324,6 +341,7 @@ async function cmdArchive() {
   if (!target) throw Error("用法：dws archive <任务id|会话名>")
   const { cfg, book, session } = ctx()
   const tgt = await resolveTarget({ book, session }, target)
+  guardSelf(tgt, "归档")
   const dir = path.join(path.dirname(cfg?.stateFile ?? ".dws/state.json"), "archives")
   log(`归档任务 ${tgt.id}${whereFrom(tgt)}……`)
   const r = await session.archive(tgt.id, { name: tgt.from === "local" ? tgt.name : "", dir })
@@ -343,6 +361,7 @@ async function cmdStop() {
   if (!target) throw Error("用法：dws stop <任务id|会话名>")
   const { book, session } = ctx()
   const tgt = await resolveTarget({ book, session }, target)
+  guardSelf(tgt, "中断")
   log(`停止任务 ${tgt.id}${whereFrom(tgt)}……`)
   const r = await session.stop(tgt.id, { name: tgt.from === "local" ? tgt.name : "" })
   say(r.stopped ? `任务 ${tgt.id} 已中断（点了「结束任务」）` : `任务 ${tgt.id} 没在跑，无需停止`)

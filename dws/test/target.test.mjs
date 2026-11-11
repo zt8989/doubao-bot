@@ -1,6 +1,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { matchTask } from "../src/sessions.mjs"
+import { selfConvIds } from "../src/util.mjs"
 
 const tasks = [
   { id: "38453052825833730", title: "委派Gitea工单" },
@@ -32,4 +33,20 @@ test("空标题与空列表都返回 null", () => {
 
 test("没有 title 字段的任务不会误命中", () => {
   assert.equal(matchTask([{ id: "12345678" }], "委派Gitea工单"), null)
+})
+
+test("从环境里认出发命令的会话自己", () => {
+  assert.deepEqual(selfConvIds({ MCP_VM_CONVERSATION_ID: "38453052825833730" }), ["38453052825833730"])
+})
+
+test("环境变量缺失或格式不对时返回空列表，不做自我拦截", () => {
+  assert.deepEqual(selfConvIds({}), [])
+  assert.deepEqual(selfConvIds({ MCP_VM_CONVERSATION_ID: "abc" }), [])
+})
+
+test("多个来源都给 id 时按顺序都收下", () => {
+  assert.deepEqual(
+    selfConvIds({ DWS_SELF_CONV_ID: "12345678", MCP_VM_CONVERSATION_ID: "23456789" }),
+    ["12345678", "23456789"]
+  )
 })

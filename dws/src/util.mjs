@@ -167,3 +167,12 @@ export function slugify(text, max = 32) {
     .toLowerCase()
   return ascii ? ascii.slice(0, max).replace(/-+$/g, "") : ""
 }
+
+// selfConvIds 从环境里认出「发出这条命令的会话自己」。
+// 在豆包侧边栏里让 agent 跑 dws 时，MCP_VM_CONVERSATION_ID 就是当前会话 id；
+// 终端里手跑通常没有这些变量，返回空数组（此时不做自我保护）。
+export function selfConvIds(env = process.env) {
+  return [env.DWS_SELF_CONV_ID, env.MCP_VM_CONVERSATION_ID, env.DOUBAO_CONVERSATION_ID]
+    .map((x) => String(x ?? "").trim())
+    .filter((x) => /^\d{8,}$/.test(x))
+}
