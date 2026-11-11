@@ -155,9 +155,11 @@ export const fill = (text) => js(`
 
 export const READ = js(`
   const c = counts();
+  const sends = $$("[data-testid=send_message]");
   const receives = $$("[data-testid=receive_message]");
   const r = message(receives[receives.length - 1]);
-  const base = { sends: c.sends, receives: c.receives, convId: convId() };
+  const lastSendId = sends.length ? String((message(sends[sends.length - 1]) || {}).message_id ?? "") : "";
+  const base = { sends: c.sends, receives: c.receives, convId: convId(), lastSendId };
   if (!r) return { ...base, reply: false };
   const { text, reasoning } = blocksOf(r);
   const ext = r.ext || {};
@@ -165,6 +167,18 @@ export const READ = js(`
     finished: ext.is_finish === "1" || !!(r.final_status && r.final_status.session),
     status: (r.final_status && r.final_status.session) || "", reason: ext.finish_reason_chat || "",
     usage: ext.context_window_usage || "", error: r.error_details ? JSON.stringify(r.error_details) : "" };
+`)
+
+// SIGNATURE 比 COUNTS 多带末条消息的 id：切任务时 URL 先变、消息列表后换，
+// 用签名变化 + 连续两读一致来判断「DOM 真的换到目标会话了」。
+export const SIGNATURE = js(`
+  const c = counts();
+  const ss = $$("[data-testid=send_message]");
+  const rs = $$("[data-testid=receive_message]");
+  const idOf = (el) => { const m = message(el); return m ? String(m.message_id ?? m.unique_id ?? "") : ""; };
+  return { ...c, convId: convId(),
+    lastSendId: ss.length ? idOf(ss[ss.length - 1]) : "",
+    lastReceiveId: rs.length ? idOf(rs[rs.length - 1]) : "" };
 `)
 
 export const COUNTS = js(`
@@ -413,7 +427,9 @@ export class Doubao {
         "doubao_new_task"
       )
     }
-    const baseline = await page.eval(COUNTS)
+    // baseline 要等 DOM 稳定再读：新建后消息列表还在换，读到旧会话的条数会让
+    // waitReply 判不出「发出去了」（长会话下尤其明显）。
+    const baseline = await this.stableCounts(page, signal)
     await sendText(page, prompt, signal)
     const reply = await this.waitReply({ baseline, signal, onUpdate })
     // 回读守卫：拿到的会话 id 必须与新建前不同，否则就是没切走。此时提示词很可能发进了
@@ -437,11 +453,51 @@ export class Doubao {
   // send 在当前这个工作任务里续一条消息（会话不换）。
   async send(text, { signal, onUpdate } = {}) {
     const page = await this.connect(signal)
-    const baseline = await page.eval(COUNTS)
+    const baseline = await this.stableCounts(page, signal)
     if (!baseline.convId) throw new DoubaoError("当前没有可续的任务，请先 dws open", "doubao_no_task")
     await sendText(page, text, signal)
     const reply = await this.waitReply({ baseline, signal, onUpdate })
     return { convId: reply.convId || baseline.convId, reply }
+  }
+
+  // sendAck 只确认「消息发出去了」，不等回复：通知这类只需要送达的场景用它，
+  // 不会因为对面迟迟不回复而把调用方拖到超时、进而重发一遍。
+  // 目标会话正在跑任务时走 Command+Enter 追加（不打断），空跑时用普通 Enter。
+  async sendAck(text, { signal } = {}) {
+    const page = await this.connect(signal)
+    const baseline = await this.stableCounts(page, signal)
+    if (!baseline.convId) throw new DoubaoError("当前没有可续的任务，请先 dws open", "doubao_no_task")
+    const n = await page.eval(fill(text))
+    if (n < 0) throw new DoubaoError("豆包的输入框没有找到", "doubao_ui")
+    signal?.throwIfAborted?.()
+    let running = {}
+    try {
+      running = await page.eval(RUNNING_STATE)
+    } catch {}
+    if (running?.stopBtn) {
+      // modifiers: 4 = Meta/Command（CDP 键盘事件修饰位），与 steer 同一条路。
+      await page.key("Enter", { code: "Enter", keyCode: 13, text: "\r", modifiers: 4 })
+    } else {
+      await page.key("Enter", { keyCode: 13, text: "\r" })
+    }
+    const until = Date.now() + 20000
+    while (Date.now() < until) {
+      await sleep(this.poll, signal)
+      let sig = null
+      try {
+        sig = await page.eval(SIGNATURE)
+      } catch (e) {
+        if (signal?.aborted) throw e
+        continue
+      }
+      // 长会话的消息列表是虚拟列表：新消息进来会挤掉一条，sends 不变，
+      // 所以按末条 send 的 message_id 判断，不看条数。
+      const sentNow = String(sig.lastSendId ?? "")
+      const sentBase = String(baseline.lastSendId ?? "")
+      if (sentNow && sentNow !== sentBase) return { convId: sig.convId || baseline.convId, sent: true }
+      if (Number(sig.sends) > Number(baseline.sends)) return { convId: sig.convId || baseline.convId, sent: true }
+    }
+    throw new DoubaoError("豆包没有把这条消息发出去", "doubao_ui")
   }
 
   async read(signal) {
@@ -488,9 +544,57 @@ export class Doubao {
   // goto 把窗口切到目标任务，返回已连接的页面；已在该任务上就不动。
   async goto(id, signal) {
     const page = await this.connect(signal)
+    const before = await page.eval(SIGNATURE).catch(() => null)
     const why = await page.eval(openTaskById(id))
     if (why) throw new DoubaoError(`切换任务失败：${why}`, "doubao_ui")
+    await this.settleConv(page, String(id), before, { signal })
     return page
+  }
+
+  // settleConv 等窗口真的把目标任务渲染出来。openTaskById 只等 URL 里出现 /chat/<id>，
+  // 而消息列表还要一拍才换：这期间读到的计数是上一个会话的，拿来当 baseline 就会
+  // 「消息其实已经发出去，却因为计数一直不增而报没发出去」。判据：签名相对切换前变了，
+  // 且连续两读一致。超时不算切任务失败，只是没等到稳定，交给调用方继续。
+  async settleConv(page, id, before, { signal, timeoutMs = 6000, pollMs = 200 } = {}) {
+    const start = Date.now()
+    const want = String(id)
+    const beforeKey = sigKey(before)
+    let prev = null
+    for (;;) {
+      let sig = null
+      try {
+        sig = await page.eval(SIGNATURE)
+      } catch (e) {
+        if (signal?.aborted) throw e
+      }
+      if (sig && String(sig.convId ?? "") === want) {
+        const key = sigKey(sig)
+        // 相对切换前没变化 = 列表还是旧会话（或空 DOM），不能当目标会话的计数。
+        const moved = !beforeKey || key !== beforeKey
+        if (moved && prev && sigKey(prev) === key) return sig
+        prev = sig
+      }
+      if (Date.now() - start > timeoutMs) return null
+      await sleep(pollMs, signal)
+    }
+  }
+
+  // stableCounts 读发送前的计数：连续两读一致才算数（DOM 正在重渲染时先等它停下来）。
+  // 最多约 800ms，正常情况下第二读就稳定。
+  async stableCounts(page, signal, { pollMs = 200, tries = 4 } = {}) {
+    let prev = null
+    for (let i = 0; i < tries; i++) {
+      let sig = null
+      try {
+        sig = await page.eval(SIGNATURE)
+      } catch (e) {
+        if (signal?.aborted) throw e
+      }
+      if (sig && prev && sigKey(prev) === sigKey(sig)) return sig
+      if (sig) prev = sig
+      await sleep(pollMs, signal)
+    }
+    return prev ?? { sends: 0, receives: 0, convId: "" }
   }
 
   // archive 把窗口侧边栏里的目标任务归档收起。
@@ -568,13 +672,26 @@ export class Doubao {
         if (Date.now() - start > 60000) throw e
         continue
       }
-      if (!(r.sends > baseline.sends)) {
+      // 「发出去了」不能只看条数：长会话的消息列表是虚拟列表，新消息进来会挤掉一条
+      // 老消息，sends 一直不变。改为看末条 send 的 message_id 有没有换。
+      const sentNow = String(r.lastSendId ?? "")
+      const sentBase = String(baseline.lastSendId ?? "")
+      const sent = (sentNow && sentNow !== sentBase) || Number(r.sends) > Number(baseline.sends)
+      if (!sent) {
+        // 条数比 baseline 还少：baseline 读自另一个会话（切任务时 DOM 还没换）。
+        // 消息已经按下 Enter 送出去了，把账本折叠到当前会话再继续判回复。
+        if (Number(r.sends) > 0 && Number(r.sends) < Number(baseline.sends)) {
+          baseline = { ...baseline, sends: Number(r.sends) - 1, receives: Number(r.receives ?? 0), lastSendId: sentNow }
+          continue
+        }
         if (Date.now() - start > 20000) {
           throw new DoubaoError("豆包没有把这条消息发出去", "doubao_ui")
         }
         continue
       }
-      if (!(r.receives > baseline.receives)) {
+      // 新回复同样按 message_id 判新鲜度，条数在虚拟列表下也可能不变。
+      const fresh = (r.id && String(r.id) !== String(baseline.lastReceiveId ?? "")) || Number(r.receives) > Number(baseline.receives)
+      if (!fresh) {
         if (Date.now() - start > 180000) {
           throw new DoubaoError("豆包三分钟没有回复", "doubao_timeout")
         }
@@ -617,6 +734,13 @@ async function sendText(page, text, signal) {
   signal?.throwIfAborted?.()
   await page.key("Enter", { keyCode: 13, text: "\r" })
 }
+
+// sigKey 把一页的快照压成一行，用来判断「两次读到的还是不是同一个会话的同一版 DOM」。
+export function sigKey(sig) {
+  if (!sig) return ""
+  return [sig.convId ?? "", sig.sends ?? 0, sig.receives ?? 0, sig.lastSendId ?? "", sig.lastReceiveId ?? ""].join("|")
+}
+
 
 function safeRead(file) {
   try {

@@ -78,11 +78,12 @@ export class DwsDriver {
   }
 
   // notify：把结果回给调用方会话。不带 handoff（不要往正文里塞接续说明），
-  // 超时也短——通知失败不该把一整轮拖住。
+  // 用 --no-wait 只确认送达：通知不需要对面的回复，等回复会白占轮询，
+  // 对面迟迟不回还会被判成超时失败、再补发一条（同一条 done 推两次就是这么来的）。
   async notify(name, text) {
     const tmp = writeTemp(text)
     try {
-      return await this.json(["send", name, "--file", tmp, "--handoff", "false"], { timeout: 180000 })
+      return await this.json(["send", name, "--file", tmp, "--handoff", "false", "--no-wait"], { timeout: 60000 })
     } finally {
       fs.rmSync(tmp, { force: true })
     }

@@ -10,7 +10,7 @@ import { Book } from "../src/book.mjs"
 import { DwsDriver } from "../src/dwsdrv.mjs"
 import { acquireLock, releaseLock, runRound, issueKey } from "../src/orchestrator.mjs"
 import { git, branchExists } from "../src/gitx.mjs"
-import { ensureService, callRaw, ServiceError } from "../src/svclient.mjs"
+import { ensureService, callRaw, ServiceError, resolvePort, portFileOf, readPortFile } from "../src/svclient.mjs"
 import { startServer, pingOnce } from "../src/service.mjs"
 
 const HELP = `foreman — 接单编排 + 常驻服务
@@ -93,8 +93,9 @@ async function cmdServe(pos, flags) {
   const log = logTo(cfg.service.logFile)
 
   // 已经有活的服务在跑？直接报告 already-running。
+  const probePort = readPortFile(portFileOf(cfg)) || Number(cfg.service?.http?.port) || 0
   try {
-    const r = await pingOnce(cfg.service.socket, 300)
+    const r = await pingOnce(probePort, 300)
     out({ ok: true, skipped: "already-running", pid: r.pid, info: r })
     return
   } catch {}
@@ -105,8 +106,10 @@ async function cmdServe(pos, flags) {
     while (Date.now() < deadline) {
       await sleep(200)
       try {
-        const r = await pingOnce(cfg.service.socket, 200)
-        out({ ok: true, started: true, pid: child.pid, info: r })
+        const port = readPortFile(portFileOf(cfg))
+        if (!port) continue
+        const r = await pingOnce(port, 200)
+        out({ ok: true, started: true, pid: child.pid, port, info: r })
         return
       } catch {}
     }
@@ -115,11 +118,26 @@ async function cmdServe(pos, flags) {
     process.exit(1)
   }
 
-  // 前台：起 socket 服务，跑轮询，等信号退出。
+  // 前台：起 HTTP 服务（RPC + 控制台），跑轮询，等信号退出。
   const book = new Book(cfg.stateFile)
   const dws = new DwsDriver({ bin: cfg.dws?.bin ?? "dws", mode: cfg.dws?.mode, model: cfg.dws?.model, log })
-  const { close } = await startServer({ cfg, book, dws, log })
-  log(`foreman 服务已起：pid=${process.pid} socket=${cfg.service.socket} pidfile=${cfg.service.pidFile}`)
+  let started
+  try {
+    started = await startServer({ cfg, book, dws, log })
+  } catch (e) {
+    if (e.code === "already-running") {
+      out({ ok: true, skipped: "already-running", error: e.message })
+      return
+    }
+    if (e.code === "port-in-use") {
+      process.stderr.write(`✗ foreman 服务没起来：${e.message}\n`)
+      process.stderr.write(`  改端口：配置 service.http.port，或删掉 ${portFileOf(cfg)} 后重试\n`)
+      process.exit(1)
+    }
+    throw e
+  }
+  const { close } = started
+  log(`foreman 服务已起：pid=${process.pid} http=${started.http} portFile=${started.portFile}`)
   let stopping = false
   const onSig = async (sig) => {
     if (stopping) return
@@ -134,13 +152,13 @@ async function cmdServe(pos, flags) {
 
 async function cmdPing(pos, flags) {
   const cfg = loadConfig(flags.config)
-  const r = await callRaw(cfg.service.socket, { id: "cli", cmd: "ping" }, 3000)
+  const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "ping" }, 3000)
   out({ ok: true, ...r })
 }
 
 async function cmdStatus(pos, flags) {
   const cfg = loadConfig(flags.config)
-  const r = await callRaw(cfg.service.socket, { id: "cli", cmd: "status" }, 3000)
+  const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "status" }, 3000)
   out({ ok: true, ...r })
 }
 
@@ -149,11 +167,11 @@ async function cmdWatch(pos, flags) {
   const sub = pos.shift()
   if (!sub) throw new Error("用法：foreman watch add|list|rm|poll ...")
   if (sub === "list") {
-    const r = await callRaw(cfg.service.socket, { id: "cli", cmd: "watch list" }, 3000)
+    const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "watch list" }, 3000)
     return out({ ok: true, ...r })
   }
   if (sub === "poll") {
-    const r = await callRaw(cfg.service.socket, { id: "cli", cmd: "poll" }, 60000)
+    const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "poll" }, 60000)
     return out({ ok: true, ...r })
   }
   if (sub === "add") {
@@ -167,13 +185,13 @@ async function cmdWatch(pos, flags) {
       repo: flags.repo && flags.repo !== true ? String(flags.repo) : "",
       number: flags.number && flags.number !== true ? Number(flags.number) : null,
     }
-    const r = await callRaw(cfg.service.socket, req, 3000)
+    const r = await callRaw(resolvePort(cfg), req, 3000)
     return out({ ok: true, ...r })
   }
   if (sub === "rm" || sub === "remove") {
     const target = pos.shift()
     if (!target) throw new Error("用法：foreman watch rm <会话id|标题>")
-    const r = await callRaw(cfg.service.socket, { id: "cli", cmd: "watch remove", target }, 3000)
+    const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "watch remove", target }, 3000)
     return out({ ok: true, ...r })
   }
   throw new Error(`未知 watch 子命令：${sub}（add|list|rm|poll）`)
@@ -184,11 +202,11 @@ async function cmdPr(pos, flags) {
   const sub = pos.shift()
   if (!sub) throw new Error("用法：foreman pr list|poll")
   if (sub === "list") {
-    const r = await callRaw(cfg.service.socket, { id: "cli", cmd: "pr list" }, 3000)
+    const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "pr list" }, 3000)
     return out({ ok: true, ...r })
   }
   if (sub === "poll") {
-    const r = await callRaw(cfg.service.socket, { id: "cli", cmd: "pr poll" }, 300000)
+    const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "pr poll" }, 300000)
     return out({ ok: true, ...r })
   }
   throw new Error(`未知 pr 子命令：${sub}（list|poll）`)

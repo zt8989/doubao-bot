@@ -29,11 +29,12 @@ foreman watch rm <会话id|标题>     # 取消登记
 foreman watch poll               # 立刻跑一轮（checked / settled / notified），取证补漏
 ```
 
-- **CLI 启动即握手**（除 `serve` / `help`）：任意子命令起来先连 socket；通了直接跑，不通就自动拉起并等握手成功（上限 `handshakeTimeoutMs`，默认 5s）；起不来非零退出，打印 `✗ foreman 服务没起来：<原因>` + 两条可执行提示（`foreman serve`、`cat ~/.foreman/service.log`），照做，别手动猜。
+- **CLI 启动即握手**（除 `serve` / `help`）：任意子命令起来先读端口文件 `~/.foreman/service.port`（服务写的纯数字），拿它去 `GET /api/ping`；通了直接跑，不通就自动拉起服务、等服务把端口写进文件再连（上限 `handshakeTimeoutMs`，默认 5s）。**CLI 与服务的通信全程 HTTP，没有 unix socket。** 起不来非零退出，打印 `✗ foreman 服务没起来：<原因>` + 两条可执行提示（`foreman serve`、`cat ~/.foreman/service.log`），照做，别手动猜。
 - 逃生开关 `--no-service`：跳过握手与自动拉起，只跑这一条命令（测试与排障用）；配置 `service.enabled: false` 等价于一直带它。
-- 服务文件都在 `~/.foreman/` 下：`foreman.sock`（本机 IPC，权限 0600，仅本人可连）、`foreman.pid`、`service.log`。重复启动只回「已在运行」（`already-running`），不会起第二个；停用 SIGTERM 或前台 Ctrl-C。
+- 服务文件都在 `~/.foreman/` 下：`service.port`（实际端口，纯数字一行）、`foreman.pid`（pid/port/http/portFile/启动时间/版本）、`service.log`。重复启动只回「已在运行」（`already-running`），不会起第二个；端口被别的进程占着报 `port-in-use`；停用 SIGTERM 或前台 Ctrl-C。
 - 监听节奏沿用 `pollSeconds`（默认 20s）：对登记会话跑 `dws status`，`streaming` 真（running）或 `chars: 0`（pending，dws 的"还没开始"坑）不动；`finished` 真、或 finished/streaming 都假但 `chars > 0` 且有文本（settled）才算跑完；再要求「回复指纹变了」（指纹 = `sha1(chars|head|tail)` 前 12 位）。同一个 `(会话, 指纹)` 只通知一次，去重记在 state.json 的 `notified` 键，服务重启不重发。
 - 通知含仓库、单号、结论类别、PR 链接（有则带）；目标取登记的 `notifyTo`，没写取 `notify.session`（`auto` → `MCP_VM_CONVERSATION_ID`）。三种不发：`notify.enabled: false`、目标为空、目标就是被监听会话自己；结论不在 `notify.events` 白名单也不发（显式盯的 `session-done` 例外）。发送失败只写 `service.log`、`dwsErrors++`，不影响继续监听。
+- **控制台与 CLI 共用一条 HTTP**：服务只监听 `http://127.0.0.1:7317`（`service.http.port`，0 表示系统分配；实际端口写进 `service.port`）。CLI 走 `POST /api/rpc`（body 是 `{id, cmd, …}`）、探活走 `GET /api/ping`；浏览器访问 `/`。接口：`GET /api/snapshot`（当天任务 + PR）、`GET /api/polls`、`POST /api/sync`（立刻扫一轮）。数据落在 SQLite `~/.foreman/console.db`，唯一键 `<owner>/<repo>#<number>`，按工单去重、重复同步不多出行。没有 `service.http.enabled` 开关——HTTP 是唯一通道，服务起来就一定在听。
 
 ## PR 监听（默认 5 分钟一轮）
 
@@ -96,7 +97,7 @@ RESULT 协议（只认最后一个块，差一点按失败处理）：
 ## 状态与文件
 
 - 账本 `~/.foreman/state.json`：`issues`（工单进度、分支、worktree、attempts、lastFailure）、`sessions`（会话名、convId、最后回复）、`watch`（显式登记的监听）、`notified`（已通知指纹去重）、`prWatch`（PR 监听去重：`<repo>#<number>`）
-- 服务 `~/.foreman/foreman.sock`（IPC，0600）/ `foreman.pid` / `service.log`
+- 服务 `~/.foreman/service.port`（端口）/ `foreman.pid` / `service.log`
 - 日志 `~/.foreman/run.log`；锁 `~/.foreman/run.lock`
 - 工作区 `~/.foreman/worktrees/<仓库>/fix-issue-N`（分支名里的 `/` 换成 `-`）
 - 工单状态：`planned` / `working` / `done` / `pr-open` / `needs-human` / `blocked` / `escalated` / `reset`
@@ -110,7 +111,7 @@ RESULT 协议（只认最后一个块，差一点按失败处理）：
 - **通知默认开、且只有异步这一条**：会话跑完后由**服务**用 `dws send` 回给登记的通知目标（`notify.session: "auto"` 取 `MCP_VM_CONVERSATION_ID`，也可写会话 id/侧边栏标题），run 自己不发。`--no-notify` = 这一轮派出的会话**不登记给服务监听、因此不会有通知**（不是「换个方式同步发」）；`notify.enabled: false` 永久关；`--notify <会话id|标题>` 只改登记时的通知目标。不发的三种情况：目标为空、目标就是这条单自己的执行会话 `foreman-<仓库>-<N>`、结论不在 `notify.events` 白名单（显式盯的 `session-done` 例外）。
 - **服务没在跑时通知会丢**（异步的代价，不是 bug）：补法是 `foreman watch list` 看登记还在不在 → `foreman watch poll` 立刻重放一轮 → `foreman status` 看 `lastPollAt` / `pollCount` / `dwsErrors`。
 - **PR 监听**：`prWatch.enabled`（默认 `true`）、`intervalSeconds`（默认 300）、`ignoreAuthors`（默认 `["233151"]`，自己的 Gitea 用户名）、`notifyTarget`（`earliest` 取最早登记的调用方）。只通知不合并；要停就 `enabled: false` 或改大间隔。
-- **`service.enabled: false`** 等价于一直带 `--no-service`：子命令不握手、不自动拉起；`socket` / `pidFile` / `logFile` 可改路径（测试用临时目录）。
+- **`service.enabled: false`** 等价于一直带 `--no-service`：子命令不握手、不自动拉起；`pidFile` / `logFile` / `service.http.portFile` 可改路径（测试用临时目录）。
 - `verify` 是逐条 `bash -lc` 跑在 worktree 里的命令；`[]` 表示只查"干净 + 有提交"。
 - `herdr.enabled: false` 或 herdr 报错时退回 `git worktree add`，日志里有原因。
 
@@ -127,7 +128,8 @@ RESULT 协议（只认最后一个块，差一点按失败处理）：
 | `opencli ... 失败" | Gitea 登录态 / 权限 | 让用户在 Chrome 登录 Gitea；401 别循环重跑 |
 | herdr 建不动 | server 没起 / 仓库没信任 | `herdr status`；foreman 会退回 `git worktree add` 并写日志 |
 | 报 `service_unavailable` /「服务没起来」 | 常驻服务没跑、自动拉起超时或 spawn 失败 | 照提示走：`foreman serve`，再 `cat ~/.foreman/service.log`；急着单跑一条用 `--no-service` |
-| `already-running` | 单实例判活：pid 活着且 ping 得通 | 正常，直接用现有服务；别起第二个抢 socket |
+| `already-running` | 单实例判活：端口文件里的端口 ping 得通 | 正常，直接用现有服务；别起第二个抢端口 |
+| 报 `port-in-use` | 端口被别的进程占着（ping 不通） | 改 `service.http.port`，或停掉占端口的进程；端口文件会自动更新 |
 | `watch list` 里看不到某条会话 | 派活时被 `--no-notify` 标了 `notify:false`，或 `watch rm` 过 | 需要就 `foreman watch add <会话id|标题>` 显式补登 |
 | 会话跑完却没收到通知 | 服务没在跑（通知丢）、会话没登记、或没配目标/被事件过滤 | `foreman watch list` 看在不在听；`foreman watch poll` 立刻重放补一轮；`foreman status` 看 `lastPollAt` / `pollCount` / `dwsErrors`；再查 `service.log` 里的发送失败原因 |
 

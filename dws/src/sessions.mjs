@@ -259,6 +259,13 @@ export class SessionManager {
     return { convId: reply.convId || convId, reply }
   }
 
+  // convSendAck 同 convSend，但只确认送达、不等回复：通知走这条，
+  // 免得对面迟迟不回把调用方拖到超时，进而把同一条通知再发一遍。
+  async convSendAck(convId, text, { signal } = {}) {
+    await this.client.goto(convId, signal)
+    return this.client.sendAck(text, { signal })
+  }
+
   // stop 中断目标任务；没在跑返回 false。有对应本地会话就记上 stopped 标记。
   async stop(convId, { name = "", signal } = {}) {
     const stopped = await this.client.stop(convId, signal)

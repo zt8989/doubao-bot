@@ -26,7 +26,7 @@ function mkCfg(dir, over = {}) {
     pollSeconds: 20,
     notify: { enabled: true, session: "auto", events: ["done", "needs-human", "blocked", "failed"] },
     service: {
-      socket: path.join(dir, "foreman.sock"),
+      http: { port: 0, portFile: path.join(dir, "service.port"), db: path.join(dir, "console.db") },
       pidFile: path.join(dir, "foreman.pid"),
       logFile: path.join(dir, "service.log"),
     },

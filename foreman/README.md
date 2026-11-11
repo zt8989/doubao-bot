@@ -47,22 +47,50 @@ foreman ping                  # 在不在：pid / version / uptime / 在听几�
 foreman status                # 在不在 + 监听明细 + lastPollAt / pollCount / notifiedCount / dwsErrors
 ```
 
-- **自动握手**：除 `serve` / `help` 外，任意子命令起来先连 socket；通了直接跑，
-  不通就自动拉起服务并等握手成功（上限 `handshakeTimeoutMs`，默认 5s）。
+- **自动握手**：除 `serve` / `help` 外，任意子命令起来先读端口文件 `~/.foreman/service.port`，
+  拿端口去 ping（`GET /api/ping`）；通了直接跑，不通就自动拉起服务，等服务把端口写进文件再连
+  （上限 `handshakeTimeoutMs`，默认 5s）。**全程 HTTP，没有 socket。**
 - **起不来**：打印 `✗ foreman 服务没起来：<原因>`，附两条可执行提示（`foreman serve`、`cat ~/.foreman/service.log`），
   退出码 1——照做，别手动猜。
 - **`--no-service`**：跳过握手与自动拉起，只跑这一条命令（测试与排障的逃生阀）。
   配置里 `service.enabled: false` 等价于一直带 `--no-service`。
-- **单实例**：重复启动只回「已在运行」（`already-running`），退出 0，不抢 socket；
-  残留 socket（文件在但 ping 不通）会删掉重绑。
-- **停**：SIGTERM 或前台 Ctrl-C（SIGINT）→ 停轮询 → 关 socket → 删 pid 文件 → 写日志退出。
+- **单实例**：端口文件里的端口 ping 得通就回「已在运行」（`already-running`），退出 0；
+  ping 不通但端口被别的进程占着（`port-in-use`）才报错，提示改端口。
+- **停**：SIGTERM 或前台 Ctrl-C（SIGINT）→ 停轮询 → 关 HTTP → 删端口文件与 pid 文件 → 写日志退出。
+
+### 控制台与 CLI 共用一条 HTTP
+
+服务只有一条 HTTP 通道：CLI 的 RPC、控制台页面、控制台接口都在这一个端口上，不另起进程、没有 socket。
+
+```json
+"service": {
+  "http": {
+    "host": "127.0.0.1",
+    "port": 7317,
+    "portFile": "~/.foreman/service.port",
+    "db": "~/.foreman/console.db"
+  }
+}
+```
+
+- 服务启动时把实际端口写成 `~/.foreman/service.port`（纯数字一行），CLI 就读这个文件。
+- CLI 走 `POST /api/rpc`（body 就是原来那一帧 `{id, cmd, ...}`），探活走 `GET /api/ping`。
+- 浏览器访问 `http://127.0.0.1:7317/`；`foreman status` 的 `http` / `port` / `portFile` 字段都在。
+- 数据：账本（`issues` / `prWatch`）同步进 SQLite；唯一键 `"<owner>/<repo>#<number>"`，
+  重复同步只更新状态与 `last_seen_at`，`first_seen_at` 保留第一次发现，**按工单去重、不重复出行**。
+- 接口：`GET /api/snapshot`（当天任务 + PR）、`GET /api/polls`（最近扫描记录）、
+  `POST /api/sync`（立刻扫一轮 PR 并落库）。
+- `port` 允许写 `0`（系统分配端口，主要给测试）；实际端口一样写进端口文件。
+- 没有 `enabled` 开关：HTTP 是唯一通道，服务起来就一定在听。要停服务用 SIGTERM / Ctrl-C。
+- 页面源码在 `foreman/console/`（纯原生 HTML/CSS/JS，无依赖）。
+- 页面右上角可切主题：亮 / 暗 / 自动（跟随系统）；选择存 `localStorage`，跟随系统时深浅色变化实时生效。
 
 ### 三个文件
 
-`socket` / `pidFile` / `logFile` 默认都在 `~/.foreman/`：
+`service.port` / `pidFile` / `logFile` 默认都在 `~/.foreman/`：
 
-- `foreman.sock` — 本机 IPC，绑定后权限 0600（仅本人可连）
-- `foreman.pid` — 单实例判活（pid、socket 路径、启动时间、版本）
+- `service.port` — 实际监听端口（纯数字一行），CLI 读它连过来
+- `foreman.pid` — 单实例判活（pid、port、http、portFile、启动时间、版本）
 - `service.log` — 服务日志，与 `run.log` 分开
 
 三个路径都可在配置里覆盖（测试用临时目录）。账本 `state.json` 新增两个顶层键：
@@ -154,11 +182,11 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
   "pollSeconds": 20,
   "service": {
     "enabled": true,
-    "socket": "~/.foreman/foreman.sock",
     "pidFile": "~/.foreman/foreman.pid",
     "logFile": "~/.foreman/service.log",
     "handshakeTimeoutMs": 5000,
-    "stopTimeoutMs": 5000
+    "stopTimeoutMs": 5000,
+    "http": { "host": "127.0.0.1", "port": 7317, "portFile": "~/.foreman/service.port", "db": "~/.foreman/console.db" }
   },
   "timeoutMinutes": 90,
   "maxAttempts": 3,
@@ -213,14 +241,14 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
   目标正好是被监听会话自己；结论不在 `notify.events` 白名单里（默认只发上面那 6 个，`working`/`planned` 不发；
   显式盯的 `session-done` 例外）。通知本身失败只写 `service.log`、计 `dwsErrors`，不打断轮询。
 - **`service.enabled: false`** 等价于每条命令都带 `--no-service`：不再握手、不自动拉起服务。
-  `socket` / `pidFile` / `logFile` 都可在配置里改路径（测试用临时目录）。
+  `pidFile` / `logFile` / `service.http.portFile` 都可在配置里改路径（测试用临时目录）。
 - `verify` 是逐条 `bash -lc` 跑在工作区里的验收命令；空数组表示只查"干净 + 有提交"。
 - `herdr.enabled: false` 时退回原生 `git worktree add`（herdr 报错时也会自动退回，并写日志）。
 
 ## 状态文件
 
 - 账本 `~/.foreman/state.json`（`issues` 记工单进度、`sessions` 记会话与 convId、`watch` 显式登记的监听、`notified` 已通知指纹去重）
-- 服务 `~/.foreman/foreman.sock`（IPC，0600）/ `foreman.pid` / `service.log`
+- 服务 `~/.foreman/service.port`（端口）/ `foreman.pid` / `service.log`
 - 日志 `~/.foreman/run.log`
 - 锁 `~/.foreman/run.lock`（一轮只许一个进程；进程死了或超 6 小时的锁会被接管）
 - 工作区 `~/.foreman/worktrees/<仓库>/fix-issue-N`

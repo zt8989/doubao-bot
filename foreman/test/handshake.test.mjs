@@ -17,7 +17,7 @@ function mkCfg(dir, over = {}) {
     pollSeconds: 20,
     notify: { enabled: true, session: "auto", events: ["done"] },
     service: {
-      socket: path.join(dir, "foreman.sock"),
+      http: { port: 0, portFile: path.join(dir, "service.port"), db: path.join(dir, "console.db") },
       pidFile: path.join(dir, "foreman.pid"),
       logFile: path.join(dir, "service.log"),
       handshakeTimeoutMs: 800,
@@ -44,7 +44,7 @@ test("真实起服务 → 客户端 ping 通；--no-service 返回 skipped 且�
     server = await startServer({ cfg, book: new Book(cfg.stateFile), dws: fakeDws(), log: () => {} })
 
     // ping 直接通
-    const p = await pingOnce(cfg.service.socket, 1000)
+    const p = await pingOnce(server.port, 1000)
     assert.equal(p.ok, true)
     assert.ok(p.pid > 0)
 
@@ -90,7 +90,7 @@ test("服务不在 → spawnFn 被调用，握手成功返回 started:true", asy
     server = await startServer({ cfg, book: new Book(cfg.stateFile), dws: fakeDws(), log: () => {} })
     await server.close()
     server = null
-    // 此时 socket/pid 都没了（close 清掉）。spawnFn 里再起一个。
+    // 此时端口文件/pid 都没了（close 清掉）。spawnFn 里再起一个。
     const spawned = []
     const r = await ensureService({
       cfg,
@@ -104,7 +104,7 @@ test("服务不在 → spawnFn 被调用，握手成功返回 started:true", asy
     assert.equal(r.started, true)
     assert.equal(spawned.length, 1)
     // 能 ping 通
-    const p = await pingOnce(cfg.service.socket, 1000)
+    const p = await pingOnce(spawned[0].port, 1000)
     assert.equal(p.ok, true)
     await spawned[0].close()
   } finally {
@@ -142,7 +142,7 @@ test("callRaw 走通 ping 帧（id 对齐）", async () => {
   try {
     const cfg = mkCfg(dir)
     server = await startServer({ cfg, book: new Book(cfg.stateFile), dws: fakeDws(), log: () => {} })
-    const r = await callRaw(cfg.service.socket, { id: "cli", cmd: "ping" }, 2000)
+    const r = await callRaw(server.port, { id: "cli", cmd: "ping" }, 2000)
     assert.equal(r.ok, true)
     assert.equal(r.id, "cli")
   } finally {

@@ -1,9 +1,8 @@
-// 常驻服务：unix socket 行式 JSON；按 pollSeconds 轮询 dws status，跑完才异步通知。
+// 常驻服务：HTTP 单通道（RPC + 控制台）；按 pollSeconds 轮询 dws status，跑完才异步通知。
 // 写账本一律 new Book(cfg.stateFile) 现读现写，不长期持有（run 也在写同一个 state.json）。
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import net from "node:net"
 import crypto from "node:crypto"
 import { nowIso, sleep } from "./util.mjs"
 import { Book } from "./book.mjs"
@@ -11,6 +10,10 @@ import { parseResult } from "./prompts.mjs"
 import { notifyTarget, shouldNotify, notifyText } from "./orchestrator.mjs"
 import { prWatchOnce, prWatchTarget } from "./prwatch.mjs"
 import { listPulls } from "./gitea.mjs"
+import { ConsoleStore } from "./console.mjs"
+import { startConsoleHttp } from "./consolehttp.mjs"
+import { fileURLToPath } from "node:url"
+import { pingOnce, readPortFile } from "./svclient.mjs"
 
 export const MAX_FRAME_BYTES = 1 << 20
 
@@ -59,14 +62,19 @@ export function phaseOf(status) {
 }
 
 // judgePoll：跑完 + 指纹相对上次已通知指纹变化，才发通知。
-export function judgePoll(prev, status) {
+// 传了 maxAttempts 时，同一指纹发失败（账本里记了 attempts）允许再重试，用完次数就停；
+// 不传则保持老口径（同指纹一律不发）。
+export function judgePoll(prev, status, { maxAttempts = Infinity } = {}) {
   const phase = phaseOf(status)
   const fingerprint = status && Object.keys(status).length ? fingerprintOf(status) : ""
   const prevFp = prev?.fingerprint ?? ""
+  const attempts = Number(prev?.attempts ?? 0)
+  const sameFp = fingerprint !== "" && fingerprint === prevFp
+  const retryLeft = attempts > 0 && attempts < Number(maxAttempts)
   const shouldNotify =
     (phase === "finished" || phase === "settled") &&
     fingerprint !== "" &&
-    fingerprint !== prevFp
+    (!sameFp || retryLeft)
   return { phase, fingerprint, shouldNotify }
 }
 
@@ -97,6 +105,12 @@ export function watchersFor(book, _cfg) {
 }
 
 // ---- 通知口径 ----
+
+// notifyMaxAttempts：同一指纹最多发几次（默认 2：首发 + 一次补偿重试）。
+export function notifyMaxAttempts(cfg) {
+  const n = Number(cfg?.notify?.maxAttempts ?? cfg?.maxNotifyAttempts ?? 2)
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 2
+}
 
 // 服务侧判定该不该发。env 默认 process.env，便于测试注入。
 export function notifyDecision({ cfg, watcher, book, env = process.env, result }) {
@@ -155,9 +169,11 @@ export function notifyDecision({ cfg, watcher, book, env = process.env, result }
 
 export function servicePaths(cfg) {
   return {
-    socket: cfg.service.socket,
     pidFile: cfg.service.pidFile,
     logFile: cfg.service.logFile,
+    portFile: cfg.service?.http?.portFile ?? `${path.dirname(cfg.service.pidFile)}/service.port`,
+    port: Number(cfg.service?.http?.port ?? 7317),
+    host: cfg.service?.http?.host || "127.0.0.1",
   }
 }
 
@@ -188,13 +204,25 @@ export function singleInstanceGuard(pidFile) {
   return null
 }
 
-// 起 unix socket 服务。book 参数只用于初始加载，poll/write 时一律 new Book 重开。
+// 起服务：HTTP 单通道（CLI 的 RPC + 控制台页面同一个端口），端口写到文件里给 CLI 读。
+// book 参数只用于初始加载，poll/write 时一律 new Book 重开。
 // gitea 只在 PR 监听里用，测试可直接注入假的 { listPulls }。
 export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea = { listPulls } }) {
   const paths = servicePaths(cfg)
-  fs.mkdirSync(path.dirname(paths.socket), { recursive: true })
   fs.mkdirSync(path.dirname(paths.pidFile), { recursive: true })
   fs.mkdirSync(path.dirname(paths.logFile), { recursive: true })
+  fs.mkdirSync(path.dirname(paths.portFile), { recursive: true })
+
+  // 单实例：端口文件里的端口 ping 得通，说明已经有一个在跑。
+  const existing = readPortFile(paths.portFile)
+  if (existing) {
+    try {
+      await pingOnce(existing, 250)
+      throw Object.assign(new Error(`服务已在运行（端口 ${existing}）`), { code: "already-running" })
+    } catch (e) {
+      if (e.code === "already-running") throw e
+    }
+  }
 
   const state = {
     pid: process.pid,
@@ -221,44 +249,59 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     for (const w of watchersFor(b, cfg)) state.watchers.set(String(w.target), { ...w })
   }
 
-  const ctx = { state, cfg, dws, gitea, log, close: null, prPoll: null }
+  const ctx = { state, cfg, dws, gitea, log, close: null, prPoll: null, httpUrl: "", consoleStore: null }
 
-  const server = await new Promise((resolve, reject) => {
-    const srv = net.createServer((conn) => handleConnection(conn, ctx))
-    const onListen = () => {
-      try { fs.chmodSync(paths.socket, 0o600) } catch {}
-      resolve(srv)
-    }
-    const onError = async (e) => {
-      if (e.code === "EADDRINUSE" || e.code === "EEXIST") {
-        // 残留 socket：先 ping，ping 不通才 unlink 重绑（只删自己的残留）。
-        const alive = await pingOnce(paths.socket, 200).catch(() => null)
-        if (alive) {
-          return reject(Object.assign(new Error("socket 已被另一个服务占用"), { code: "already-running" }))
-        }
-        try { fs.unlinkSync(paths.socket) } catch {}
-        srv.removeListener("listening", onListen)
-        srv.removeListener("error", onError)
-        srv.listen(paths.socket, onListen)
-      } else {
-        reject(e)
-      }
-    }
-    srv.once("listening", onListen)
-    srv.once("error", onError)
-    srv.listen(paths.socket)
-  })
-  state.server = server
+  const httpCfg = cfg.service?.http ?? {}
+  const dbFile = path.resolve(String(httpCfg.db || "~/.foreman/console.db").replace(/^~/, os.homedir()))
+  const consoleStore = new ConsoleStore(dbFile)
+  const consoleDir = path.join(path.dirname(path.dirname(fileURLToPath(import.meta.url))), "console")
 
-  // 写 pidfile（整文件覆盖，只写我们这次的记录）。
+  let consoleHttp
+  try {
+    consoleHttp = await startConsoleHttp({
+      store: consoleStore,
+      ctx,
+      dir: consoleDir,
+      host: paths.host,
+      port: paths.port,
+      log,
+      onRpc: (req) => handleRequest(ctx, req),
+    })
+  } catch (e) {
+    consoleStore.close()
+    if (e.code === "EADDRINUSE") {
+      throw Object.assign(new Error(`端口 ${paths.port} 被别的进程占用（不是本服务，ping 不通）`), {
+        code: "port-in-use",
+      })
+    }
+    throw e
+  }
+
+  const port = consoleHttp.port
+  state.port = port
+  state.server = consoleHttp.server
+  ctx.httpUrl = consoleHttp.url
+  ctx.consoleStore = consoleStore
+
+  // 端口文件（纯数字一行，CLI 直接读）+ pidfile（带上端口，便于排查）。
+  fs.writeFileSync(paths.portFile, `${port}\n`)
   fs.writeFileSync(
     paths.pidFile,
     JSON.stringify(
-      { pid: process.pid, socket: paths.socket, startedAt: state.startedAt, version: state.version, configFile: cfg.configPath || "" },
+      {
+        pid: process.pid,
+        port,
+        http: ctx.httpUrl,
+        portFile: paths.portFile,
+        startedAt: state.startedAt,
+        version: state.version,
+        configFile: cfg.configPath || "",
+      },
       null,
       2
     ) + "\n"
   )
+  log(`服务已起：pid=${process.pid} http=${ctx.httpUrl} portFile=${paths.portFile}`)
 
   // 轮询。
   const doPoll = async () => pollOnce(ctx)
@@ -288,8 +331,12 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     if (state.interval) clearInterval(state.interval)
     if (state.prInterval) clearInterval(state.prInterval)
     if (state.prKick) clearTimeout(state.prKick)
-    await new Promise((r) => server.close(r))
-    try { fs.unlinkSync(paths.socket) } catch {}
+    await new Promise((r) => consoleHttp.server.close(r))
+    consoleStore.close()
+    // 只删自己的端口文件（端口号对得上才删）。
+    try {
+      if (Number(fs.readFileSync(paths.portFile, "utf8").trim()) === port) fs.unlinkSync(paths.portFile)
+    } catch {}
     // 只删 pidfile 是自己的那一份。
     try {
       const d = JSON.parse(fs.readFileSync(paths.pidFile, "utf8"))
@@ -300,7 +347,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   ctx.close = close
   ctx.poll = doPoll
 
-  return { server, close, poll: doPoll, prPoll: doPrPoll }
+  return { server: consoleHttp.server, close, poll: doPoll, prPoll: doPrPoll, port, portFile: paths.portFile, http: ctx.httpUrl }
 }
 
 // PR 扫描一轮：配置里每个仓库列 open PR → 过滤作者 → 去重 → 通知最早登记的调用方。
@@ -325,6 +372,17 @@ export async function prPollOnce(ctx) {
     state.pr.pollCount++
     if (out?.notified) state.pr.notifiedCount += out.notified
     state.pr.pending = out?.pending ?? 0
+    // 落一次库：按工单号去重，重复扫到只更新状态；polls 表留扫描痕迹。
+    if (ctx.consoleStore) {
+      try {
+        const scanBook = new Book(cfg.stateFile)
+        const synced = ctx.consoleStore.sync(scanBook)
+        state.pr.lastNewPrs = synced.newPrs
+        ctx.consoleStore.recordPoll(synced)
+      } catch (e) {
+        log(`控制台落库失败：${e.message}`)
+      }
+    }
     return out
   } finally {
     state.pr.polling = false
@@ -354,7 +412,9 @@ export async function pollOnce(ctx) {
         continue
       }
       const prev = book.notified[String(w.target)] ?? {}
-      const decision = judgePoll(prev, status)
+      // 同一指纹最多尝试 maxAttempts 次：dws.send 会「消息到了却报发送失败」，
+      // 不封顶就会每轮 poll 补发一次，把调用方会话刷成重复通知。
+      const decision = judgePoll(prev, status, { maxAttempts: notifyMaxAttempts(cfg) })
       rec.lastPhase = decision.phase
       rec.lastFingerprint = decision.fingerprint
       rec.lastPollAt = nowIso()
@@ -378,6 +438,11 @@ export async function pollOnce(ctx) {
         log(`通知跳过 ${w.target}：${nd.reason}`)
         continue
       }
+      // 先记账再发：发送本身可能几十秒，崩溃/假失败时不能让下一轮从零重发。
+      book2.markAttempted(w.target, decision.fingerprint, {
+        phase: decision.phase,
+        chars: status?.chars ?? 0,
+      })
       try {
         await dws.notify(nd.target, nd.text)
         book2.markNotified(w.target, decision.fingerprint, {
@@ -390,7 +455,16 @@ export async function pollOnce(ctx) {
         log(`已通知 ${nd.target}：${w.target} 跑完（${decision.phase}/${nd.event}）`)
       } catch (e) {
         state.dwsErrors++
-        log(`通知 ${nd.target} 失败：${e.message}`)
+        const n = notifyMaxAttempts(cfg)
+        const led = book2.notified[String(w.target)]
+        if (led) {
+          led.lastError = e.message
+          book2.save()
+        }
+        log(`通知 ${nd.target} 失败（第 ${led?.attempts ?? 1}/${n} 次）：${e.message}`)
+        if ((led?.attempts ?? 1) >= n) {
+          log(`通知 ${nd.target} 放弃重试：${w.target} 同指纹已试 ${n} 次`)
+        }
       }
     }
     state.lastPollAt = nowIso()
@@ -402,42 +476,6 @@ export async function pollOnce(ctx) {
 }
 
 // ---- 连接处理 ----
-
-function handleConnection(conn, ctx) {
-  let buf = ""
-  conn.on("data", (chunk) => {
-    buf += chunk.toString("utf8")
-    let idx
-    while ((idx = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, idx)
-      buf = buf.slice(idx + 1)
-      handleLine(line, conn, ctx).catch((e) => ctx.log(`handle 异常：${e.message}`))
-    }
-    if (Buffer.byteLength(buf, "utf8") > MAX_FRAME_BYTES) {
-      conn.write(encodeFrame({ id: null, ok: false, error: "bad_request", message: "单帧超限" }))
-      buf = ""
-    }
-  })
-  conn.on("error", () => {})
-}
-
-async function handleLine(line, conn, ctx) {
-  const trimmed = line.trim()
-  if (!trimmed) return
-  if (Buffer.byteLength(trimmed, "utf8") > MAX_FRAME_BYTES) {
-    conn.write(encodeFrame({ id: null, ok: false, error: "bad_request", message: "单帧超限" }))
-    return
-  }
-  let req
-  try {
-    req = decodeFrame(trimmed)
-  } catch (e) {
-    conn.write(encodeFrame({ id: null, ok: false, error: "bad_request", message: e.message }))
-    return
-  }
-  const resp = await handleRequest(ctx, req)
-  conn.write(encodeFrame(resp))
-}
 
 // ---- 请求分发 ----
 
@@ -455,7 +493,9 @@ export async function handleRequest(ctx, req) {
       startedAt: ctx.state.startedAt,
       pollSeconds: ctx.cfg.pollSeconds,
       watchers: ctx.state.watchers.size,
-      socket: ctx.cfg.service.socket,
+      http: ctx.httpUrl || "",
+      port: ctx.state.port ?? null,
+      portFile: ctx.cfg.service?.http?.portFile ?? "",
     })
   }
 
@@ -472,7 +512,9 @@ export async function handleRequest(ctx, req) {
       notifiedCount: ctx.state.notifiedCount,
       dwsErrors: ctx.state.dwsErrors,
       logFile: ctx.cfg.service.logFile,
-      socket: ctx.cfg.service.socket,
+      http: ctx.httpUrl || "",
+      port: ctx.state.port ?? null,
+      portFile: ctx.cfg.service?.http?.portFile ?? "",
       prWatch: {
         enabled: ctx.cfg.prWatch?.enabled ?? false,
         intervalSeconds: ctx.cfg.prWatch?.intervalSeconds,
@@ -543,35 +585,4 @@ export async function handleRequest(ctx, req) {
   return fail("unknown_cmd", `未知命令：${cmd || "(空)"}`)
 }
 
-// 供 svclient / 残留检测用：短超时 ping。
-export function pingOnce(socketPath, timeoutMs = 200) {
-  return new Promise((resolve, reject) => {
-    const sock = net.createConnection(socketPath)
-    let buf = ""
-    const timer = setTimeout(() => {
-      try { sock.destroy() } catch {}
-      reject(Object.assign(new Error("ping 超时"), { code: "timeout" }))
-    }, timeoutMs)
-    sock.on("connect", () => sock.write(encodeFrame({ id: "ping", cmd: "ping" })))
-    sock.on("data", (d) => {
-      buf += d.toString("utf8")
-      const idx = buf.indexOf("\n")
-      if (idx < 0) return
-      clearTimeout(timer)
-      try {
-        const obj = JSON.parse(buf.slice(0, idx))
-        if (obj.ok === false) {
-          reject(Object.assign(new Error(obj.message || obj.error), { code: obj.error }))
-        } else resolve(obj)
-      } catch (e) {
-        reject(e)
-      } finally {
-        try { sock.end() } catch {}
-      }
-    })
-    sock.on("error", (e) => {
-      clearTimeout(timer)
-      reject(e)
-    })
-  })
-}
+export { pingOnce }

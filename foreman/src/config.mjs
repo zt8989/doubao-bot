@@ -29,6 +29,9 @@ export const DEFAULTS = {
   notify: {
     enabled: true,
     session: "auto",
+    // 同一条结果（同一指纹）最多发几次：首发 + 一次补偿。dws 偶发「消息到了却报
+    // 发送失败」，不封顶就会每轮 poll 重发一遍，把调用方会话刷成重复通知。
+    maxAttempts: 2,
     events: ["done", "pr-open", "needs-human", "blocked", "escalated", "failed"],
   },
   // PR 监听：每 intervalSeconds 扫一遍各仓库 open PR，把作者不在 ignoreAuthors 里的单
@@ -41,15 +44,21 @@ export const DEFAULTS = {
     ignoreAuthors: ["233151"],
     notifyTarget: "earliest",
   },
-  // 常驻服务：unix socket 行式 JSON，按 pollSeconds 轮询 dws status，跑完才异步通知。
-  // socket/pidFile/logFile 的相对路径解析到配置文件同目录；~ 展开。
+  // 常驻服务：只有 HTTP 一条通道（CLI 的 RPC + 控制台页面同端口），按 pollSeconds 轮询。
+  // pidFile/logFile 的相对路径解析到配置文件同目录；~ 展开。
   service: {
     enabled: true,
-    socket: "~/.foreman/foreman.sock",
     pidFile: "~/.foreman/foreman.pid",
     logFile: "~/.foreman/service.log",
     handshakeTimeoutMs: 5000,
     stopTimeoutMs: 5000,
+    // 唯一的通道：HTTP（CLI 的 RPC + 控制台同端口）；端口写到 portFile，CLI 读它连过来。
+    http: {
+      host: "127.0.0.1",
+      port: 7317,
+      portFile: "~/.foreman/service.port",
+      db: "~/.foreman/console.db",
+    },
   },
   repos: [],
 }
@@ -114,7 +123,7 @@ export function loadConfig(explicit) {
 
   // 服务三路径：同 stateFile 的解析规则（~ 展开；相对路径落到配置文件同目录）。
   const baseDir = fs.existsSync(file) ? path.dirname(file) : process.cwd()
-  for (const key of ["socket", "pidFile", "logFile"]) {
+  for (const key of ["pidFile", "logFile"]) {
     const raw = expandHome(cfg.service[key])
     cfg.service[key] = path.isAbsolute(raw) ? raw : path.resolve(baseDir, raw)
   }
@@ -122,6 +131,21 @@ export function loadConfig(explicit) {
     const n = Number(cfg.service[key])
     if (!Number.isFinite(n) || n <= 0) throw new Error(`配置项 service.${key} 要是正数，现在是：${cfg.service[key]}`)
     cfg.service[key] = n
+  }
+
+  // 控制台 HTTP：端口 1–65535；db 路径按 stateFile 的规则展开（~ → 家目录）。
+  cfg.service.http = cfg.service.http && typeof cfg.service.http === "object" ? cfg.service.http : {}
+  const httpPort = Number(cfg.service.http.port ?? 7317)
+  // 0 = 让系统分配端口（测试用；服务会把实际端口写进 portFile）。
+  if (!Number.isInteger(httpPort) || httpPort < 0 || httpPort > 65535) {
+    throw new Error(`配置项 service.http.port 要是 0–65535 的整数，现在是：${cfg.service.http.port}`)
+  }
+  cfg.service.http.port = httpPort
+  cfg.service.http.host = String(cfg.service.http.host || "127.0.0.1")
+  for (const key of ["db", "portFile"]) {
+    const fallback = key === "db" ? "~/.foreman/console.db" : "~/.foreman/service.port"
+    const raw = expandHome(String(cfg.service.http[key] || fallback))
+    cfg.service.http[key] = path.isAbsolute(raw) ? raw : path.resolve(baseDir, raw)
   }
 
   // PR 监听：间隔与翻页上限要正数；状态只认 open/closed/all。

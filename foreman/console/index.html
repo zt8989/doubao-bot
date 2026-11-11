@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>foreman 控制台</title>
+  <link rel="stylesheet" href="style.css" />
+  <script>
+    // 早于首屏定主题，避免闪一下：light / dark / system（跟随系统）
+    (() => {
+      try {
+        const mode = localStorage.getItem("foreman-theme") || "system";
+        const dark = mode === "dark" || (mode === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.dataset.theme = dark ? "dark" : "light";
+        document.documentElement.dataset.themeMode = mode;
+      } catch {
+        document.documentElement.dataset.theme = "light";
+      }
+    })();
+  </script>
+</head>
+<body>
+  <div class="glow"></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="pulse"></span>
+      <span class="brand-text">FOREMAN<span class="thin">/CONSOLE</span></span>
+    </div>
+    <div class="meta">
+      <span class="meta-item" id="metaDay">—</span>
+      <span class="meta-item mono" id="metaClock">--:--:--</span>
+      <span class="pill" id="metaService">服务 · —</span>
+      <span class="pill" id="metaInterval">间隔 · —</span>
+      <div class="theme-switch" id="themeSwitch" role="group" aria-label="主题">
+        <button type="button" data-theme-mode="light" title="亮色">亮</button>
+        <button type="button" data-theme-mode="dark" title="暗色">暗</button>
+        <button type="button" data-theme-mode="system" title="跟随系统">自动</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="stats" id="stats"></section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>今日分配任务</h2>
+        <div class="panel-side">
+          <span class="hint" id="tasksHint">—</span>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="tasks">
+          <thead>
+            <tr>
+              <th class="col-id">工单</th>
+              <th>标题</th>
+              <th class="col-state">状态</th>
+              <th class="col-branch">分支</th>
+              <th class="col-try">尝试</th>
+              <th class="col-time">更新</th>
+            </tr>
+          </thead>
+          <tbody id="taskRows"></tbody>
+        </table>
+      </div>
+      <div class="empty" id="taskEmpty" hidden>
+        <div class="empty-title">今天还没有分配到任务</div>
+        <div class="empty-sub">foreman run 派活后会出现在这里</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>PR 通知</h2>
+        <div class="panel-side">
+          <span class="hint" id="prsHint">—</span>
+          <div class="tabs" id="prTabs">
+            <button class="tab is-active" data-filter="all">全部</button>
+            <button class="tab" data-filter="pending">待通知</button>
+            <button class="tab" data-filter="notified">已通知</button>
+            <button class="tab" data-filter="skipped">已跳过</button>
+          </div>
+        </div>
+      </div>
+      <div class="poll-strip" id="pollStrip"></div>
+      <ul class="pr-list" id="prList"></ul>
+      <div class="empty" id="prEmpty" hidden>
+        <div class="empty-title">今天还没有扫到 PR</div>
+        <div class="empty-sub">服务每 5 分钟扫一遍配置里的仓库</div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span id="footSource">数据源 · —</span>
+    <span class="dot-sep">·</span>
+    <span id="footUpdated">账本更新 · —</span>
+    <span class="dot-sep">·</span>
+    <span id="footRefresh">快照生成 · —</span>
+    <span class="dot-sep">·</span>
+    <span id="footDb">SQLite · —</span>
+    <span class="dot-sep">·</span>
+    <span id="footApi">API · —</span>
+    <button class="ghost" id="manualRefresh">立即扫描</button>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

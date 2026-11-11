@@ -4,7 +4,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { runRound } from "../src/orchestrator.mjs"
-import { startServer, pingOnce } from "../src/service.mjs"
+import { startServer, pingOnce, fingerprintOf, judgePoll } from "../src/service.mjs"
 import { Book } from "../src/book.mjs"
 
 function tmpDir() {
@@ -24,7 +24,7 @@ function mkCfg(dir, over = {}) {
     merge: { enabled: false },
     notify: { enabled: true, session: "boss", events: ["done", "needs-human", "blocked", "failed"] },
     service: {
-      socket: path.join(dir, "foreman.sock"),
+      http: { port: 0, portFile: path.join(dir, "service.port"), db: path.join(dir, "console.db") },
       pidFile: path.join(dir, "foreman.pid"),
       logFile: path.join(dir, "service.log"),
       handshakeTimeoutMs: 500,
@@ -258,10 +258,58 @@ test("notify 抛错 → dwsErrors 计数 + 不崩", async () => {
     assert.equal(r.checked, 1)
     assert.equal(r.notified, 0)
     // 查服务状态：dwsErrors >= 1
-    const s = await pingOnce(cfg.service.socket, 2000)
+    const s = await pingOnce(server.port, 2000)
     assert.ok(s.watchers >= 1)
   } finally {
     if (server) await server.close()
     fs.rmSync(dir, { recursive: true, force: true })
   }
+})
+
+// 真实踩到的坑：dws 把消息发进会话了，却回一个「豆包没有把这条消息发出去」。
+// 服务按失败处理、账本没记指纹，于是每轮 poll 又补一遍，调用方会话被刷成重复通知。
+test("notify 报假失败 → 同一指纹最多发 maxAttempts 次，不再每轮重发", async () => {
+  const dir = tmpDir()
+  let server
+  try {
+    const cfg = mkCfg(dir, { notify: { enabled: true, session: "boss", maxAttempts: 2, events: ["done"] } })
+    const book = new Book(cfg.stateFile)
+    book.setWatch({ target: "conv-ghost", name: "w", issueKey: "demo/demo#1", repo: "demo/demo", number: 1, notifyTo: "boss" })
+    const sent = []
+    const dws = {
+      status: async () => ({ name: "conv-ghost", streaming: false, finished: true, chars: 100, head: "H", tail: "T", status: "ok" }),
+      info: async () => ({ lastReply: '<RESULT>{"status":"done","summary":"做完了"}</RESULT>' }),
+      // 每次都“报失败”，但消息其实已经到了（sent 记下来模拟真实投递）
+      notify: async (target, text) => {
+        sent.push({ target, text })
+        throw new Error("dws send 失败：✗ 豆包没有把这条消息发出去")
+      },
+    }
+    server = await startServer({ cfg, book, dws, log: () => {} })
+    let notified = 0
+    for (let i = 0; i < 5; i++) {
+      const r = await server.poll()
+      notified += r.notified
+    }
+    assert.equal(sent.length, 2, "同一指纹只发两次（首发 + 一次补偿），不随 poll 轮数增长")
+    assert.equal(notified, 0, "报失败时不计 notified")
+    const led = new Book(cfg.stateFile).notified["conv-ghost"]
+    assert.equal(led.attempts, 2)
+    assert.match(led.lastError, /没有把这条消息发出去/) 
+  } finally {
+    if (server) await server.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("judgePoll：同指纹有失败账时按 maxAttempts 决定是否重试", () => {
+  const status = { name: "c", streaming: false, finished: true, chars: 9, head: "H", tail: "T", status: "ok" }
+  const fp = fingerprintOf(status)
+  // 没传 maxAttempts：老口径，同指纹不发
+  assert.equal(judgePoll({ fingerprint: fp }, status).shouldNotify, false)
+  // 传了：attempts=1 < 2 允许再试；attempts=2 用完就停
+  assert.equal(judgePoll({ fingerprint: fp, attempts: 1 }, status, { maxAttempts: 2 }).shouldNotify, true)
+  assert.equal(judgePoll({ fingerprint: fp, attempts: 2 }, status, { maxAttempts: 2 }).shouldNotify, false)
+  // 指纹变了照常发
+  assert.equal(judgePoll({ fingerprint: "deadbeef0000", attempts: 2 }, status, { maxAttempts: 2 }).shouldNotify, true)
 })

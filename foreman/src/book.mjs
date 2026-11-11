@@ -113,14 +113,46 @@ export class Book {
 
   // 记录 (target, 指纹) 已通知，重启后不再重发。
   markNotified(target, fingerprint, extra = {}) {
+    this.reload()
     this.notified[String(target)] = {
       fingerprint,
       at: nowIso(),
       phase: extra.phase ?? "",
       chars: extra.chars ?? 0,
+      attempts: 0,
+      failed: 0,
+      lastError: "",
     }
     this.save()
     return this.notified[String(target)]
+  }
+
+  // 发出去之前先记一笔：同一指纹的尝试次数 +1。dws 有时会「消息到了却报发送失败」，
+  // 没有这笔账就会每轮 poll 重发一次，把调用方会话刷成重复通知。
+  markAttempted(target, fingerprint, extra = {}) {
+    this.reload()
+    const key = String(target)
+    const prev = this.notified[key] ?? {}
+    const same = String(prev.fingerprint ?? "") === String(fingerprint ?? "")
+    this.notified[key] = {
+      fingerprint,
+      at: nowIso(),
+      phase: extra.phase ?? "",
+      chars: extra.chars ?? 0,
+      attempts: (same ? Number(prev.attempts ?? 0) : 0) + 1,
+      failed: Number(prev.failed ?? 0) + (same ? 1 : 1),
+      lastError: extra.error ?? prev.lastError ?? "",
+    }
+    this.save()
+    return this.notified[key]
+  }
+
+  // reload 从盘上重读：服务里一次 notify 可能耗时几十秒，期间别的进程（run/CLI）
+  // 也在写同一个 state.json，长时间持有快照再整文件覆盖会把它们的改动抹掉。
+  reload() {
+    const d = load(this.file)
+    this.data = d
+    return this.data
   }
 
   save() {

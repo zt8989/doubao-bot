@@ -80,8 +80,9 @@ const HELP_BY_CMD = {
     "取整段对话（含思考）。对话很长，建议 --out 落盘再读。",
   ],
   send: [
-    "dws send <会话名|任务id> <文字> | --file <文件>",
+    "dws send <会话名|任务id> <文字> | --file <文件> [--no-wait]",
     "在同一任务里续说；任务已不在窗口时会新开一条并带 handoff（进展都在工作区提交里）。",
+    "--no-wait 只确认送达、不等回复（通知这类场景用；目标在跑时用 Command+Enter 追加，不打断）。",
   ],
   doctor: [
     "dws doctor [--start]",
@@ -504,6 +505,12 @@ async function cmdSend() {
   }
 
   log(`续任务 ${tgt.id}${whereFrom(tgt)}……`)
+  if (flags["no-wait"]) {
+    // 只确认送达，不等回复：通知这类场景用，别让对面把这边拖到超时。
+    const r = await session.convSendAck(tgt.id, text)
+    printJson({ ok: true, convId: r.convId, sent: !!r.sent, noWait: true })
+    return
+  }
   const r = await session.convSend(tgt.id, text)
   printJson({
     ok: true,
