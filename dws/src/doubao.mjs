@@ -403,17 +403,33 @@ export class Doubao {
       if (picked === "upgrade") throw new DoubaoError(`${label} 需要升级豆包会员`, "doubao_upgrade")
       if (picked) throw new DoubaoError(`豆包选择模型失败：${picked}`, "doubao_ui")
     }
+    // 发送前先等窗口真的离开旧会话：切页有延迟，急着发会把提示词发进旧会话，
+    // 事后只能靠回读猜。等不到就一条消息都不发，直接报错。
+    const switched = await this.waitConvSwitch(beforeConvId, { timeoutMs: 15000, signal })
+    if (!switched.switched) {
+      throw new DoubaoError(
+        `新建工作任务失败：点完之后 15 秒窗口仍停在旧会话 ${beforeConvId || "(空)"}，` +
+          `首条消息没有发出（避免发进旧会话）。`,
+        "doubao_new_task"
+      )
+    }
     const baseline = await page.eval(COUNTS)
     await sendText(page, prompt, signal)
     const reply = await this.waitReply({ baseline, signal, onUpdate })
     // 回读守卫：拿到的会话 id 必须与新建前不同，否则就是没切走。此时提示词很可能发进了
     // 旧会话，绝不允许把旧 id 当新会话登记。
     if (!isFreshTask(beforeConvId, reply.convId, { requireNewId: true })) {
-      throw new DoubaoError(
-        `新建工作任务失败：发完首条消息回读到的会话 id 是 ${reply.convId || "(空)"}，` +
-          `与新建前所在的 ${beforeConvId || "(空)"} 相同；窗口没有真正切到新会话，提示词可能已发进旧会话。`,
-        "doubao_new_task"
-      )
+      // 会话 id 会随路由重建晚一步到位：回复已跑完时再补读一段，拿到具体新 id 就认。
+      const late = await this.waitConvSwitch(beforeConvId, { timeoutMs: 20000, signal })
+      if (late.switched && /^\d{8,}$/.test(late.convId)) {
+        reply.convId = late.convId
+      } else {
+        throw new DoubaoError(
+          `新建工作任务失败：发完首条消息回读到的会话 id 是 ${reply.convId || "(空)"}，` +
+            `与新建前所在的 ${beforeConvId || "(空)"} 相同；窗口没有真正切到新会话，提示词可能已发进旧会话。`,
+          "doubao_new_task"
+        )
+      }
     }
     return { convId: reply.convId, reply }
   }
@@ -509,6 +525,31 @@ export class Doubao {
       if (!s2.stopBtn) return true
     }
     throw new DoubaoError("双击 Esc 后任务仍在跑动", "doubao_ui")
+  }
+
+  // waitConvSwitch 等窗口真的离开 beforeConvId：切任务/新建任务后 location 里的会话 id
+  // 有延迟，急着发消息会把提示词发进旧会话。读不到变化就返回 switched:false。
+  async waitConvSwitch(beforeConvId, { timeoutMs = 15000, signal } = {}) {
+    const start = Date.now()
+    const before = String(beforeConvId ?? "").trim()
+    // 新建前压根没有具体会话 id（停在空白 /chat）时无从判断变化，直接放行。
+    if (!/^\d{8,}$/.test(before)) return { switched: true, convId: "" }
+    let last = before
+    for (;;) {
+      let cur = last
+      try {
+        const r = await this.read(signal)
+        cur = String(r?.convId ?? "").trim()
+      } catch (e) {
+        if (signal?.aborted) throw e
+        cur = last
+      }
+      // 注意：空 id 也算“离开了旧会话”（刚点完停在新 /chat 页），但不能拿来记账。
+      if (cur !== before) return { switched: true, convId: cur }
+      last = cur
+      if (Date.now() - start > timeoutMs) return { switched: false, convId: cur }
+      await sleep(this.poll, signal)
+    }
   }
 
   // waitReply 从 baseline 之后等“一条新的、已跑完的回复”。

@@ -385,6 +385,9 @@ async function cmdStatus() {
   if (target) {
     const tgt = await resolveTarget({ book, session }, target)
     const s = await session.convStatus(tgt.id)
+    if (flags.json) {
+      return printJson({ ok: true, status: { ...s, name: tgt.name || tgt.id, convId: tgt.id, title: tgt.title || "" } })
+    }
     say(
       [
         `任务 ${tgt.id}${tgt.title && tgt.from !== "local" ? `「${tgt.title}」` : ""}：${
