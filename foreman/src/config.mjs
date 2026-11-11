@@ -31,6 +31,16 @@ export const DEFAULTS = {
     session: "auto",
     events: ["done", "pr-open", "needs-human", "blocked", "escalated", "failed"],
   },
+  // PR 监听：每 intervalSeconds 扫一遍各仓库 open PR，把作者不在 ignoreAuthors 里的单
+  // 通知给「最早登记的调用方」；只通知不合并。默认 5 分钟一次。
+  prWatch: {
+    enabled: true,
+    intervalSeconds: 300,
+    state: "open",
+    maxPages: 3,
+    ignoreAuthors: ["233151"],
+    notifyTarget: "earliest",
+  },
   // 常驻服务：unix socket 行式 JSON，按 pollSeconds 轮询 dws status，跑完才异步通知。
   // socket/pidFile/logFile 的相对路径解析到配置文件同目录；~ 展开。
   service: {
@@ -98,18 +108,15 @@ export function loadConfig(explicit) {
     cfg[key] = n
   }
   cfg.repos = normalizeRepos(cfg)
-  cfg.stateFile = expandHome(
-    path.isAbsolute(cfg.stateFile) ? cfg.stateFile : path.join(path.dirname(file), cfg.stateFile)
-  )
-  if (!path.isAbsolute(cfg.stateFile)) cfg.stateFile = path.resolve(cfg.stateFile)
+  // 先展开 ~ 再判绝对路径：反过来会把 "~/x" 当成相对路径拼成 "<dir>/~/x"。
+  cfg.stateFile = expandHome(cfg.stateFile)
+  if (!path.isAbsolute(cfg.stateFile)) cfg.stateFile = path.resolve(path.dirname(file), cfg.stateFile)
 
   // 服务三路径：同 stateFile 的解析规则（~ 展开；相对路径落到配置文件同目录）。
   const baseDir = fs.existsSync(file) ? path.dirname(file) : process.cwd()
   for (const key of ["socket", "pidFile", "logFile"]) {
-    const raw = cfg.service[key]
-    cfg.service[key] = expandHome(
-      path.isAbsolute(raw) ? raw : path.join(baseDir, raw)
-    )
+    const raw = expandHome(cfg.service[key])
+    cfg.service[key] = path.isAbsolute(raw) ? raw : path.resolve(baseDir, raw)
   }
   for (const key of ["handshakeTimeoutMs", "stopTimeoutMs"]) {
     const n = Number(cfg.service[key])
@@ -117,5 +124,14 @@ export function loadConfig(explicit) {
     cfg.service[key] = n
   }
 
+  // PR 监听：间隔与翻页上限要正数；状态只认 open/closed/all。
+  for (const key of ["intervalSeconds", "maxPages"]) {
+    const n = Number(cfg.prWatch[key])
+    if (!Number.isFinite(n) || n <= 0) throw new Error(`配置项 prWatch.${key} 要是正数，现在是：${cfg.prWatch[key]}`)
+    cfg.prWatch[key] = n
+  }
+  const pwState = String(cfg.prWatch.state ?? "open")
+  if (!["open", "closed", "all"].includes(pwState)) throw new Error(`配置项 prWatch.state 只能是 open/closed/all，现在是：${pwState}`)
+  cfg.prWatch.state = pwState
   return cfg
 }

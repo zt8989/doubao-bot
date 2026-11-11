@@ -23,6 +23,8 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman watch list [-c] [--no-service]
   foreman watch rm <会话id|标题> [-c] [--no-service]
   foreman watch poll [-c] [--no-service]
+  foreman pr list [-c] [--no-service]
+  foreman pr poll [-c] [--no-service]
   foreman run   [--once] [--dry-run] [--repo <名字|owner/name>] [--every <秒>] [--notify <会话id|标题>] [--no-notify] [-c <配置>]
   foreman tasks [--json]
   foreman retry <仓库名|owner/name> <工单号> [-c <配置>]
@@ -34,6 +36,8 @@ const HELP = `foreman — 接单编排 + 常驻服务
   ping/status 问服务状态
   watch add   登记一条监听（target 是会话 id 或侧边栏标题）
   watch list/rm/poll   看登记 / 删一条 / 立刻跑一轮（取证排障用）
+  pr list     看 PR 监听账本（哪些 PR 见过/已通知）
+  pr poll     立刻扫一轮 PR（作者不是 233151 的报给最早登记的调用方）
   --no-service  跳过自动握手与拉起（逃生口）
 
 run 现在只派活：建 worktree → dws 开会话派活 → 记账 → 登记监听 → 返回 dispatched。
@@ -175,6 +179,20 @@ async function cmdWatch(pos, flags) {
   throw new Error(`未知 watch 子命令：${sub}（add|list|rm|poll）`)
 }
 
+async function cmdPr(pos, flags) {
+  const cfg = loadConfig(flags.config)
+  const sub = pos.shift()
+  if (!sub) throw new Error("用法：foreman pr list|poll")
+  if (sub === "list") {
+    const r = await callRaw(cfg.service.socket, { id: "cli", cmd: "pr list" }, 3000)
+    return out({ ok: true, ...r })
+  }
+  if (sub === "poll") {
+    const r = await callRaw(cfg.service.socket, { id: "cli", cmd: "pr poll" }, 300000)
+    return out({ ok: true, ...r })
+  }
+  throw new Error(`未知 pr 子命令：${sub}（list|poll）`)
+}
 
 // ---- 原有命令 ----
 
@@ -358,6 +376,8 @@ async function main() {
       return cmdStatus(pos, flags)
     case "watch":
       return cmdWatch(pos, flags)
+    case "pr":
+      return cmdPr(pos, flags)
     case "run":
       return cmdRun(pos, flags)
     case "tasks":

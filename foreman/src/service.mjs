@@ -9,6 +9,8 @@ import { nowIso, sleep } from "./util.mjs"
 import { Book } from "./book.mjs"
 import { parseResult } from "./prompts.mjs"
 import { notifyTarget, shouldNotify, notifyText } from "./orchestrator.mjs"
+import { prWatchOnce, prWatchTarget } from "./prwatch.mjs"
+import { listPulls } from "./gitea.mjs"
 
 export const MAX_FRAME_BYTES = 1 << 20
 
@@ -187,7 +189,8 @@ export function singleInstanceGuard(pidFile) {
 }
 
 // 起 unix socket 服务。book 参数只用于初始加载，poll/write 时一律 new Book 重开。
-export async function startServer({ cfg, book: _book, dws, log = () => {} }) {
+// gitea 只在 PR 监听里用，测试可直接注入假的 { listPulls }。
+export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea = { listPulls } }) {
   const paths = servicePaths(cfg)
   fs.mkdirSync(path.dirname(paths.socket), { recursive: true })
   fs.mkdirSync(path.dirname(paths.pidFile), { recursive: true })
@@ -207,6 +210,9 @@ export async function startServer({ cfg, book: _book, dws, log = () => {} }) {
     interval: null,
     server: null,
     closed: false,
+    // PR 监听运行时
+    pr: { lastPollAt: null, pollCount: 0, notifiedCount: 0, polling: false, target: "", pending: 0 },
+    prInterval: null,
   }
 
   // 初始把 book 里的监听灌进内存。
@@ -215,7 +221,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {} }) {
     for (const w of watchersFor(b, cfg)) state.watchers.set(String(w.target), { ...w })
   }
 
-  const ctx = { state, cfg, dws, log, close: null }
+  const ctx = { state, cfg, dws, gitea, log, close: null, prPoll: null }
 
   const server = await new Promise((resolve, reject) => {
     const srv = net.createServer((conn) => handleConnection(conn, ctx))
@@ -261,10 +267,27 @@ export async function startServer({ cfg, book: _book, dws, log = () => {} }) {
   }, cfg.pollSeconds * 1000)
   state.interval.unref?.()
 
+  // PR 监听：显式 opt-in（cfg.prWatch.enabled===true）才起；默认关。
+  const doPrPoll = async () => prPollOnce(ctx)
+  ctx.prPoll = doPrPoll
+  if (cfg.prWatch?.enabled === true) {
+    const intervalMs = Number(cfg.prWatch.intervalSeconds ?? 300) * 1000
+    state.prInterval = setInterval(() => {
+      doPrPoll().catch((e) => log(`PR 扫描异常：${e.message}`))
+    }, intervalMs)
+    state.prInterval.unref?.()
+    state.prKick = setTimeout(() => {
+      doPrPoll().catch((e) => log(`PR 扫描异常：${e.message}`))
+    }, 1000)
+    state.prKick.unref?.()
+  }
+
   const close = async () => {
     if (state.closed) return
     state.closed = true
     if (state.interval) clearInterval(state.interval)
+    if (state.prInterval) clearInterval(state.prInterval)
+    if (state.prKick) clearTimeout(state.prKick)
     await new Promise((r) => server.close(r))
     try { fs.unlinkSync(paths.socket) } catch {}
     // 只删 pidfile 是自己的那一份。
@@ -277,7 +300,35 @@ export async function startServer({ cfg, book: _book, dws, log = () => {} }) {
   ctx.close = close
   ctx.poll = doPoll
 
-  return { server, close, poll: doPoll }
+  return { server, close, poll: doPoll, prPoll: doPrPoll }
+}
+
+// PR 扫描一轮：配置里每个仓库列 open PR → 过滤作者 → 去重 → 通知最早登记的调用方。
+export async function prPollOnce(ctx) {
+  const { state, cfg, dws, gitea, log } = ctx
+  if (cfg.prWatch?.enabled === false) return { ok: true, skipped: "disabled" }
+  if (state.pr.polling) return { ok: true, skipped: "busy" }
+  state.pr.polling = true
+  try {
+    const book = new Book(cfg.stateFile)
+    // 账本里还没有调用方会话时，退回当前环境的会话 id（在豆包会话里跑服务时就是那条会话）。
+    const target = prWatchTarget(cfg, book) || String(process.env.MCP_VM_CONVERSATION_ID ?? "").trim()
+    state.pr.target = target
+    let out
+    try {
+      out = await prWatchOnce({ cfg, gitea, dws, log, target })
+    } catch (e) {
+      log(`PR 扫描失败：${e.message}`)
+      return { ok: false, error: e.message }
+    }
+    state.pr.lastPollAt = nowIso()
+    state.pr.pollCount++
+    if (out?.notified) state.pr.notifiedCount += out.notified
+    state.pr.pending = out?.pending ?? 0
+    return out
+  } finally {
+    state.pr.polling = false
+  }
 }
 
 // 跑一轮：现读 book → 对每个 watcher 跑 dws.status → 该通知就 dws.info + dws.notify + 落 notified。
@@ -422,6 +473,16 @@ export async function handleRequest(ctx, req) {
       dwsErrors: ctx.state.dwsErrors,
       logFile: ctx.cfg.service.logFile,
       socket: ctx.cfg.service.socket,
+      prWatch: {
+        enabled: ctx.cfg.prWatch?.enabled ?? false,
+        intervalSeconds: ctx.cfg.prWatch?.intervalSeconds,
+        ignoreAuthors: ctx.cfg.prWatch?.ignoreAuthors ?? [],
+        target: ctx.state.pr?.target ?? "",
+        lastPollAt: ctx.state.pr?.lastPollAt ?? null,
+        pollCount: ctx.state.pr?.pollCount ?? 0,
+        notifiedCount: ctx.state.pr?.notifiedCount ?? 0,
+        pending: ctx.state.pr?.pending ?? 0,
+      },
     })
   }
 
@@ -458,6 +519,19 @@ export async function handleRequest(ctx, req) {
   if (cmd === "poll") {
     const r = await ctx.poll()
     return ok(r)
+  }
+
+  if (cmd === "pr poll") {
+    const r = await ctx.prPoll()
+    return ok(r)
+  }
+
+  if (cmd === "pr list") {
+    const book = new Book(ctx.cfg.stateFile)
+    return ok({
+      target: prWatchTarget(ctx.cfg, book),
+      prs: Object.entries(book.prSeen).map(([key, v]) => ({ key, ...v })),
+    })
   }
 
   if (cmd === "stop") {

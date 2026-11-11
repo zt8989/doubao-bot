@@ -88,6 +88,26 @@ export async function viewPr(repo, pr) {
   return data(await gitea(["pr-view", String(pr), "--repo", repo]))
 }
 
+// 列仓库的合并请求（open/closed/all），带回 author；列表页不回 base/head，要看分支用 viewPr。
+export async function listPulls(repo, { state = "open", page = 1 } = {}) {
+  const args = ["pull-list", "--repo", repo, "--state", state]
+  if (page > 1) args.push("--page", String(page))
+  const d = data(await gitea(args))
+  const list = Array.isArray(d) ? d : (d?.pulls ?? d?.items ?? [])
+  return list.map((x) => ({
+    number: Number(x.number ?? x.pullNumber),
+    repo: x.repo ?? repo,
+    title: x.title ?? "",
+    state: x.state ?? "",
+    author: x.author ?? null,
+    labels: (x.labels ?? []).map((l) => (typeof l === "string" ? l : l.name)).filter(Boolean),
+    assignees: (x.assignees ?? []).map((a) => (typeof a === "string" ? a : a.name ?? a.username)).filter(Boolean),
+    url: x.url ?? "",
+    createdAt: x.createdAt ?? x.created_at ?? "",
+    updatedAt: x.updatedAt ?? x.updated_at ?? "",
+  }))
+}
+
 export async function createPr({ repo, base, head, title, body = "" }) {
   const d = data(
     await gitea(["pr", "--repo", repo, "--base", base, "--head", head, "--title", title, "--body", body])

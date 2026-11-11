@@ -12,7 +12,7 @@
 doubao-bot/
 ├── dws/                  # dws 包：bin/dws.mjs、src/、test/、README、package.json
 ├── foreman/              # foreman 包：bin/foreman.mjs、src/、test/、README、package.json
-├── adapters/gitea/       # opencli 的 gitea 站点适配器源码（22 条命令）
+├── adapters/gitea/       # opencli 的 gitea 站点适配器源码（23 条命令）
 ├── skills/               # dws / foreman / gitea-opencli / workflow 四个技能
 ├── scripts/link-adapter.sh
 └── package.json          # 只有 test / link:adapter 两个脚本，不放任何 CLI

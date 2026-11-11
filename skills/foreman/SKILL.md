@@ -35,6 +35,23 @@ foreman watch poll               # 立刻跑一轮（checked / settled / notifie
 - 监听节奏沿用 `pollSeconds`（默认 20s）：对登记会话跑 `dws status`，`streaming` 真（running）或 `chars: 0`（pending，dws 的"还没开始"坑）不动；`finished` 真、或 finished/streaming 都假但 `chars > 0` 且有文本（settled）才算跑完；再要求「回复指纹变了」（指纹 = `sha1(chars|head|tail)` 前 12 位）。同一个 `(会话, 指纹)` 只通知一次，去重记在 state.json 的 `notified` 键，服务重启不重发。
 - 通知含仓库、单号、结论类别、PR 链接（有则带）；目标取登记的 `notifyTo`，没写取 `notify.session`（`auto` → `MCP_VM_CONVERSATION_ID`）。三种不发：`notify.enabled: false`、目标为空、目标就是被监听会话自己；结论不在 `notify.events` 白名单也不发（显式盯的 `session-done` 例外）。发送失败只写 `service.log`、`dwsErrors++`，不影响继续监听。
 
+## PR 监听（默认 5 分钟一轮）
+
+服务里还有一条独立定时器，每 `prWatch.intervalSeconds`（默认 300s）扫一遍 `repos[]` 下各仓库的 open PR：
+
+- 列表走 `opencli gitea pull-list --repo <owner/name> --state open`（只读适配器命令，带回 `author`）。
+- 作者在 `prWatch.ignoreAuthors`（默认 `["233151"]`，即自己的账号）里的单跳过，只记 `skipped: "self"`。
+- 其余 PR 合成一条消息，用 `dws notify` 发给 `prWatch.notifyTarget`：`earliest`（默认）= 账本 `sessions` 里最早登记、有 `convId` 的会话（第一个调用方）；也可写死会话 id/侧边栏标题。
+- 正文带 `仓库#编号`、标题、作者、PR 链接与合并命令；**只通知不合并**，合不合由收到通知的人定。
+- 去重记在 `state.json` 的 `prWatch` 键（`<repo>#<number>`），发成功才盖 `notifiedAt`；失败下一轮重试，重启不重发。账本里还没有调用方时不发也不记账，等有了补发。
+- 起服务 1s 后先扫一遍，之后按间隔跑。
+
+```bash
+foreman pr poll                  # 立刻扫一轮（checked / notified / target）
+foreman pr list                  # 看 PR 监听账本
+foreman status                   # 带 prWatch.lastPollAt / pollCount / notifiedCount / pending
+```
+
 ## 动手前
 
 1. `foreman doctor` —— 查 dws / opencli / herdr / 各仓库的 `origin/<base>`，零副作用。
@@ -51,6 +68,8 @@ foreman run --repo win-ai-harness --once
 foreman run --notify <会话id|标题>      # 这一轮派出的会话，登记监听时通知目标写谁
 foreman run --no-notify                # 这一轮不登记监听，因此不会有通知
 foreman tasks                         # 每条工单到哪一步、卡在哪
+foreman pr poll                       # 立刻扫一轮 PR（作者不是 233151 的报给最早登记的调用方）
+foreman pr list                       # 看 PR 监听账本
 foreman retry win-ai-harness 255      # 人工处理完，放回队列（attempts 清零）
 foreman doctor [--start]              # --start 才真的连豆包窗口读状态
 ```
@@ -76,7 +95,7 @@ RESULT 协议（只认最后一个块，差一点按失败处理）：
 
 ## 状态与文件
 
-- 账本 `~/.foreman/state.json`：`issues`（工单进度、分支、worktree、attempts、lastFailure）、`sessions`（会话名、convId、最后回复）、`watch`（显式登记的监听）、`notified`（已通知指纹去重）
+- 账本 `~/.foreman/state.json`：`issues`（工单进度、分支、worktree、attempts、lastFailure）、`sessions`（会话名、convId、最后回复）、`watch`（显式登记的监听）、`notified`（已通知指纹去重）、`prWatch`（PR 监听去重：`<repo>#<number>`）
 - 服务 `~/.foreman/foreman.sock`（IPC，0600）/ `foreman.pid` / `service.log`
 - 日志 `~/.foreman/run.log`；锁 `~/.foreman/run.lock`
 - 工作区 `~/.foreman/worktrees/<仓库>/fix-issue-N`（分支名里的 `/` 换成 `-`）
@@ -90,6 +109,7 @@ RESULT 协议（只认最后一个块，差一点按失败处理）：
 - `merge.enabled` 默认 **false**：只开 PR 不合并，状态停在 `pr-open`——这是预期，不是卡死。
 - **通知默认开、且只有异步这一条**：会话跑完后由**服务**用 `dws send` 回给登记的通知目标（`notify.session: "auto"` 取 `MCP_VM_CONVERSATION_ID`，也可写会话 id/侧边栏标题），run 自己不发。`--no-notify` = 这一轮派出的会话**不登记给服务监听、因此不会有通知**（不是「换个方式同步发」）；`notify.enabled: false` 永久关；`--notify <会话id|标题>` 只改登记时的通知目标。不发的三种情况：目标为空、目标就是这条单自己的执行会话 `foreman-<仓库>-<N>`、结论不在 `notify.events` 白名单（显式盯的 `session-done` 例外）。
 - **服务没在跑时通知会丢**（异步的代价，不是 bug）：补法是 `foreman watch list` 看登记还在不在 → `foreman watch poll` 立刻重放一轮 → `foreman status` 看 `lastPollAt` / `pollCount` / `dwsErrors`。
+- **PR 监听**：`prWatch.enabled`（默认 `true`）、`intervalSeconds`（默认 300）、`ignoreAuthors`（默认 `["233151"]`，自己的 Gitea 用户名）、`notifyTarget`（`earliest` 取最早登记的调用方）。只通知不合并；要停就 `enabled: false` 或改大间隔。
 - **`service.enabled: false`** 等价于一直带 `--no-service`：子命令不握手、不自动拉起；`socket` / `pidFile` / `logFile` 可改路径（测试用临时目录）。
 - `verify` 是逐条 `bash -lc` 跑在 worktree 里的命令；`[]` 表示只查"干净 + 有提交"。
 - `herdr.enabled: false` 或 herdr 报错时退回 `git worktree add`，日志里有原因。

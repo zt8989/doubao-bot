@@ -44,6 +44,15 @@ run 派完活就返回，不发通知。会话跑完后，由常驻服务轮询 
 - 正文含仓库、单号、结论类别、PR 链接（有则带）；发送失败只写 `service.log`、计 `dwsErrors`，不打断轮询。
 - **服务没在跑时通知会丢**（异步的代价，不是 bug）：`foreman watch list` 看登记在不在 → `foreman watch poll` 立刻重放一轮（已跑完、未通知的会补发）→ `foreman status` 看 `lastPollAt` / `pollCount` / `dwsErrors`。
 
+## PR 监听（5 分钟一轮）
+
+服务里另有一条定时器：每 `prWatch.intervalSeconds`（默认 300s）用 `opencli gitea pull-list` 扫一遍各仓库 open PR，把**作者不是 233151**（`prWatch.ignoreAuthors`）的单用 `dws notify` 报给 `prWatch.notifyTarget`——默认 `earliest`，即账本里最早登记的调用方会话。正文带 PR 链接和合并命令，**只通知不合并**，合不合由收到通知的人决定。去重记在 `state.json` 的 `prWatch` 键，发成功才记账。
+
+```bash
+foreman pr poll   # 立刻扫一轮
+foreman pr list   # 看账本
+```
+
 ## 铁律
 
 - **基线统一 `sit-20261126`**，不用 `dev`；PR 一律 `--base sit-20261126`。

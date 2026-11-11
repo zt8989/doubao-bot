@@ -28,6 +28,30 @@ export class Book {
     return this.data.notified ?? (this.data.notified = {})
   }
 
+  // PR 监听账本：{ "<repo>#<number>": { author, title, url, notifiedAt, ... } }
+  get prSeen() {
+    return this.data.prWatch ?? (this.data.prWatch = {})
+  }
+
+  // 记一条 PR 见过/已通知；notifiedAt 只有真发出去时才盖。
+  markPrSeen(key, pr = {}) {
+    const prev = this.prSeen[key] ?? {}
+    this.prSeen[key] = {
+      ...prev,
+      repo: pr.repo ?? prev.repo ?? "",
+      number: pr.number ?? prev.number ?? null,
+      title: pr.title ?? prev.title ?? "",
+      url: pr.url ?? prev.url ?? "",
+      author: pr.author ?? prev.author ?? "",
+      skipped: pr.skipped ?? prev.skipped ?? "",
+      seenAt: prev.seenAt ?? nowIso(),
+      notifiedTo: pr.notifiedTo ?? prev.notifiedTo ?? "",
+      notifiedAt: pr.notifiedTo ? nowIso() : prev.notifiedAt ?? "",
+    }
+    this.save()
+    return this.prSeen[key]
+  }
+
   issue(key) {
     return this.issues[key] ?? null
   }

@@ -105,6 +105,26 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 2. `foreman watch poll` —— 立刻重放一轮，已跑完且指纹没通知过的会补发。
 3. `foreman status` —— 看 `lastPollAt` / `pollCount` / `dwsErrors`，判断服务是没在跑，还是在跑但一直出错。
 
+## PR 监听（默认 5 分钟一轮）
+
+服务里还有一条独立定时器，每 `prWatch.intervalSeconds`（默认 300s）扫一遍 `repos[]` 下各仓库的 open PR：
+
+- 列表走 `opencli gitea pull-list --repo <owner/name> --state open`（新加的只读适配器命令，带回 `author`）。
+- 作者在 `prWatch.ignoreAuthors`（默认 `["233151"]`，就是自己的账号）里的 PR 跳过，只记一笔 `skipped: "self"`。
+- 其余 PR 合成一条消息，用 `dws notify` 发给 `prWatch.notifyTarget`：
+  - `earliest`（默认）= 账本 `sessions` 里**最早登记**、有 `convId` 的那个会话，即第一个调用方；
+  - 也可以直接写死会话 id 或侧边栏标题。
+- 正文带 `仓库#编号`、标题、作者、PR 链接和合并命令；**只通知不合并**，合不合由收到通知的人决定。
+- 去重记在 `state.json` 的 `prWatch` 键（`<repo>#<number>`），**发成功才盖 `notifiedAt`**；发送失败下一轮重试，重启不重发。
+- 账本里还没有调用方会话时这轮不发、也不记账，等有调用方了下一轮补发。
+- 起服务 1s 后先扫一遍，之后按间隔跑。
+
+```bash
+foreman pr poll                  # 立刻扫一轮（返回 checked / notified / target）
+foreman pr list                  # 看账本里见过/已通知的 PR
+foreman status                   # 带 prWatch.lastPollAt / pollCount / notifiedCount / pending
+```
+
 ## 命令
 
 ```bash
@@ -114,6 +134,8 @@ foreman run --every 1800         # 常驻，每 1800s 一轮
 foreman run --notify <会话id|标题>  # 这一轮派出的会话，登记监听时通知目标写谁
 foreman run --no-notify          # 这一轮不登记监听，因此不会有通知（连同其它参数一起用）
 foreman tasks                    # 每条工单到哪一步、卡在哪
+foreman pr poll                  # 立刻扫一轮 PR（别人的单报给最早登记的调用方）
+foreman pr list                  # 看 PR 监听账本
 foreman retry win-ai-harness 255 # 人工处理完，放回队列（attempts 清零）
 foreman doctor                   # 自检：dws/opencli/herdr/仓库基线
 foreman doctor --start            # 额外读一次豆包窗口状态（会连窗口，不新建任务）
@@ -154,6 +176,14 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
     "enabled": true,
     "session": "auto",
     "events": ["done", "pr-open", "needs-human", "blocked", "escalated", "failed"]
+  },
+  "prWatch": {
+    "enabled": true,
+    "intervalSeconds": 300,
+    "state": "open",
+    "maxPages": 3,
+    "ignoreAuthors": ["233151"],
+    "notifyTarget": "earliest"
   },
   "repos": [
     {

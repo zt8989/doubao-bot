@@ -1,4 +1,4 @@
-# opencli gitea 命令参考（22 条，站点 106.54.199.229:3000）
+# opencli gitea 命令参考（23 条，站点 106.54.199.229:3000）
 
 `*` = 必填。所有命令支持通用输出参数 `-f/--format json|table|plain|yaml|md|csv`（默认 json）。
 
@@ -7,6 +7,7 @@
 | 命令 | 说明 | 关键参数 |
 |---|---|---|
 | `pr-view <pr>` | PR 状态、正文、`mergeNote`、`filesCount` | `--repo*`、`--files`（实测失败） |
+| `pull-list` | 列仓库 PR（带回 `author`，可按人过滤；不回 base/head） | `--repo*`、`--state open\|closed\|all`、`--page` |
 | `issue-view <issue>` | 工单正文 + 评论 | `--repo*` |
 | `search <query>` | 搜索/列出工单（PR 也在其中） | `--repo*`、`--state open\|closed\|all`、`--label <id>`、`--assignee none\|any\|<user>`、`--milestone`、`--page` |
 | `label-list` | 列标签（取 id 用） | `--repo` 或 `--org` |

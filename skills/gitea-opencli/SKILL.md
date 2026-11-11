@@ -34,6 +34,7 @@ bash "$SKILL_DIR/scripts/gitea.sh" pr-view 217 --repo yyzl/win-ai-harness
 ```bash
 # 读
 pr-view <pr> --repo R            # 状态/正文/mergeNote（--files 实测报"无法访问"，别用）
+pull-list --repo R --state open  # 列仓库 PR，带回 author（列表页不回 base/head）
 issue-view <issue> --repo R
 search "关键词" --repo R --state open --label <id>
 label-list --repo R              # search --label 只认 id，先查名→id
@@ -50,7 +51,7 @@ pr-merge <pr> --repo R [--style merge|rebase|squash] [--delete-branch]
 assign <n> <user> --repo R ; due <n> <date> --repo R ; milestone-set <n> <ms> --repo R
 ```
 
-完整参数表（22 条命令，含 positionals/options）见 `references/commands.md`。
+完整参数表（23 条命令，含 positionals/options）见 `references/commands.md`。
 
 ## 判断「没什么可合并」
 
