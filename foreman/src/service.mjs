@@ -18,6 +18,7 @@ import { ConsoleStore } from "./console.mjs"
 import { startConsoleHttp } from "./consolehttp.mjs"
 import { fileURLToPath } from "node:url"
 import { pingOnce, readPortFile } from "./svclient.mjs"
+import { worktreeRemove, statusPorcelain, git } from "./gitx.mjs"
 
 export const MAX_FRAME_BYTES = 1 << 20
 
@@ -694,10 +695,20 @@ export async function pollOnce(ctx) {
           out.merged = (out.merged ?? 0) + 1
           log(`已合并 ${md.repo}#${md.pr}（${md.key}）`)
         } catch (e) {
-          mergeError = await mergeFailureReason({ gitea, repo: md.repo, pr: md.pr, error: e })
-          // 失败也记账：不 force merge，也不每轮重试同一张 PR。
-          bookM.markMergeAsked(md.key, { pr: md.pr, url: md.prUrl, status: "failed", error: mergeError })
-          log(`合并失败 ${md.repo}#${md.pr}：${mergeError}`)
+          // 「已经合并」不算失败：opencli 对已合的 PR 回 EMPTY_RESULT + 提示无需重复合并，
+          // 按字面判失败会把台账钉在 merge-failed，这张单就再也收不了尾。
+          const msg = String(e?.message ?? e ?? "")
+          if (/无需重复合并|已经合并|已合并/.test(msg)) {
+            bookM.markMergeAsked(md.key, { pr: md.pr, url: md.prUrl, status: "merged" })
+            merged = true
+            out.merged = (out.merged ?? 0) + 1
+            log(`${md.repo}#${md.pr} 已经是合并状态，按已合并收尾（${md.key}）`)
+          } else {
+            mergeError = await mergeFailureReason({ gitea, repo: md.repo, pr: md.pr, error: e })
+            // 失败也记账：不 force merge，也不每轮重试同一张 PR。
+            bookM.markMergeAsked(md.key, { pr: md.pr, url: md.prUrl, status: "failed", error: mergeError })
+            log(`合并失败 ${md.repo}#${md.pr}：${mergeError}`)
+          }
         }
       } else if (md.reason && !["disabled", "already-asked"].includes(md.reason)) {
         log(`跳过自动合并 ${w.target}：${md.reason}`)
@@ -802,6 +813,101 @@ export async function pollOnce(ctx) {
 
 // ---- 请求分发 ----
 
+// finishMergedPr：PR 合并成功后唯一的一处收尾。
+// 老实现只写 mergeAsk=merged 就返回，别的都没做：PR 在账本里永远停在「已通知待合并」、
+// 工单的执行会话监听不摘、worktree 与分支不清理——控制台上就是「合完了还挂着」。
+// opencli 对已经合并的 PR 会回 EMPTY_RESULT + 提示「无需重复合并」，字面当失败的话台账
+// 还会卡成 merge-failed、再没人收尾，所以这里也接受 alreadyMerged=true。
+export async function finishMergedPr({
+  gitea,
+  cfg = {},
+  log = () => {},
+  stateFile,
+  repo,
+  number,
+  issueNo = 0,
+  url = "",
+  alreadyMerged = false,
+  cleanup = cleanupPrArtifacts,
+} = {}) {
+  const key = `${repo}#${number}`
+  const issueKey = issueNo ? `${repo}#${issueNo}` : ""
+  const notes = []
+  const b = new Book(stateFile)
+
+  b.markMergeAsked(key, { pr: number, url, status: "merged" })
+  // 已合并就从「待合并」账本里摘出来：skipped=merged 记成终态，控制台不再挂成
+  // 「已通知待合并」；记录留着是给 prWatch 去重，删掉反而会被当成新 PR 再通知一遍。
+  b.markPrSeen(key, { repo, number, url, skipped: "merged", merged: true })
+
+  if (issueNo) {
+    try {
+      await gitea.closeIssue(repo, issueNo)
+    } catch (e) {
+      const msg = String(e?.message ?? e ?? "")
+      // 已经是关闭状态同样算收尾完成，不算失败。
+      if (/已经关闭|无需重复关闭/.test(msg)) notes.push(`工单 #${issueNo} 早已关闭`)
+      else notes.push(`关单 #${issueNo} 失败：${msg.slice(0, 160)}`)
+    }
+    b.setIssue(issueKey, { state: "done", pr: number, mergeError: "" })
+    // 合并完就摘掉这张单的执行会话监听：不摘的话每轮还会去读那条会话的回复，
+    // 会按指纹继续出通知（#228 就是合完还挂着、还发过一条 failed 通知）。
+    let removed = 0
+    while (b.delWatchIssue(issueKey)) removed++
+    if (removed) notes.push(`摘掉 ${removed} 条执行会话监听`)
+  }
+
+  // 本地收尾：关 herdr 工作区 → 删 worktree → 安全删分支。尽力而为，失败只记 notes。
+  const it = issueKey ? b.issue(issueKey) : null
+  if (it?.worktree || it?.branch) {
+    const repoDir = (cfg.repos ?? []).find((r) => r.repo === repo)?.dir ?? ""
+    try {
+      const out = await cleanup({
+        repoDir,
+        worktree: it.worktree ?? "",
+        branch: it.branch ?? "",
+        log,
+      })
+      notes.push(...(out?.notes ?? []))
+    } catch (e) {
+      notes.push(`本地清理失败：${String(e?.message ?? e).slice(0, 160)}`)
+    }
+  }
+
+  return { key, issueKey, notes, alreadyMerged }
+}
+
+// cleanupPrArtifacts：合并后的本地收尾——删 worktree、删本地分支。
+// 尽力而为：任何一步失败只记 notes，不反过来推翻「已经合并」。worktree 里有未提交改动
+// 就保留（worktreeRemove 是 --force，先用 statusPorcelain 挡一道，别把别人的在写内容删掉）。
+export async function cleanupPrArtifacts({ repoDir, worktree, branch = "" } = {}) {
+  const notes = []
+  if (!worktree) {
+    notes.push("账本里没有 worktree 记录，跳过本地清理")
+    return { notes }
+  }
+  if (!fs.existsSync(worktree)) {
+    notes.push("worktree 已不在，跳过")
+  } else {
+    let dirty = ""
+    try {
+      dirty = await statusPorcelain(worktree)
+    } catch {}
+    if (dirty) notes.push("worktree 还有未提交改动，保留")
+    else if (await worktreeRemove(repoDir, worktree)) notes.push("worktree 已删除")
+    else notes.push("worktree 删除失败，保留")
+  }
+  if (branch && repoDir) {
+    try {
+      await git(["branch", "-d", branch], { cwd: repoDir })
+      notes.push(`本地分支 ${branch} 已删`)
+    } catch {
+      notes.push(`本地分支 ${branch} 未删（未合并或已不存在）`)
+    }
+  }
+  return { notes }
+}
+
 export async function handleRequest(ctx, req) {
   const id = req?.id
   const ok = (extra) => ({ id, ok: true, ...extra })
@@ -875,30 +981,44 @@ export async function handleRequest(ctx, req) {
     if (!repo || !number) return fail("bad-request", "pr merge 需要 repo / number")
     const style = String(req.style ?? ctx.cfg.merge?.style ?? "merge")
     const deleteBranch = req.deleteBranch !== undefined ? req.deleteBranch !== false : ctx.cfg.merge?.deleteBranch !== false
+    let alreadyMerged = false
     try {
       await ctx.gitea.mergePr(repo, number, { style, deleteBranch })
     } catch (e) {
-      const reason = await mergeFailureReason({ gitea: ctx.gitea, repo, pr: number, error: e })
-      try {
-        new Book(ctx.cfg.stateFile).markMergeAsked(`${repo}#${number}`, { pr: number, status: "failed", error: reason })
-      } catch {}
-      ctx.log?.(`合并失败 ${repo}#${number}：${reason}`)
-      return fail("merge-failed", reason)
+      const msg = String(e?.message ?? e ?? "")
+      // 「已经合并」不是失败：opencli 在 PR 已合回 EMPTY_RESULT + 提示无需重复合并。
+      // 早先按字面判失败，账本就卡在 merge-failed，收尾一步也没做（#234 合完了还挂）。
+      if (/无需重复合并|已经合并|已合并/.test(msg)) {
+        alreadyMerged = true
+        ctx.log?.(`${repo}#${number} 已经是合并状态，按已合并收尾`)
+      } else {
+        const reason = await mergeFailureReason({ gitea: ctx.gitea, repo, pr: number, error: e })
+        try {
+          new Book(ctx.cfg.stateFile).markMergeAsked(`${repo}#${number}`, { pr: number, status: "failed", error: reason })
+        } catch {}
+        ctx.log?.(`合并失败 ${repo}#${number}：${reason}`)
+        return fail("merge-failed", reason)
+      }
     }
     const issueNo = Number(req.issue ?? 0)
-    const b = new Book(ctx.cfg.stateFile)
-    b.markMergeAsked(`${repo}#${number}`, { pr: number, url: String(req.url ?? ""), status: "merged" })
-    if (issueNo) {
-      try { await ctx.gitea.closeIssue(repo, issueNo) } catch (e) { ctx.log?.(`关单 ${repo}#${issueNo} 失败：${e.message}`) }
-      b.setIssue(`${repo}#${issueNo}`, { state: "done", pr: number })
-    }
+    const done = await finishMergedPr({
+      gitea: ctx.gitea,
+      cfg: ctx.cfg,
+      log: ctx.log,
+      stateFile: ctx.cfg.stateFile,
+      repo,
+      number,
+      issueNo,
+      url: String(req.url ?? ""),
+      alreadyMerged,
+    })
     ctx.consoleStore?.event({
       kind: "pr_merge", key: `${repo}#${number}`, repo, number,
       to: "merged", detail: `${style}${issueNo ? ` · 关单 #${issueNo}` : ""}`,
     })
     try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
-    ctx.log?.(`已合并 ${repo}#${number}${issueNo ? `，关单 #${issueNo}` : ""}（走 foreman）`)
-    return ok({ repo, number, merged: true, issue: issueNo || null })
+    ctx.log?.(`已合并 ${repo}#${number}${issueNo ? `，关单 #${issueNo}` : ""}（走 foreman）${done.notes.length ? `；收尾：${done.notes.join("；")}` : ""}`)
+    return ok({ repo, number, merged: true, alreadyMerged, issue: issueNo || null, cleanup: done.notes })
   }
 
   if (cmd === "issue comment") {

@@ -22,7 +22,7 @@ description: 接单编排 CLI（项目 foreman，命令 foreman）：用 opencli
 | 动作 | 命令 | 为什么非它不可 |
 | --- | --- | --- |
 | 建 PR | `foreman pr open` | PR 与「哪条单、哪个会话」的对应只有它知道；直接 `opencli gitea pr` 建的 PR 在账本里不存在，控制台看不到 |
-| 合并 PR | `foreman pr merge` | 每张 PR 只合一次的幂等（`mergeAsk`）+ 合完推进 `done` / 关单 |
+| 合并 PR | `foreman pr merge` | 每张 PR 只合一次的幂等（`mergeAsk`）+ 合完一次收干净：工单 `done`、关单、摘执行会话监听、删 worktree 与本地分支；PR 已合（回 `EMPTY_RESULT`「无需重复合并」）也按已合并收尾，不当失败 |
 
 **其余一律直连，不经 foreman**：
 
