@@ -29,10 +29,24 @@ export const DEFAULTS = {
     // 不用人手敲 foreman run。默认关，显式 auto:true 才起。
     auto: false,
     intervalSeconds: 1800,
-    // 一轮最多派几条（豆包单实例，默认一次只派一条）。
-    maxPerRound: 1,
+    // 一轮最多派几条（默认跟着容量走，一轮就能把空槽补满）。
+    maxPerRound: 2,
+    // 同时在跑的单数上限：派单通道的容量。到顶就不再捞新单，等有单出结论。
+    // 派活动作本身仍是一条一条来（豆包单实例），并行的是「在跑的任务数」。
+    maxRunning: 2,
+    // 保守开关：有被监听会话在跑时不派新会话（老行为）。默认关，
+    // 关掉才能同时有 2 张单在跑；豆包窗口互相抢时再打开。
+    pauseWhileRunning: false,
   },
-  merge: { enabled: false, style: "merge", deleteBranch: true },
+  // 合并通道：与派单通道独立排队，默认一次只合一条（合并要写账本，不能并发）。
+  merge: {
+    enabled: false,
+    style: "merge",
+    deleteBranch: true,
+    concurrency: 1,
+    intervalSeconds: 60,
+    cron: "",
+  },
   // 收口通知：每条工单处理完，用 dws send 把结果回给「调用方会话」。
   // session 写 "auto" 就取环境变量 MCP_VM_CONVERSATION_ID（在豆包会话里跑 foreman 时就是那条会话），
   // 也可以直接写会话 id 或侧边栏标题。
@@ -63,7 +77,10 @@ export const DEFAULTS = {
   // promptFile 为空时启动不报错，投递时才报（便于先跑通再补提示词）；路径给了但文件不存在直接报错。
   deliver: {
     mode: "new",
+    // 派单会话的提示词（续跑 / 接单）。
     promptFile: "",
+    // 合并会话的提示词；留空回落 promptFile。
+    mergePromptFile: "",
     // 监控项目根目录：写进新会话首句，不出现在代码里。
     projectDir: "",
     namePrefix: "foreman",
@@ -198,12 +215,21 @@ export function loadConfig(explicit) {
     if (!Number.isFinite(n) || n <= 0) throw new Error(`配置项 prWatch.${key} 要是正数，现在是：${cfg.prWatch[key]}`)
     cfg.prWatch[key] = n
   }
-  // 自动接单巡检：开关只认 true，间隔与每轮条数要正数。
+  // 自动接单巡检：开关只认 true，间隔、每轮条数与在跑上限都要正数。
   cfg.pickup.auto = cfg.pickup.auto === true
-  for (const key of ["intervalSeconds", "maxPerRound"]) {
+  cfg.pickup.pauseWhileRunning = cfg.pickup.pauseWhileRunning === true
+  for (const key of ["intervalSeconds", "maxPerRound", "maxRunning"]) {
     const n = Number(cfg.pickup[key])
     if (!Number.isFinite(n) || n <= 0) throw new Error(`配置项 pickup.${key} 要是正数，现在是：${cfg.pickup[key]}`)
-    cfg.pickup[key] = n
+    cfg.pickup[key] = Math.floor(n)
+  }
+
+  // 合并通道：并发与扫队列间隔要正数；并发默认 1，合并按顺序来。
+  cfg.merge = cfg.merge && typeof cfg.merge === "object" ? cfg.merge : {}
+  for (const key of ["concurrency", "intervalSeconds"]) {
+    const n = Number(cfg.merge[key] ?? (key === "concurrency" ? 1 : 60))
+    if (!Number.isFinite(n) || n <= 0) throw new Error(`配置项 merge.${key} 要是正数，现在是：${cfg.merge[key]}`)
+    cfg.merge[key] = Math.floor(n)
   }
 
   const pwState = String(cfg.prWatch.state ?? "open")
@@ -217,12 +243,15 @@ export function loadConfig(explicit) {
     throw new Error(`配置项 deliver.mode 只能是 new/existing，现在是：${cfg.deliver.mode}`)
   }
   cfg.deliver.mode = dMode
-  for (const key of ["promptFile", "projectDir"]) {
+  for (const key of ["promptFile", "mergePromptFile", "projectDir"]) {
     const raw = expandHome(String(cfg.deliver[key] ?? "").trim())
     cfg.deliver[key] = raw ? (path.isAbsolute(raw) ? raw : path.resolve(baseDir, raw)) : ""
   }
   if (dMode === "new" && cfg.deliver.promptFile && !fs.existsSync(cfg.deliver.promptFile)) {
     throw new Error(`配置项 deliver.promptFile 指向的固定提示词不存在：${cfg.deliver.promptFile}`)
+  }
+  if (dMode === "new" && cfg.deliver.mergePromptFile && !fs.existsSync(cfg.deliver.mergePromptFile)) {
+    throw new Error(`配置项 deliver.mergePromptFile 指向的固定提示词不存在：${cfg.deliver.mergePromptFile}`)
   }
   cfg.deliver.namePrefix = String(cfg.deliver.namePrefix ?? "").trim() || "foreman"
   cfg.deliver.waitFirstReply = cfg.deliver.waitFirstReply === true
@@ -249,9 +278,13 @@ function normalizeProducts(cfg, baseDir) {
     const name = String(p.name ?? "").trim()
     if (!name) throw new Error(`products[${i}].name 必填（产品名，用于分组与投递会话命名）`)
     const promptFileRaw = expandHome(String(p.promptFile ?? "").trim())
+    const mergePromptRaw = expandHome(String(p.mergePromptFile ?? "").trim())
     const projectDirRaw = expandHome(String(p.projectDir ?? "").trim())
     const promptFile = promptFileRaw
       ? path.isAbsolute(promptFileRaw) ? promptFileRaw : path.resolve(baseDir, promptFileRaw)
+      : ""
+    const mergePromptFile = mergePromptRaw
+      ? path.isAbsolute(mergePromptRaw) ? mergePromptRaw : path.resolve(baseDir, mergePromptRaw)
       : ""
     const projectDir = projectDirRaw
       ? path.isAbsolute(projectDirRaw) ? projectDirRaw : path.resolve(baseDir, projectDirRaw)
@@ -259,8 +292,11 @@ function normalizeProducts(cfg, baseDir) {
     if (cfg.deliver.mode === "new" && promptFile && !fs.existsSync(promptFile)) {
       throw new Error(`products[${i}]（${name}）的 promptFile 指向的固定提示词不存在：${promptFile}`)
     }
+    if (cfg.deliver.mode === "new" && mergePromptFile && !fs.existsSync(mergePromptFile)) {
+      throw new Error(`products[${i}]（${name}）的 mergePromptFile 指向的提示词不存在：${mergePromptFile}`)
+    }
     const repos = normalizeRepos(p).map((r) => ({ ...r, product: name }))
     if (!repos.length) throw new Error(`products[${i}]（${name}）至少要给一条 repos`)
-    return { name, promptFile, projectDir, repos }
+    return { name, promptFile, mergePromptFile, projectDir, repos }
   })
 }

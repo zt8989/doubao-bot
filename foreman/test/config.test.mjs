@@ -112,7 +112,13 @@ test("pickup 自动巡检：默认关，开了才按 intervalSeconds 跑，间�
   const cfg = loadConfig(file)
   assert.equal(cfg.pickup.auto, false)
   assert.equal(cfg.pickup.intervalSeconds, 1800)
-  assert.equal(cfg.pickup.maxPerRound, 1)
+  // 派单通道默认同时 2 张单在跑，一轮也补 2 条（派活动作本身仍串行）。
+  assert.equal(cfg.pickup.maxRunning, 2)
+  assert.equal(cfg.pickup.maxPerRound, 2)
+  assert.equal(cfg.pickup.pauseWhileRunning, false)
+  // 合并通道默认关、1 并发。
+  assert.equal(cfg.merge.concurrency, 1)
+  assert.equal(cfg.merge.enabled, false)
 
   const { file: f2 } = tmpConfig({
     repos: [{ repo: "a/b", dir: "/tmp", base: "sit-test" }],

@@ -5,6 +5,7 @@ import os from "node:os"
 import path from "node:path"
 import { eligible, sortIssues, CLOSED_STATES } from "../src/orchestrator.mjs"
 import { pickupOnce } from "../src/service.mjs"
+import { Book } from "../src/book.mjs"
 
 const repoCfg = { name: "win-ai-harness", repo: "yyzl/win-ai-harness", dir: "/tmp/x", base: "dev" }
 
@@ -209,8 +210,8 @@ test("自动巡检：队列空了只写一句话，不记派单", async () => {
   assert.match(logs.find((s) => !s.startsWith("[操作]")), /没有可接的活/)
 })
 
-test("自动巡检：有被监听会话还在跑就不开新会话（豆包单实例）", async () => {
-  const { ctx, logs } = pickupCtx()
+test("自动巡检：开启 pauseWhileRunning 时，有被监听会话还在跑就不开新会话（豆包单实例）", async () => {
+  const { ctx, logs } = pickupCtx({ pickup: { auto: true, intervalSeconds: 1800, maxPerRound: 2, pauseWhileRunning: true } })
   ctx.state.watchers = new Map([["conv-running", { target: "conv-running" }]])
   ctx.dws = { runningMap: async () => ({ "conv-running": { running: true } }) }
   let called = 0
@@ -219,6 +220,54 @@ test("自动巡检：有被监听会话还在跑就不开新会话（豆包单�
   assert.deepEqual(r.busy, ["conv-running"])
   assert.equal(called, 0)
   assert.match(logs[0], /还在跑，本轮不派新会话/)
+})
+
+test("自动巡检：默认不因窗口在跑就停派，空两个槽就一轮补两条", async () => {
+  const { ctx } = pickupCtx({ pickup: { auto: true, intervalSeconds: 1800, maxPerRound: 2, maxRunning: 2 } })
+  ctx.state.watchers = new Map([["conv-running", { target: "conv-running" }]])
+  ctx.dws = { runningMap: async () => ({ "conv-running": { running: true } }) }
+  let maxTotal = 0
+  const r = await pickupOnce(ctx, { run: async (c) => { maxTotal = c.maxTotal; return [] } })
+  assert.equal(r.ok, true)
+  assert.notEqual(r.skipped, "window-busy")
+  assert.equal(maxTotal, 2)
+})
+
+test("自动巡检：在跑到上限就不再捞新单（派单通道容量）", async () => {
+  const { ctx } = pickupCtx({ pickup: { auto: true, intervalSeconds: 1800, maxPerRound: 2, maxRunning: 2 } })
+  const book = new Book(ctx.cfg.stateFile)
+  book.setIssue("yyzl/win-ai-harness#1", { state: "working" })
+  book.setIssue("yyzl/win-ai-harness#2", { state: "working" })
+  let called = 0
+  const r = await pickupOnce(ctx, { run: async () => { called++; return [] } })
+  assert.equal(r.skipped, "slots-full")
+  assert.equal(r.running, 2)
+  assert.equal(called, 0, "两张单在跑就到顶，不再派")
+})
+
+test("自动巡检：只剩一个槽就只补一条；派单失败待重试的不占槽", async () => {
+  const { ctx } = pickupCtx({ pickup: { auto: true, intervalSeconds: 1800, maxPerRound: 2, maxRunning: 2 } })
+  new Book(ctx.cfg.stateFile).setIssue("yyzl/win-ai-harness#1", { state: "working" })
+  let maxTotal = 0
+  const r = await pickupOnce(ctx, { run: async (c) => { maxTotal = c.maxTotal; return [] } })
+  assert.equal(r.ok, true)
+  assert.equal(maxTotal, 1)
+
+  const msgs = []
+  const r2 = await pickupOnce(ctx, {
+    run: async (c) => {
+      msgs.push(c.maxTotal)
+      return []
+    },
+  })
+  assert.equal(r2.ok, true)
+  assert.equal(msgs[0], 1)
+
+  // 把这一条打成「派单失败待重试」：不占槽，容量回到 2。
+  new Book(ctx.cfg.stateFile).setIssue("yyzl/win-ai-harness#1", { state: "working", lastFailure: "会话没跑通" })
+  let cap = 0
+  await pickupOnce(ctx, { run: async (c) => { cap = c.maxTotal; return [] } })
+  assert.equal(cap, 2)
 })
 
 test("自动巡检：侧边栏读不到不拦派单（dws open 自己有兜底）", async () => {

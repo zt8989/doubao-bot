@@ -72,7 +72,7 @@ test("mergeDecision：开关、执行方、状态、PR、自证、去重", () =>
   }
 })
 
-test("poll：done+PR 由编排合并一次、关单，并把“已合并”通知调用方", async () => {
+test("poll：done+PR 只入合并队列，合并通道合一次、关单，结果通知调用方", async () => {
   const dir = tmpDir()
   let server
   try {
@@ -90,15 +90,21 @@ test("poll：done+PR 由编排合并一次、关单，并把“已合并”通�
     }
     server = await startServer({ cfg, book, dws: mkDws([JSON.stringify(doneResult)], sends), gitea, log: () => {} })
 
+    // poll 不再自己合并：只入队，通知里就说「已排入合并通道」。
     const r1 = await server.poll()
-    assert.equal(r1.merged, 1)
+    assert.equal(r1.queued, 1)
+    assert.equal(r1.merged, undefined, "poll 不做 20–40s 的合并，先返回")
+    const queuedNote = sends.find((s) => s.target === "boss")
+    assert.match(queuedNote.text, /合并：已排入合并通道/)
+
+    // 合并通道（1 并发）取队列合掉。
+    await server.merge()
     assert.equal(merged.length, 1)
     assert.deepEqual(merged[0], { repo: "demo/demo", pr: 12, opts: { style: "merge", deleteBranch: true } })
     assert.deepEqual(closed, [{ repo: "demo/demo", n: 9 }])
 
-    const note = sends.find((s) => s.target === "boss")
-    assert.ok(note, "调用方收到通知")
-    assert.match(note.text, /合并：已合并 PR #12/)
+    const mergeNote = sends.filter((s) => s.target === "boss").find((s) => /合并：已合并 PR #12/.test(s.text))
+    assert.ok(mergeNote, "合并结果单独通知调用方")
 
     // 同一 PR 换指纹再来一轮：不再合。
     await server.close()
@@ -107,6 +113,7 @@ test("poll：done+PR 由编排合并一次、关单，并把“已合并”通�
     book2.markNotified("conv-work", "other-fingerprint", {})
     server = await startServer({ cfg, book: book2, dws: mkDws([JSON.stringify({ ...doneResult, summary: "又补一句" })], sends), gitea, log: () => {} })
     await server.poll()
+    await server.merge()
     assert.equal(merged.length, 1, "同一 PR 只合一次")
   } finally {
     if (server) await server.close()
@@ -132,11 +139,13 @@ test("poll：合并冲突 → 不 force merge、只记失败、调用方收到�
     server = await startServer({ cfg, book, dws: mkDws([JSON.stringify(doneResult)], sends), gitea, log: () => {} })
 
     const r = await server.poll()
-    assert.equal(r.merged ?? 0, 0)
-    assert.equal(attempts, 1)
-    const note = sends.find((s) => s.target === "boss")
-    assert.match(note.text, /合并失败：此分支存在冲突/)
+    assert.equal(r.queued, 1)
+    await server.merge()
+    assert.equal(attempts, 1, "合并通道只试一次，不 force merge、不重试")
+    const note = sends.filter((s) => s.target === "boss").find((s) => /合并失败：此分支存在冲突/.test(s.text))
+    assert.ok(note, "合并失败要单独告诉调用方")
     assert.equal(new Book(cfg.stateFile).mergeAsk["demo/demo#12"].status, "failed")
+    assert.equal(new Book(cfg.stateFile).mergeTask("demo/demo#12").status, "failed")
   } finally {
     if (server) await server.close()
     fs.rmSync(dir, { recursive: true, force: true })

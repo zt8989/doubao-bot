@@ -5,11 +5,16 @@ import { earliestCaller } from "./prwatch.mjs"
 
 export const RUNNING_STATES = new Set(["planned", "working"])
 
-// 正在跑的单：派出去还没出结论的。
+// 正在跑的单：派出去还没出结论的（派单失败的不占槽，等重试）。
 export function runningIssues(book) {
   return Object.entries(book?.issues ?? {})
     .filter(([, it]) => RUNNING_STATES.has(String(it?.state ?? "")))
     .map(([key, it]) => ({ key, ...it }))
+}
+
+// 占着槽位的单：planned/working 且不是「派单失败待重试」的那些。
+export function inflightIssues(book) {
+  return runningIssues(book).filter((it) => !it.lastFailure)
 }
 
 export function plannerTarget(cfg, book, env = process.env) {
@@ -26,8 +31,8 @@ export function plannerDecision({ cfg, book, result, key }) {
   if (p.enabled !== true) return { send: false, reason: "disabled" }
   if (!key) return { send: false, reason: "no-key" }
   if (book?.planner?.lastKey === key) return { send: false, reason: "already" }
-  const running = runningIssues(book).length
-  const maxRunning = Number(p.maxRunning) || 2
+  const running = inflightIssues(book).length
+  const maxRunning = Number(p.maxRunning) || Number(cfg?.pickup?.maxRunning) || 2
   const status = String(result?.status ?? "")
   if (status !== "done") return { send: true, kind: "check", running, maxRunning, reason: "not-done" }
   if (running >= maxRunning) return { send: false, reason: `running-${running}` }

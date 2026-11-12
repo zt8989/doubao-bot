@@ -72,7 +72,7 @@ export function handoff({ repo, issue, worktree, branch }) {
 // + 产品 + 监控项目 + 触发原因 + 本次通知正文。
 // 关键：这是**编排**提示词，新会话只决定「续跑 / 继续接单 / 自动合并」，
 // 不是「编排提示词 + 去完成这张工单」——实现永远在执行会话里，不在这条投递会话里。
-export function deliverPrompt({ fixed = "", projectDir = "", product = "", kind = "", text = "", running = null, maxRunning = null } = {}) {
+export function deliverPrompt({ fixed = "", projectDir = "", product = "", kind = "", text = "", running = null, maxRunning = null, lane = "" } = {}) {
   const head = String(fixed ?? "").trim()
   if (!head) throw new Error("固定提示词为空：检查 deliver.promptFile / products[].promptFile 指向的文件")
   const body = String(text ?? "").trim()
@@ -80,8 +80,9 @@ export function deliverPrompt({ fixed = "", projectDir = "", product = "", kind 
   if (product) online.push(`产品：${String(product).trim()}`)
   if (projectDir) online.push(`监控项目：${String(projectDir).trim()}`)
   if (kind) online.push(`触发：${String(kind).trim()}`)
-  if (Number.isFinite(running)) {
-    online.push(`在跑任务：${running}${Number.isFinite(maxRunning) ? ` / 上限 ${maxRunning}` : ""}`)
+  if (lane === "merge") online.push("通道：合并（1 并发，只管合 PR）")
+  else if (lane === "dispatch" && Number.isFinite(running)) {
+    online.push(`通道：派单（在跑 ${running}${Number.isFinite(maxRunning) ? ` / 上限 ${maxRunning}` : ""}）`)
   }
   return [
     head,

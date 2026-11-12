@@ -56,12 +56,15 @@ test("readFixedPrompt：路径只从配置来，缺了/读不到/空文件都直
 test("deliverPrompt：编排提示词原文在前，只给编排决策，不派实现任务", () => {
   const fixed = "# 工作原则\n1. 不阻塞"
   const text = "【foreman】demo/demo#2 状态：done"
-  const out = deliverPrompt({ fixed, projectDir: "/w/win-ai-stack", kind: "工单结论", text, running: 1, maxRunning: 2 })
+  const out = deliverPrompt({ fixed, projectDir: "/w/win-ai-stack", kind: "工单结论", text, running: 1, maxRunning: 2, lane: "dispatch" })
   assert.match(out, /^# 工作原则/)
   assert.match(out, /1\. 不阻塞/)
   assert.match(out, /监控项目：\/w\/win-ai-stack/)
   assert.match(out, /触发：工单结论/)
-  assert.match(out, /在跑任务：1 \/ 上限 2/)
+  // 派单会话带通道与在跑数；合并会话走另一条通道，只有并发说明、不带在跑数。
+  assert.match(out, /通道：派单（在跑 1 \/ 上限 2）/)
+  assert.match(deliverPrompt({ fixed, kind: "合并完成", text, lane: "merge" }), /通道：合并（1 并发，只管合 PR）/)
+  assert.ok(!deliverPrompt({ fixed, kind: "合并完成", text, lane: "merge" }).includes("在上限"))
   assert.match(out, /【foreman】demo\/demo#2 状态：done/)
   // 角色与三条路只在编排提示词（MD）里说一遍，组装层不复述，避免同一段身份说明出现两次。
   assert.match(out, /按上面的编排提示词做决定，不要亲手实现工单/)
@@ -94,17 +97,47 @@ test("deliverNewSession：新建一条会话投递，记账留痕但不进监听
 
     assert.equal(calls.length, 1)
     assert.equal(calls[0].noWait, true, "默认只确认送达，不等第一轮回复")
-    assert.match(calls[0].name, /^foreman-工单结论-/)
+    // 结论走派单会话：命名带「派单」，通道也是派单。
+    assert.match(calls[0].name, /^foreman-派单-/)
     assert.match(calls[0].prompt, /# 固定提示词/)
     assert.match(calls[0].prompt, /监控项目：\/w\/win-ai-stack/)
+    assert.match(calls[0].prompt, /通道：派单（在跑 0 \/ 上限 2）/)
     assert.match(calls[0].prompt, /【foreman】结论/)
     assert.equal(out.convId, "conv-new")
+    assert.equal(out.lane, "dispatch")
 
     const book = new Book(cfg.stateFile)
     const sess = book.session(calls[0].name)
     assert.equal(sess.convId, "conv-new")
+    assert.equal(sess.kind, "deliver:dispatch")
     assert.equal(sess.notify, false, "投递会话不纳入监听，避免自己通知自己")
     assert.equal(book.watch.length, 0)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("deliverNewSession：合并会话走自己的提示词、自己的命名，不占派单那条通道", async () => {
+  const dir = tmpDir()
+  try {
+    const promptFile = path.join(dir, "dispatch.md")
+    const mergePromptFile = path.join(dir, "merge.md")
+    fs.writeFileSync(promptFile, "# 派单提示词\n只管接单与续跑\n")
+    fs.writeFileSync(mergePromptFile, "# 合并提示词\n只管合 PR\n")
+    const cfg = cfgWith(dir, {
+      deliver: { mode: "new", promptFile, mergePromptFile, projectDir: "/w/win-ai-stack", namePrefix: "foreman" },
+    })
+    const calls = []
+    const dws = { openNew: async (arg) => { calls.push(arg); return { convId: "conv-merge" } } }
+    const out = await deliverNewSession({ cfg, dws, log: () => {} }, { text: "【foreman】PR 待合并", kind: "合并完成", lane: "merge" })
+
+    assert.match(calls[0].name, /^foreman-合并-/)
+    assert.match(calls[0].prompt, /只管合 PR/)
+    assert.ok(!calls[0].prompt.includes("只管接单与续跑"), "合并会话不读派单提示词")
+    assert.match(calls[0].prompt, /通道：合并/)
+    assert.equal(out.lane, "merge")
+    const book = new Book(cfg.stateFile)
+    assert.equal(book.session(calls[0].name).kind, "deliver:merge")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -213,7 +246,7 @@ test("端到端：deliver.mode=new 时 poll 跑完就新建会话投递，不碰
     assert.equal(notified.length, 0, "不再往已有会话里塞")
     assert.equal(opened.length, 1)
     assert.equal(opened[0].noWait, true)
-    assert.match(opened[0].name, /^foreman-工单结论-/)
+    assert.match(opened[0].name, /^foreman-派单-/)
     assert.match(opened[0].prompt, /# 固定提示词/)
     assert.match(opened[0].prompt, /监控项目：\/w\/win-ai-stack/)
     assert.match(opened[0].prompt, /【foreman】demo\/demo #1/)

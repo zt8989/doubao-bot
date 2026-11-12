@@ -38,6 +38,30 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 会话交 `need_decision` / `blocked` 这类结论时，由服务通知到人；**worktree 留着**，
 人处理完 `foreman retry <仓库> <工单号>` 放回队列。
 
+## 两条通道：派单与合并彻底分开
+
+派单（接活、开会话、续跑）与合并（合 PR、关单、清工作区）是两件独立的事，走**两条独立通道**，各排各的队、各用各的并发，互不阻塞：
+
+| 通道 | 干什么 | 并发 | 排队在哪 | 谁在推进 |
+| --- | --- | --- | --- | --- |
+| **派单** | 捞单、开 worktree、开会话、续跑结论 | **2 张单同时跑**（派活动作本身仍串行） | `run.lock` + 账本 `planned`/`working` 去重 | `pickup.auto` 定时器 + `foreman run` |
+| **合并** | 合 PR、关单、摘监听、清 worktree、归档会话 | **1 并发** | `state.json` 的 `mergeQueue` | `merge` 定时器（默认 60s 扫一次队列）+ `foreman pr merge` |
+
+- 通道实现在 `src/lanes.mjs`（`Lane`：并发上限 + key 去重 + 队列 + `idle()` + `snapshot()`）。
+  `ctx.lanes.merge` 就是合并通道这条 lane；派单那侧靠「在跑工单数」控容量，不额外排 lane。
+- **`pickup.maxRunning`（默认 2）** 是「同时有几张单在跑」：`planned`/`working` 且没 `lastFailure` 的工单算在跑，到顶就 `skipped: "slots-full"`。
+  每轮补单数 = `min(maxRunning - 在跑数, maxPerRound)`，所以 `maxPerRound` 默认也跟着变成 2（空着两个槽就一轮补两条）。
+- **`merge.concurrency`（默认 1）**：合并一条一条来，`opencli` 每条要 20–40s，并着合只会互相抢登录态。
+- 两条通道的锁不共用：`run.lock` 只管派单侧（含 CLI `foreman run`），合并通道不进这把锁，所以「正在合 PR」不会挡「正在派单」。
+- 会话层也分开：**派单会话**（`foreman-派单-<时间戳>`，读派单提示词，只做续跑/接单）与**合并会话**
+  （`foreman-合并-<时间戳>`，读合并提示词，只管合 PR）。账本 `sessions.kind` 记 `deliver:dispatch` / `deliver:merge` 区分。
+- 派单判定完一条会话，**不再当场合并**：命中合并条件就把任务 `enqueueMerge` 进 `mergeQueue`（工单置 `pr-open`），
+  通知里写「合并：已排入合并通道（1 并发），合完单独通知」，然后立刻返回——不再被 20–40s 的合并拖住整轮。
+- 合并结果单独通知：`foreman-合并-*` 会话（`deliver.mode: new`）或 `dws notify`（`existing`，回给登记的通知目标，
+  **不回给已经收工的执行会话**）；CLI `foreman pr merge` 触发的合并不发通知。
+- `foreman status` 里能分别看：`pickup.maxRunning / inflight`、`lanes.dispatch`、`lanes.merge`（在跑/排队/成功/失败）、
+  `merge.{enabled,concurrency,lastSweepAt,sweeps,lastResult,queued}`。
+
 ## 常驻服务与会话监听
 
 通知只有一条路：常驻服务在后台轮询被监听的会话，判定「这一轮跑完了」再发通知。
@@ -97,8 +121,8 @@ foreman status                # 在不在 + 监听明细 + lastPollAt / pollCoun
   - 还没构建时 `/` 回 **503 + 构建提示页**，不会只给一个 404。
 - 页面右上角可切主题：亮 / 暗 / 自动（跟随系统）；选择存 `localStorage`，跟随系统时深浅色变化实时生效。
 - 左侧导航栏提供 **「工单与 PR」（可切日期回看某天）**、**「定时任务」** 和 **「操作日志」** 三个入口，图标加文字，可折叠成纯图标并记住折叠状态；窄屏自动只显示图标。
-  - 「定时任务」列出自动接单（`pickup.auto`）、PR 扫描（`prWatch.enabled`）、续接调度（`planner.enabled`）、工作时间窗（`workHours.offUntil` 临时闭嘴）四项，带运行状态、上次时间、下次触发与已跑轮数；
-  - 自动接单与 PR 扫描的时间可自由编辑 **cron 表达式**：标准 5 段「分 时 日 月 周」，也支持第 6 段秒；对应配置 `pickup.cron` / `prWatch.cron`。没配 cron 时仍兼容旧的 `intervalSeconds`，折成分钟级表达式；
+  - 「定时任务」列出自动接单（`pickup.auto`）、PR 扫描（`prWatch.enabled`）、续接调度（`planner.enabled`）、合并通道（`merge.enabled`）、工作时间窗（`workHours.offUntil` 临时闭嘴）五项，带运行状态、上次时间、下次触发与已跑轮数；
+  - 自动接单、PR 扫描、合并通道的时间可自由编辑 **cron 表达式**：标准 5 段「分 时 日 月 周」，也支持第 6 段秒；对应配置 `pickup.cron` / `prWatch.cron` / `merge.cron`。没配 cron 时仍兼容旧的 `intervalSeconds`，折成分钟级表达式；
   - 点「开启/停止」或「保存时间」会 `POST /api/schedules`（如 `{"patch":{"pickup":{"enabled":true,"cron":"*/15 8-17 * * 1-5"}}}`）：先校验并改内存 cfg、再写回 `config.json`、然后立刻重排定时器，**不用重启服务**；非法 cron 返回 400，不会落盘；
   - 「立即巡检」走 `POST /api/pickup`，等价于手动 `foreman pickup`。
   - `GET /api/schedules` 返回同一份状态，脚本/CLI 也可用。
@@ -128,7 +152,7 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 
 在听的会话 = 这轮 run 派出去的（自动登记）∪ `watch add` 显式盯的，按会话去重，显式优先。
 
-服务每 `pollSeconds`（默认 20s）先 `dws list --json` 读一次侧边栏（不切窗口），**还在跑的会话直接跳过**；只有没在跑的才逐个跑 `dws status`（它内部要 `goto` 切到目标会话，逐条跑会把用户窗口反复拽走）。自动巡检同理：有被监听会话还在跑，本轮就不派新会话（`window-busy`），避免豆包单实例下开会话失败或把 kickoff 发进正在跑的会话。
+服务每 `pollSeconds`（默认 20s）先 `dws list --json` 读一次侧边栏（不切窗口），**还在跑的会话直接跳过**；只有没在跑的才逐个跑 `dws status`（它内部要 `goto` 切到目标会话，逐条跑会把用户窗口反复拽走）。自动巡检也先读侧边栏，但**默认不因此停派**（派单通道要并行 2 张单）：只有在配置里显式打开 `pickup.pauseWhileRunning: true`（想回到「豆包单实例一次只跑一条」的老行为）时，才有在跑会话就跳过本轮（`window-busy`）。
 
 对被判定为「没在跑」的会话跑 `dws status`：
 
@@ -139,19 +163,20 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 
 ### 通知口径：默认每次新建会话
 
-- `deliver.mode: "new"`（默认）：**每条通知都新建一条豆包会话**。首句 = **编排提示词**
-  （运行时副本）+ `产品：<products[].name>` + `监控项目：<products[].projectDir>` + `触发：<类型>`
-  + `在跑任务：N / 上限 M` + 这条通知正文，
+- `deliver.mode: "new"`（默认）：**每条通知都新建一条豆包会话**，且**按通道分两类会话**：
+  - **派单会话**（`foreman-派单-<YYYYMMDD-HHmm>`）：读 `promptFile`（派单提示词），只做**续跑 / 接单**；
+  - **合并会话**（`foreman-合并-<YYYYMMDD-HHmm>`）：读 `mergePromptFile`（合并提示词，回落到 `promptFile`），只做**合 PR**。
+  首句 = 对应通道的提示词（运行时副本）+ `产品：<products[].name>` + `监控项目：<products[].projectDir>`
+  + `触发：<类型>` + **`通道：派单（在跑 n / 上限 m）`** 或 **`通道：合并（1 并发，只管合 PR）`** + 这条通知正文，
   用 `dws open --no-wait` 投递（只确认首句送达，不等第一轮回复）。
-  **这条会话是编排者，不是执行者**：任务完成、或在跑任务数低于上限时触发，由它决定
-  **续跑这条已完成的工单 / 继续接下一条待办 / 自动合并已开的 PR**；
-  首句明确写了「不要自己改代码实现工单」，通知正文只是决策输入，不是派给它的实现任务。
-  提示词与项目目录按工单所属产品取（`products[]`）；没配 products 时用顶层 `deliver.promptFile` / `deliver.projectDir`。
-  新会话记进账本 `sessions` 但 `notify: false`，**不纳入监听**——它是编排者，纳入会自己通知自己。
+  **这条会话是编排者，不是执行者**：首句明确写了「不要自己改代码实现工单」，通知正文只是决策输入，不是派给它的实现任务。
+  提示词与项目目录按工单所属产品取（`products[]`）；没配 products 时用顶层 `deliver.promptFile` / `deliver.mergePromptFile` / `deliver.projectDir`。
+  新会话记进账本 `sessions`（`kind` = `deliver:dispatch` / `deliver:merge`）但 `notify: false`，**不纳入监听**——它是编排者，纳入会自己通知自己。
 - `deliver.mode: "existing"`：旧行为，塞回已有会话——目标 = 登记时写的 `notifyTo`，
-  没写取 `notify.session`（`auto` → 环境变量 `MCP_VM_CONVERSATION_ID`）。
+  没写取 `notify.session`（`auto` → 环境变量 `MCP_VM_CONVERSATION_ID`）。合并结果不走执行会话自己。
 - 正文含仓库、工单号、结论类别、PR 链接（有则带）。结论类别由服务用 `dws info` 读最后回复、
   按 RESULT 映射：`done` / `needs-human` / `blocked` / `failed`；读不到或没有工单记录 → `session-done`。
+  命中合并条件时多一行「合并：已排入合并通道（1 并发），合完单独通知」，合并结果另行通知。
 - **不发的情况**：`notify.enabled: false`；结论不在 `notify.events` 白名单里；
   `existing` 模式下目标为空（no-target）或目标正好是被监听的会话自己（self）。
 - **`--notify` 只影响 `existing` 模式**：`foreman run --notify <会话id|标题>` = 这一轮派出去的会话，登记监听时通知目标写谁。
@@ -168,7 +193,7 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 
 ## 工作时间窗
 
-两套定时器（会话监听、PR 扫描）只在 `workHours` 窗口里跑，窗口外跳过，不打扰：
+三套定时器（会话监听、PR 扫描、合并通道）只在 `workHours` 窗口里跑，窗口外跳过，不打扰：
 
 ```json
 "workHours": { "enabled": true, "days": [1,2,3,4,5], "start": "08:30", "end": "18:30", "offUntil": "" }
@@ -185,12 +210,12 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 
 - 列表走 `opencli gitea pull-list --repo <owner/name> --state open`（新加的只读适配器命令，带回 `author`）。
 - 作者在 `prWatch.ignoreAuthors`（自己的账号，由 `pickup.me` 补齐）里的 PR 跳过，只记一笔 `skipped: "self"`。
-- 其余 PR 合成一条消息投递出去：`deliver.mode: "new"`（默认）**新建一条会话**（首句带固定提示词 + 监控项目；
-  会话名形如 `foreman-PR待合并-<YYYYMMDD-HHmm>`）；`deliver.mode: "existing"` 才用 `dws notify` 发给 `prWatch.notifyTarget`：
+- 其余 PR 合成一条消息投递出去：`deliver.mode: "new"`（默认）**新建一条合并会话**（读合并提示词 + 监控项目；
+  会话名形如 `foreman-合并-<YYYYMMDD-HHmm>`）；`deliver.mode: "existing"` 才用 `dws notify` 发给 `prWatch.notifyTarget`：
   - `earliest`（默认）= 账本 `sessions` 里**最早登记**、有 `convId` 的那个会话，即第一个调用方；
   - 也可以直接写死会话 id 或侧边栏标题。
 - 有冲突的 PR 默认过滤（`prWatch.filterConflicts`，查 `pr-view` 的 `mergeNote`），不合也不报。
-- 作者不是自己的 PR **只通知、监听里不合**（看不到关联工单）；通知带 `foreman pr merge <N> --repo R`，由编排 agent 核对工单后合并，合不了回理由。
+- 作者不是自己的 PR **只通知、监听里不合**（看不到关联工单）；通知带 `foreman pr merge <N> --repo R`，由合并会话核对工单后用 `foreman pr merge` 合（同样进合并通道、1 并发），合不了回理由。
 - 去重记在 `state.json` 的 `prWatch` 键（`<repo>#<number>`），**发成功才盖 `notifiedAt`**；发送失败下一轮重试，重启不重发。
 - 账本里还没有调用方会话时：`existing` 模式这轮不发、也不记账；`new` 模式不受影响（每次都新建会话）。
 - 起服务 1s 后先扫一遍，之后按间隔跑。
@@ -233,14 +258,15 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 
 ### 产品分组（products）
 
-一个产品 = 一套自己的项目群（仓库列表）+ 单独的提示词 + 监控项目根目录：
+一个产品 = 一套自己的项目群（仓库列表）+ 派单/合并两份提示词 + 监控项目根目录：
 
 ```json
 "products": [
   {
     "name": "win-ai-stack",
     "projectDir": "~/Documents/workspace/win-ai-stack",
-    "promptFile": "~/.foreman/prompts/工作原则与工作流-提示词.md",
+    "promptFile": "~/.foreman/prompts/派单提示词.md",
+    "mergePromptFile": "~/.foreman/prompts/合并提示词.md",
     "repos": [
       { "name": "win-ai-harness", "repo": "yyzl/win-ai-harness", "dir": "~/Documents/workspace/win-ai-stack/win-ai-harness", "base": "sit-20261126" },
       { "name": "yyjz-oa-cloud", "repo": "yyzl/yyjz-oa-cloud", "dir": "~/Documents/workspace/win-ai-stack/YYJZ_OA_CLOUD", "base": "sit-20261126" }
@@ -249,15 +275,16 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
   {
     "name": "<另一个产品>",
     "projectDir": "<它的项目根目录>",
-    "promptFile": "<这个产品自己的提示词文件>",
+    "promptFile": "<这个产品自己的派单提示词>",
+    "mergePromptFile": "<这个产品自己的合并提示词>",
     "repos": [ { "repo": "owner/name", "dir": "…", "base": "…" } ]
   }
 ]
 ```
 
 - 配了 `products` 就以它为准：捞单、PR 扫描、投递都按产品走（内部把各产品仓库摊平成一张清单）；
-- `promptFile` / `projectDir` 留空时回落顶层 `deliver` 同名配置（老配置不用改）；
-- 加新产品只改配置：加一段 `products[]`，给它的提示词文件，重启服务即可，不用动代码；
+- `promptFile` / `mergePromptFile` / `projectDir` 留空时回落顶层 `deliver` 同名配置（老配置不用改；`mergePromptFile` 再回落到 `promptFile`）；
+- 加新产品只改配置：加一段 `products[]`，给它的两份提示词，重启服务即可，不用动代码；
 - PR 一轮可能跨多个仓库：全部来自同一仓库才按产品取提示词，混合时用全局 `deliver`。
 
 ### 自动巡检（pickup.auto）
@@ -266,10 +293,12 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 
 - 每 `pickup.intervalSeconds`（默认 1800 = 30 分钟）跑一轮捞单，且只在 `workHours`（工作日 08:30–17:30）里跑；
 - 起服务 1s 后先跑一轮，重启即开始巡检；同一工单靠账本去重（`working` 状态不会再捞），不会重复派；
-- 每轮最多派 `pickup.maxPerRound` 条（默认 1，豆包单实例，一次只派一条）；
+- **同时 2 张单在跑**（`pickup.maxRunning`，默认 2）：在跑 = 账本 `planned`/`working` 且没 `lastFailure`；
+  到顶回 `skipped: "slots-full"`，有空槽才补，每轮最多补 `maxPerRound`（默认 2）条——派活动作本身仍是一条一条来；
+- `pickup.pauseWhileRunning`（默认 `false`）：打开后只要侧边栏里有被监听会话在跑，本轮就不开新会话（旧行为，回落到豆包单实例一次一条）；
 - 和 CLI 的 `foreman run` 抢同一把 `run.lock`：两边同时捞会把同一条单派两次，所以谁先拿到锁谁跑；
 - 只派活、不等结果；跑完的结论仍由 `pollSeconds` 轮询后按 `deliver` 口径投递；
-- `foreman status` 里有 `pickup` 段（`auto/intervalSeconds/lastAt/count/lastResult`），`foreman pickup` 可手动催一轮。
+- `foreman status` 里有 `pickup` 段（`auto/intervalSeconds/maxRunning/inflight/lastAt/count/lastResult`），`foreman pickup` 可手动催一轮。
 
 ## 配置
 
@@ -300,13 +329,16 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
     "order": "oldest",
     "auto": true,
     "intervalSeconds": 1800,
-    "maxPerRound": 1
+    "maxRunning": 2,
+    "maxPerRound": 2,
+    "pauseWhileRunning": false
   },
   "workHours": { "enabled": true, "days": [1, 2, 3, 4, 5], "start": "08:30", "end": "17:30", "offUntil": "" },
-  "merge": { "enabled": false, "style": "merge", "deleteBranch": true },
+  "merge": { "enabled": false, "style": "merge", "deleteBranch": true, "concurrency": 1, "intervalSeconds": 60 },
   "deliver": {
     "mode": "new",
-    "promptFile": "~/.foreman/prompts/工作原则与工作流-提示词.md",
+    "promptFile": "~/.foreman/prompts/派单提示词.md",
+    "mergePromptFile": "~/.foreman/prompts/合并提示词.md",
     "projectDir": "~/Documents/workspace/win-ai-stack",
     "namePrefix": "foreman",
     "waitFirstReply": false
@@ -328,7 +360,8 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
     {
       "name": "win-ai-stack",
       "projectDir": "~/Documents/workspace/win-ai-stack",
-      "promptFile": "~/.foreman/prompts/工作原则与工作流-提示词.md",
+      "promptFile": "~/.foreman/prompts/派单提示词.md",
+      "mergePromptFile": "~/.foreman/prompts/合并提示词.md",
       "repos": [
         {
           "name": "win-ai-harness",
@@ -350,10 +383,13 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
   按名字配会静默捞 0 条；`label-list` 能查名→id（`ready-for-agent` 当前是 5）。
 - 配了 `labelIds` 后不再拿名字做二次过滤（列表里本来就没有 labels）。
 - `merge.enabled` 默认 **false**：只开 PR 不合并，状态停在 `pr-open`。设为 `true` 即自动合并，
-  合并由**编排自己**执行（`merge.by: foreman`，默认）：服务在会话 `done` + 带 PR + 自证非空时直接 `pr-merge` + `close`，
+  合并走**独立的合并通道**（`concurrency` 默认 1，`intervalSeconds` 默认 60 扫一次队列）：
+  服务在会话 `done` + 带 PR + 自证非空时把任务放进 `mergeQueue`，通道逐条 `pr-merge` + `close` + 清工作区，
   每张 PR 只合一次（账本 `mergeAsk` 记 `merged`/`failed`），冲突只记录并通知、不 force merge。
-- **`deliver` 管「通知往哪去」**：`mode: "new"`（默认）每次新建会话投递，`promptFile` 是固定提示词的运行时副本路径
-  （`~/.foreman/prompts/` 下；路径只从配置来，代码里没有内置文案），`projectDir` 是写进首句的监控项目，
+  会话 `done` 后不会再被「正在合 PR」堵住，派单通道照常接下一张单。
+- **`deliver` 管「通知往哪去」**：`mode: "new"`（默认）每次新建会话投递，`promptFile` 是**派单提示词**的运行时副本路径，
+  `mergePromptFile` 是**合并提示词**的路径（留空回落 `promptFile`），
+  （都在 `~/.foreman/prompts/` 下；路径只从配置来，代码里没有内置文案），`projectDir` 是写进首句的监控项目，
   `waitFirstReply: false` 表示只确认首句送达、不等第一轮回复。`mode: "existing"` 退回塞回已有会话。
 - **通知默认开、且只有常驻服务这一条路**：会话跑完后，由服务按 `deliver.mode` 投递
   「哪条单 + 结论类别 + 分支 + PR 链接（有则带）」。run 自己不发通知。
@@ -369,10 +405,10 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 
 ## 状态文件
 
-- 账本 `~/.foreman/state.json`（`issues` 记工单进度、`sessions` 记会话与 convId、`watch` 显式登记的监听、`notified` 已通知指纹去重）
+- 账本 `~/.foreman/state.json`（`issues` 记工单进度、`sessions` 记会话与 convId（`kind` 区分 `deliver:dispatch`/`deliver:merge`）、`watch` 显式登记的监听、`notified` 已通知指纹去重、`mergeQueue` 合并通道的排队与结果）
 - 服务 `~/.foreman/service.port`（端口）/ `foreman.pid` / `service.log`
 - 日志 `~/.foreman/run.log`
-- 锁 `~/.foreman/run.lock`（一轮只许一个进程；进程死了或超 6 小时的锁会被接管）
+- 锁 `~/.foreman/run.lock`（**只管派单通道**；进程死了或超 6 小时的锁会被接管，合并通道不碰这把锁）
 - 工作区 `~/.foreman/worktrees/<仓库>/fix-issue-N`
 
 工单状态：`planned` / `working` / `done` / `pr-open` / `needs-human` / `blocked` / `escalated` / `reset`。
@@ -382,7 +418,7 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 
 - 会话负责"在 worktree 里改 + 自测 + `git push` + `foreman pr open` 开 PR"，边界写进首句提示词。
 - **收口只有两条：建 PR（`pr open`）与合并（`pr merge`）**——账本要把 PR 挂到「单 + 会话」，合并要幂等。工单侧的读、建单、评论、改标签、关单都直接 `opencli gitea`，`herdr`、`dws` 会话也直连；这些动作只是不留痕于 `console.db`。
-- 合并由服务在 `merge.enabled: true` 时执行（`merge.by: foreman`，默认），会话不合并；`verify` / `publish` 代码保留但没接线。
+- 合并由服务在 `merge.enabled: true` 时执行，**走独立合并通道（1 并发）**，会话不合并；`verify` / `publish` 代码保留但没接线。
 - 不做 force merge：合并失败就停下，工单留言交人。
 - 豆包是单实例：用户自己开着豆包时 dws 会报 `app_busy`，整轮终止（不逐条重试），让对方 ⌘Q 后再跑。
 - 用户正在用的工作区一行不动：所有改动都落在 worktree 里。

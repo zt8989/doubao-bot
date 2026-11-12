@@ -6,7 +6,7 @@ import { validateCron } from "./cron.mjs"
 
 const pad = (n) => String(n).padStart(2, "0")
 
-export const SCHEDULE_IDS = ["pickup", "prWatch", "planner", "workHours"]
+export const SCHEDULE_IDS = ["pickup", "prWatch", "planner", "merge", "workHours"]
 
 // 临时闭嘴恢复的时刻：今天还没到开始时间且今天是工作日就今天，否则下一个工作日。
 export function nextWorkdayStart(cfg, at = new Date()) {
@@ -34,7 +34,7 @@ const localIso = (d) =>
 export function cronOf(cfg, id) {
   const section = cfg?.[id] ?? {}
   if (String(section.cron ?? "").trim()) return String(section.cron).trim()
-  const seconds = Number(section.intervalSeconds ?? (id === "pickup" ? 1800 : 300))
+  const seconds = Number(section.intervalSeconds ?? (id === "pickup" ? 1800 : id === "merge" ? 60 : 300))
   const minutes = Math.max(1, Math.round(seconds / 60))
   return minutes === 1 ? "* * * * *" : `*/${minutes} * * * *`
 }
@@ -46,6 +46,7 @@ export function listSchedules(cfg, state = {}) {
   const pickup = cfg?.pickup ?? {}
   const prw = cfg?.prWatch ?? {}
   const pl = cfg?.planner ?? {}
+  const mg = cfg?.merge ?? {}
   return [
     {
       id: "pickup",
@@ -54,7 +55,7 @@ export function listSchedules(cfg, state = {}) {
       cron: cronOf(cfg, "pickup"),
       nextAt: state.pickup?.nextAt || "",
       intervalSeconds: Number(pickup.intervalSeconds ?? 1800),
-      detail: `每轮最多 ${Number(pickup.maxPerRound ?? 1)} 条`,
+      detail: `在跑上限 ${Number(pickup.maxRunning ?? 2)} · 每轮最多 ${Number(pickup.maxPerRound ?? 2)} 条`,
       lastAt: state.pickup?.lastAt || "",
       count: Number(state.pickup?.count ?? 0),
       lastResult: state.pickup?.lastResult || "",
@@ -76,10 +77,22 @@ export function listSchedules(cfg, state = {}) {
       label: "续接调度",
       enabled: pl.enabled === true,
       intervalSeconds: 0,
-      detail: `跟随监听轮询；在跑上限 ${Number(pl.maxRunning ?? 2)}`,
+      detail: `跟随监听轮询；在跑上限 ${Number(pl.maxRunning ?? pickup.maxRunning ?? 2)}`,
       lastAt: "",
       count: 0,
       lastResult: pl.enabled === true ? "" : "关闭后跑完不再催编排接单",
+    },
+    {
+      id: "merge",
+      label: "合并通道",
+      enabled: mg.enabled === true,
+      cron: cronOf(cfg, "merge"),
+      nextAt: state.merge?.nextAt || "",
+      intervalSeconds: Number(mg.intervalSeconds ?? 60),
+      detail: `并发 ${Number(mg.concurrency ?? 1)}，与派单通道分开排队`,
+      lastAt: state.merge?.lastSweepAt || "",
+      count: Number(state.merge?.sweeps ?? 0),
+      lastResult: state.merge?.lastResult ? `队列 ${state.merge.lastResult.queued ?? 0} 条 · 本轮起 ${(state.merge.lastResult.started ?? []).length} 条` : "",
     },
     {
       id: "workHours",
@@ -108,7 +121,7 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
     if (!(id in patch)) continue
     const raw = patch[id]
     const obj = raw && typeof raw === "object" ? raw : { enabled: raw === true || raw === "true" }
-    if ("cron" in obj && id !== "pickup" && id !== "prWatch") throw new Error(`${id} 不是独立定时任务，没有 cron 可改`)
+    if ("cron" in obj && !["pickup", "prWatch", "merge"].includes(id)) throw new Error(`${id} 不是独立定时任务，没有 cron 可改`)
     const next = {}
     if ("enabled" in obj) next.enabled = obj.enabled === true || obj.enabled === "true"
     if ("cron" in obj) {
@@ -124,6 +137,10 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
       cfg.prWatch = { ...(cfg.prWatch ?? {}) }
       if ("enabled" in next) cfg.prWatch.enabled = next.enabled
       if ("cron" in next) cfg.prWatch.cron = next.cron
+    } else if (id === "merge") {
+      cfg.merge = { ...(cfg.merge ?? {}) }
+      if ("enabled" in next) cfg.merge.enabled = next.enabled
+      if ("cron" in next) cfg.merge.cron = next.cron
     } else if (id === "planner") {
       if ("enabled" in next) cfg.planner = { ...(cfg.planner ?? {}), enabled: next.enabled }
     } else if (id === "workHours" && "enabled" in next) {
@@ -134,7 +151,7 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
 }
 
 /** 开关对应的配置键名（pickup.auto，其余是 enabled）。 */
-const FLAG_KEY = { pickup: "auto", prWatch: "enabled", planner: "enabled" }
+const FLAG_KEY = { pickup: "auto", prWatch: "enabled", planner: "enabled", merge: "enabled" }
 
 /**
  * 写回配置文件：只改上面这四个开关，其余字段（含用户手写的格式/注释式排版）原样保留。
