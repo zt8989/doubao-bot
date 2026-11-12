@@ -146,6 +146,23 @@ test("自动巡检：没开 pickup.auto 就不动作", async () => {
   assert.equal(logs.length, 0)
 })
 
+test("自动巡检：页面上的「立即执行」不看开关与工作时间，但 busy 保护还在", async () => {
+  // auto=false、窗口钉在 00:00–00:01：正常时刻两道闸都会拦，force 必须照跑。
+  const { ctx } = pickupCtx({
+    pickup: { auto: false, intervalSeconds: 1800, maxPerRound: 1 },
+    workHours: { enabled: true, days: [1, 2, 3, 4, 5, 6, 7], start: "00:00", end: "00:01" },
+  })
+  let called = 0
+  const r = await pickupOnce(ctx, { force: true, run: async () => { called++; return [] } })
+  assert.equal(r.ok, true)
+  assert.equal(called, 1, "force 要绕过「没开」和「不在工作时间」")
+  // 上一轮还在跑时不重入：立即执行也不能叠着派单。
+  ctx.state.pickup.running = true
+  const r2 = await pickupOnce(ctx, { force: true, run: async () => { called++; return [] } })
+  assert.equal(r2.skipped, "busy")
+  assert.equal(called, 1)
+})
+
 test("自动巡检：出了工作时间窗不捞单", async () => {
   // 窗口钉在 00:00–00:01，正常时刻都在窗外（跨零点跑测试时最多命中那一分钟，跳过断言）。
   const { ctx } = pickupCtx({ workHours: { enabled: true, days: [1, 2, 3, 4, 5, 6, 7], start: "00:00", end: "00:01" } })

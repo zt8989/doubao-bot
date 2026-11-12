@@ -58,6 +58,9 @@ export function listSchedules(cfg, state = {}) {
       lastAt: state.pickup?.lastAt || "",
       count: Number(state.pickup?.count ?? 0),
       lastResult: state.pickup?.lastResult || "",
+      runnable: true,
+      runLabel: "立即巡检",
+      running: state.pickup?.running === true,
     },
     {
       id: "prWatch",
@@ -70,6 +73,9 @@ export function listSchedules(cfg, state = {}) {
       lastAt: state.pr?.lastPollAt || "",
       count: Number(state.pr?.pollCount ?? 0),
       lastResult: Number(state.pr?.notifiedCount ?? 0) ? `累计通知 ${Number(state.pr.notifiedCount)} 次` : "",
+      runnable: true,
+      runLabel: "立即扫描",
+      running: state.pr?.polling === true,
     },
     {
       id: "planner",
@@ -80,6 +86,9 @@ export function listSchedules(cfg, state = {}) {
       lastAt: "",
       count: 0,
       lastResult: pl.enabled === true ? "" : "关闭后跑完不再催编排接单",
+      runnable: true,
+      runLabel: "立即轮询",
+      running: state.polling === true,
     },
     {
       id: "workHours",
@@ -92,6 +101,10 @@ export function listSchedules(cfg, state = {}) {
       count: 0,
       lastResult: paused ? `闭嘴到 ${offUntil}` : inWorkHours(cfg) ? "当前在窗口内" : "当前不在窗口内",
       offUntil: paused ? offUntil : "",
+      // 工作时间窗是个判断条件，没有可执行的轮次，所以不给「立即执行」。
+      runnable: false,
+      runLabel: "",
+      running: false,
     },
   ]
 }

@@ -27,6 +27,10 @@ test("listSchedules：四个开关（派单 / 他人 PR 扫描 / 续接 / 工作
   assert.equal(rows[0].cron, "*/30 * * * *")
   assert.equal(rows[1].cron, "*/5 * * * *")
   assert.equal(rows.some((r) => r.id === "merge"), false, "合并通道不再是一项定时任务")
+  // 「立即执行」只给真能跑一轮的三项；工作时间窗是个判断条件，不给按钮。
+  assert.deepEqual(rows.filter((r) => r.runnable).map((r) => r.id), ["pickup", "prWatch", "planner"])
+  assert.equal(rows.find((r) => r.id === "workHours").runnable, false)
+  assert.equal(rows.find((r) => r.id === "pickup").runLabel, "立即巡检")
   // 用工作日中午的时间点判断，避免跑测试时正好在窗口外
   const noon = new Date()
   const inside = applySchedules(cfg, {})
@@ -176,6 +180,47 @@ test("HTTP：/api/schedules 读写开关，/api/pickup 立刻跑一轮", async (
     const run = await (await fetch(`${base}/api/pickup`, { method: "POST" })).json()
     assert.equal(run.ok, true)
     assert.equal(calls.pickup, 1)
+  } finally {
+    await new Promise((r) => h.server.close(r))
+  }
+})
+
+test("HTTP：/api/schedules/run 按 id 立刻执行一项，缺 id 或不可执行都要拒", async () => {
+  const cfg = baseCfg()
+  const ran = []
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-http-run-"))
+  const ctx = {
+    schedules: () => listSchedules(cfg),
+    applySchedules: (patch) => applySchedules(cfg, patch),
+    runSchedule: async (id) => {
+      ran.push(id)
+      return { ok: true, skipped: null, id }
+    },
+  }
+  const h = await startConsoleHttp({ store: {}, ctx, dir, host: "127.0.0.1", port: 0, log: () => {} })
+  const base = h.url
+  const post = (body) =>
+    fetch(`${base}/api/schedules/run`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    })
+  try {
+    const ok = await (await post({ id: "prWatch" })).json()
+    assert.equal(ok.ok, true)
+    assert.deepEqual(ran, ["prWatch"])
+
+    const noId = await post({})
+    assert.equal(noId.status, 400)
+    assert.equal((await noId.json()).error, "missing_id")
+
+    // 服务侧的 runSchedule 只认能跑的三项，别的不该落成 500。
+    ctx.runSchedule = async () => {
+      throw Object.assign(new Error("workHours 没有可以立即执行的动作"), { code: "schedule_not_runnable" })
+    }
+    const bad = await post({ id: "workHours" })
+    assert.equal(bad.status, 400)
+    assert.equal((await bad.json()).error, "schedule_not_runnable")
   } finally {
     await new Promise((r) => h.server.close(r))
   }

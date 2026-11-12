@@ -348,10 +348,12 @@ export function singleInstanceGuard(pidFile) {
 
 // 自动接单巡检一轮：在工作时间窗内自己捞一轮单（等价 foreman run，但不带 once，每个仓库都看）。
 // 只派活、不等结果；结果仍由 pollOnce 轮询后投递。默认关（pickup.auto !== true 不动作）。
-export async function pickupOnce(ctx, { run = runRound } = {}) {
+// force 是页面上的「立即执行」：只跳过「没开」「不在工作时间」两道闸，
+// 容量 / busy / 锁 / 节点暂停这些保护照旧，避免重复派单。
+export async function pickupOnce(ctx, { run = runRound, force = false } = {}) {
   const { cfg, log, state } = ctx
-  if (cfg.pickup?.auto !== true) return { ok: true, skipped: "disabled" }
-  if (!inWorkHours(cfg)) return { ok: true, skipped: "off-hours" }
+  if (cfg.pickup?.auto !== true && !force) return { ok: true, skipped: "disabled" }
+  if (!force && !inWorkHours(cfg)) return { ok: true, skipped: "off-hours" }
   if (state.pickup?.running) return { ok: true, skipped: "busy" }
   // 接单节点被暂停：只停自动接单这一步，整条 workflow 不会停（在跑的单照常推进）。
   if (ctx.engine?.paused?.("pickup")) return { ok: true, skipped: "node-paused" }
@@ -568,6 +570,15 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   ctx.prPoll = doPrPoll
   const doPickup = async () => pickupOnce(ctx)
   ctx.pickup = doPickup
+  // 页面上的「立即执行」：不看开关和 cron 现在是什么状态，立刻跑一轮这类任务。
+  // 只 bypass「没开 / 不在工作时间」；容量、busy、锁、节点暂停这些保护仍然生效。
+  ctx.runSchedule = async (id) => {
+    if (id === "pickup") return pickupOnce(ctx, { force: true })
+    if (id === "prWatch") return prPollOnce(ctx, { force: true })
+    // 续接调度跟着会话轮询走，立即执行就是立刻跑一轮轮询（收工的会话该催就催）。
+    if (id === "planner") return pollOnce(ctx)
+    throw Object.assign(new Error(`${id} 没有可以立即执行的动作`), { code: "schedule_not_runnable" })
+  }
   // 合并不再有定时任务（合并通道已取消）：`foreman pr merge` 当场执行，合完直接返回。
 
   // PR 扫描（现在是「他人 PR 扫描」）、自动接单都由 cron 驱动：页面上改表达式立刻重排，不用重启服务。
@@ -674,9 +685,10 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
 }
 
 // PR 扫描一轮：配置里每个仓库列 open PR → 过滤作者 → 去重 → 通知最早登记的调用方。
-export async function prPollOnce(ctx) {
+// force 是页面上的「立即执行」：即使 prWatch.enabled 是 false（默认关）也扫这一轮。
+export async function prPollOnce(ctx, { force = false } = {}) {
   const { state, cfg, dws, gitea, log } = ctx
-  if (cfg.prWatch?.enabled === false) return { ok: true, skipped: "disabled" }
+  if (cfg.prWatch?.enabled === false && !force) return { ok: true, skipped: "disabled" }
   if (state.pr.polling) return { ok: true, skipped: "busy" }
   // 「他人 PR 扫描」节点被暂停：这一轮不扫，已经扫到的 PR 照常由编排核对合并。
   if (ctx.engine?.paused?.("scan")) return { ok: true, skipped: "node-paused" }

@@ -199,6 +199,27 @@ export function startConsoleHttp({ store, ctx, dir, host = "127.0.0.1", port = 7
         }
       }
 
+      if (pathname === "/api/schedules/run") {
+        // 页面上点「立即执行」：不等 cron、不看开关，立刻跑一轮这类任务。
+        if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
+        if (typeof ctx.runSchedule !== "function") return sendJson(res, 501, { ok: false, error: "schedule_run_not_supported" })
+        let body
+        try {
+          body = await readBody(req)
+        } catch (e) {
+          return sendJson(res, 400, { ok: false, error: e.code || "bad_request", message: e.message })
+        }
+        const id = String(body?.id ?? "").trim()
+        if (!id) return sendJson(res, 400, { ok: false, error: "missing_id", message: "没有指定要执行哪一项" })
+        try {
+          const r = await ctx.runSchedule(id)
+          return sendJson(res, r?.ok === false ? 500 : 200, { ok: r?.ok !== false, id, result: r ?? null })
+        } catch (e) {
+          const code = e.code === "schedule_not_runnable" ? 400 : 500
+          return sendJson(res, code, { ok: false, error: e.code || "schedule_run_failed", message: e.message })
+        }
+      }
+
       if (pathname === "/api/pickup") {
         if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
         if (typeof ctx.pickup !== "function") return sendJson(res, 501, { ok: false, error: "pickup_not_supported" })
