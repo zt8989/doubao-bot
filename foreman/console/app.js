@@ -228,6 +228,8 @@ class FmTasks extends LitElement {
                     const n = nodes.find((x) => x.stage === st.stage) || {}
                     const state = at < 0 ? "pending" : i < at ? "passed" : i === at ? "current" : "pending"
                     const label = state === "passed" ? "已走过" : state === "current" ? "当前" : "待跑"
+                    // 已完成的节点（走过了，或整条流程已收口）不再给暂停按钮：只对还在跑/待跑的节点有效。
+                    const canToggle = !!run && run.status !== "done" && state !== "passed"
                     return html`
                       <li class=${"wf-node is-" + state}>
                         <div class="wf-node-main">
@@ -237,9 +239,11 @@ class FmTasks extends LitElement {
                           ${n.paused ? html`<span class="badge failed">已暂停</span>` : ""}
                         </div>
                         <div class="wf-node-sub">${st.description}</div>
-                        <button class="ghost wf-btn" @click=${() => emit(this, "node-toggle", { stage: st.stage, paused: !n.paused })}>
-                          ${n.paused ? "继续" : "暂停"}
-                        </button>
+                        ${canToggle
+                          ? html`<button class="ghost wf-btn" @click=${() => emit(this, "node-toggle", { stage: st.stage, paused: !n.paused })}>
+                              ${n.paused ? "继续" : "暂停"}
+                            </button>`
+                          : ""}
                       </li>`
                   })}
                 </ol>`
