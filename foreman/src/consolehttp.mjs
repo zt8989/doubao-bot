@@ -1,7 +1,7 @@
 // 控制台 HTTP：由常驻服务直接对外提供页面与 API，不另起进程、不走 socket。
 //   GET  /                 控制台页面（Vite 构建产物 console/dist）
 //   GET  /assets/<name>    带 hash 的 js/css，长缓存
-//   GET  /api/snapshot     当天任务 + PR + 统计（每次请求都先跟账本对齐）
+//   GET  /api/snapshot?day=YYYY-MM-DD  当天（或指定某天）任务 + PR + 统计；看今天时先跟账本对齐
 //   GET  /api/polls        最近几轮扫描记录
 //   GET  /api/history?days=7&day=YYYY-MM-DD&repo=R&key=<owner>/<repo>#<N>  历史事件（按天分组）
 //   POST /api/sync         立刻扫一轮 PR（opencli）+ 落库，返回最新快照
@@ -87,19 +87,21 @@ export function startConsoleHttp({ store, ctx, dir, host = "127.0.0.1", port = 7
       req.on("error", reject)
     })
 
-  const snapshotNow = () => {
+  const snapshotNow = (day = "") => {
     const book = new Book(ctx.cfg.stateFile)
-    const sync = store.sync(book)
+    // 回看历史某天不用再扫一遍账本写库；看今天才同步，保持实时。
+    const sync = day ? null : store.sync(book)
     return store.snapshot({
       book,
       cfg: ctx.cfg,
-      pr: { ...ctx.state.pr, lastNewPrs: sync.newPrs },
+      pr: { ...ctx.state.pr, lastNewPrs: sync?.newPrs ?? 0 },
       service: {
         pid: process.pid,
         uptimeMs: Date.now() - startedAt,
         socket: ctx.cfg.service?.socket ?? "",
         http: ctx.httpUrl ?? "",
       },
+      day,
     })
   }
 
@@ -127,7 +129,7 @@ export function startConsoleHttp({ store, ctx, dir, host = "127.0.0.1", port = 7
       }
 
       if (pathname === "/api/snapshot") {
-        return sendJson(res, 200, snapshotNow())
+        return sendJson(res, 200, snapshotNow((url.searchParams.get("day") || "").trim()))
       }
 
       if (pathname === "/api/polls") {

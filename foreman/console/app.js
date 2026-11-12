@@ -19,17 +19,6 @@ const STATE_LABEL = {
   unknown: "未知",
 }
 
-const HIST_KIND = {
-  task_new: { label: "接到", tone: "planned" },
-  task_state: { label: "状态", tone: "working" },
-  task_attempt: { label: "重试", tone: "needs-human" },
-  pr_new: { label: "发现 PR", tone: "planned" },
-  pr_state: { label: "PR 状态", tone: "working" },
-  pr_open: { label: "建 PR", tone: "pr-open" },
-  pr_merge: { label: "合并", tone: "done" },
-  issue_comment: { label: "评论", tone: "planned" },
-  issue_close: { label: "关单", tone: "done" },
-}
 
 const THEME_KEY = "foreman-theme"
 const pad2 = (n) => String(n).padStart(2, "0")
@@ -64,6 +53,8 @@ class FmHead extends LitElement {
     data: { attribute: false },
     mode: { type: String },
     error: { type: String },
+    day: { type: String },
+    today: { type: String },
   }
   createRenderRoot() {
     return this
@@ -91,7 +82,19 @@ class FmHead extends LitElement {
           <span class="brand-text">FOREMAN<span class="thin">/CONSOLE</span></span>
         </div>
         <div class="meta">
-          <span class="meta-item">${d?.today || "—"}</span>
+          <span class="meta-item day-wrap">
+            <span class="day-label">看哪天</span>
+            <input
+              class="date-pick"
+              type="date"
+              max=${this.today || ""}
+              .value=${this.day || this.today || ""}
+              @change=${(e) => emit(this, "day-set", { day: e.target.value })}
+            />
+            ${this.day && this.day !== this.today
+              ? html`<button class="ghost day-today" @click=${() => emit(this, "day-set", { day: "" })}>回到今天</button>`
+              : ""}
+          </span>
           <span class="meta-item mono">${this._clock}</span>
           <span class=${"pill " + (svc.alive ? "on" : "off")}>
             ${this.error ? this.error : svc.alive ? `服务 · 运行中 pid ${svc.pid}` : "服务 · 未运行"}
@@ -107,16 +110,17 @@ class FmHead extends LitElement {
 
 /* ---------------- 指标卡 ---------------- */
 class FmStats extends LitElement {
-  static properties = { stats: { attribute: false } }
+  static properties = { stats: { attribute: false }, scope: { type: String } }
   createRenderRoot() {
     return this
   }
   render() {
     const s = this.stats || {}
+    const scope = this.scope || "今日"
     const cards = [
-      { label: "今日分配任务", value: s.tasks, sub: `历史累计 ${s.historyTasks ?? 0} 单`, accent: "accent-cyan" },
+      { label: `${scope} 分配任务`, value: s.tasks, sub: `历史累计 ${s.historyTasks ?? 0} 单`, accent: "accent-cyan" },
       { label: "进行中", value: s.working, sub: `已出 PR ${s.prOpen ?? 0}`, accent: "accent-green" },
-      { label: "今日 PR", value: s.prs, sub: `历史 ${s.historyPrs ?? 0} 条 · 新增 ${s.newPrs ?? 0}`, accent: "accent-cyan" },
+      { label: `${scope} PR`, value: s.prs, sub: `历史 ${s.historyPrs ?? 0} 条 · 新增 ${s.newPrs ?? 0}`, accent: "accent-cyan" },
       { label: "待通知", value: s.pending, sub: "非本人作者、未发出", accent: "accent-amber" },
       { label: "已跳过", value: s.skipped, sub: "作者是自己", accent: "accent-red" },
     ]
@@ -136,16 +140,17 @@ class FmStats extends LitElement {
 
 /* ---------------- 今日任务 ---------------- */
 class FmTasks extends LitElement {
-  static properties = { tasks: { attribute: false } }
+  static properties = { tasks: { attribute: false }, scope: { type: String } }
   createRenderRoot() {
     return this
   }
   render() {
     const rows = this.tasks || []
+    const scope = this.scope || "今日"
     return html`
       <section class="panel">
         <div class="panel-head">
-          <h2>今日分配任务</h2>
+          <h2>${scope} 分配任务</h2>
           <div class="panel-side">
             <span class="hint">${rows.length ? `${rows.length} 条 · 当天有更新` : "暂无"}</span>
           </div>
@@ -169,7 +174,10 @@ class FmTasks extends LitElement {
                       (t) => html`
                         <tr>
                           <td class="id-cell">
-                            <span class="repo">${t.repo}#</span><span>${t.number}</span>
+                            ${t.url
+                              ? html`<a class="id-link" href=${t.url} target="_blank" rel="noopener"
+                                  ><span class="repo">${t.repo}#</span><span>${t.number}</span></a>`
+                              : html`<span class="repo">${t.repo}#</span><span>${t.number}</span>`}
                           </td>
                           <td class="title-cell" title=${t.title || ""}>${t.title || "（无标题）"}</td>
                           <td><span class="badge ${t.state}">${STATE_LABEL[t.state] || t.state}</span></td>
@@ -262,7 +270,10 @@ class FmPrs extends LitElement {
                     <li class="pr">
                       <div class="pr-main">
                         <span class="pr-num">
-                          <span class="repo">${p.repo}#</span><span>${p.number}</span>
+                          ${p.url
+                            ? html`<a class="id-link" href=${p.url} target="_blank" rel="noopener"
+                                ><span class="repo">${p.repo}#</span><span>${p.number}</span></a>`
+                            : html`<span class="repo">${p.repo}#</span><span>${p.number}</span>`}
                         </span>
                         <span class="pr-title">${p.title || "（无标题）"}</span>
                         ${p.url
@@ -293,103 +304,10 @@ class FmPrs extends LitElement {
   }
 }
 
-/* ---------------- 历史 ---------------- */
-class FmHistory extends LitElement {
-  static properties = { hist: { attribute: false }, days: { type: Number }, day: { type: String } }
-  createRenderRoot() {
-    return this
-  }
-  render() {
-    const h = this.hist
-    const groups = h?.groups || []
-    const picked = this.day || ""
-    const span = picked || (this.days > 0 ? `近 ${this.days} 天` : "全部")
-    const tabs = [
-      [1, "今天"],
-      [7, "近 7 天"],
-      [30, "近 30 天"],
-      [0, "全部"],
-    ]
-    const today = new Date()
-    const todayStr = `${today.getFullYear()}-${pad2(today.getMonth() + 1)}-${pad2(today.getDate())}`
-    return html`
-      <section class="panel">
-        <div class="panel-head">
-          <h2>历史</h2>
-          <div class="panel-side">
-            <span class="hint">${h ? `${span} · ${h.total} 条事件` : "加载中…"}</span>
-            <div class="tabs">
-              ${tabs.map(
-                ([v, t]) => html`
-                  <button
-                    class=${"tab " + (!picked && v === this.days ? "is-active" : "")}
-                    @click=${() => emit(this, "days-set", { days: v })}
-                  >${t}</button>`
-              )}
-            </div>
-            <input
-              class="hist-date"
-              type="date"
-              aria-label="按日期查看历史"
-              max=${todayStr}
-              .value=${picked}
-              @change=${(e) => emit(this, "day-set", { day: e.target.value })}
-            />
-          </div>
-        </div>
-
-        ${groups.length
-          ? html`
-              <ul class="pr-list">
-                ${groups.map(
-                  (g) => html`
-                    <li class="hist-day">
-                      <span class="hist-day-date mono">${g.day}</span>
-                      <span class="hist-day-sum">
-                        ${g.count} 条 · 工单 ${g.tasks.length} · PR ${g.prs.length}
-                      </span>
-                    </li>
-                    ${(g.items || []).map((it) => {
-                      const kind = HIST_KIND[it.kind] || { label: it.kind, tone: "" }
-                      return html`
-                        <li class="pr hist-item">
-                          <div class="pr-main">
-                            <span class="hist-time mono">${it.atClock || "—"}</span>
-                            <span class=${"badge " + kind.tone}>${kind.label}</span>
-                            <span class="pr-num">
-                              <span class="repo">${it.repo}#</span><span>${it.number}</span>
-                            </span>
-                            <span class="pr-title">${it.title || "（无标题）"}</span>
-                          </div>
-                          ${it.from || it.to || it.detail || it.agent
-                            ? html`
-                                <div class="pr-meta">
-                                  ${it.from || it.to
-                                    ? html`<span class="hist-change mono">${it.from || "—"} → ${it.to || "—"}</span>`
-                                    : ""}
-                                  ${it.detail ? html`<span class="pr-note">${it.detail}</span>` : ""}
-                                  ${it.agent ? html`<span class="chip">${it.agent}</span>` : ""}
-                                </div>`
-                            : ""}
-                        </li>`
-                    })}
-                  </li>`
-                )}
-              </ul>`
-          : html`
-              <div class="empty">
-                <div class="empty-title">这段时间没有历史记录</div>
-                <div class="empty-sub">接到、状态变更、重试、建 PR、合并、评论、关单都会留痕</div>
-              </div>`}
-      </section>`
-  }
-}
-
 /* ---------------- 页脚 ---------------- */
 class FmFoot extends LitElement {
   static properties = {
     data: { attribute: false },
-    hist: { attribute: false },
     busy: { type: String },
   }
   createRenderRoot() {
@@ -412,7 +330,7 @@ class FmFoot extends LitElement {
         </span>
         <span class="dot-sep">·</span>
         <span>
-          ${`API · /api/snapshot · ${d?.tasks?.length ?? 0} 单 / ${d?.prs?.length ?? 0} PR${this.hist ? ` · 历史 ${this.hist.total ?? 0} 条` : ""}`}
+          ${`API · /api/snapshot · ${d?.isToday === false ? `${d.day} · ` : ""}${d?.tasks?.length ?? 0} 单 / ${d?.prs?.length ?? 0} PR`}
         </span>
         <button class="ghost" ?disabled=${this.busy === "busy"} @click=${() => emit(this, "refresh")}>
           ${btnText}
@@ -425,11 +343,9 @@ class FmFoot extends LitElement {
 class FmConsole extends LitElement {
   static properties = {
     data: { attribute: false },
-    hist: { attribute: false },
     mode: { type: String },
     filter: { type: String },
-    histDays: { type: Number },
-    histDay: { type: String },
+    day: { type: String },
     busy: { type: String },
     error: { type: String },
   }
@@ -437,11 +353,14 @@ class FmConsole extends LitElement {
   constructor() {
     super()
     this.data = null
-    this.hist = null
     this.mode = "system"
     this.filter = "all"
-    this.histDays = 7
-    this.histDay = ""
+    // day 为空 = 看今天；选了某天就回看那天的任务/PR。URL 上带 ?day= 也能直接打开那天。
+    this.day = ""
+    try {
+      const q = new URLSearchParams(location.search).get("day") || ""
+      if (/^\d{4}-\d{2}-\d{2}$/.test(q)) this.day = q
+    } catch {}
     this.busy = ""
     this.error = ""
   }
@@ -467,19 +386,14 @@ class FmConsole extends LitElement {
     this._onFilter = (e) => {
       this.filter = e.detail.filter
     }
-    this._onDays = (e) => {
-      this.histDays = e.detail.days
-      this.histDay = ""
-      this.loadHistory()
-    }
     this._onDay = (e) => {
-      this.histDay = e.detail.day || ""
-      this.loadHistory()
+      this.day = e.detail.day || ""
+      this.applyDayToUrl()
+      this.load()
     }
     this._onRefresh = () => this.syncNow()
     this.addEventListener("theme-set", this._onTheme)
     this.addEventListener("filter-set", this._onFilter)
-    this.addEventListener("days-set", this._onDays)
     this.addEventListener("day-set", this._onDay)
     this.addEventListener("refresh", this._onRefresh)
 
@@ -496,10 +410,18 @@ class FmConsole extends LitElement {
     this._mq?.removeEventListener?.("change", this._onSystemTheme)
     this.removeEventListener("theme-set", this._onTheme)
     this.removeEventListener("filter-set", this._onFilter)
-    this.removeEventListener("days-set", this._onDays)
     this.removeEventListener("day-set", this._onDay)
     this.removeEventListener("refresh", this._onRefresh)
     super.disconnectedCallback()
+  }
+
+  applyDayToUrl() {
+    try {
+      const url = new URL(location.href)
+      if (this.day) url.searchParams.set("day", this.day)
+      else url.searchParams.delete("day")
+      history.replaceState(null, "", url)
+    } catch {}
   }
 
   applyTheme() {
@@ -518,26 +440,13 @@ class FmConsole extends LitElement {
 
   async load() {
     try {
-      const res = await fetch("/api/snapshot", { cache: "no-store" })
+      const q = this.day ? `?day=${encodeURIComponent(this.day)}` : ""
+      const res = await fetch(`/api/snapshot${q}`, { cache: "no-store" })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       this.data = await res.json()
       this.error = ""
-      await this.loadHistory()
     } catch (e) {
       this.error = `服务 · 拿不到数据（${e.message}）`
-    }
-  }
-
-  async loadHistory() {
-    try {
-      const q = this.histDay
-        ? `day=${encodeURIComponent(this.histDay)}`
-        : `days=${this.histDays}`
-      const res = await fetch(`/api/history?${q}`, { cache: "no-store" })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      this.hist = await res.json()
-    } catch (e) {
-      this.hist = { groups: [], total: 0, eventsInDb: 0, availableDays: [], error: e.message }
     }
   }
 
@@ -547,12 +456,7 @@ class FmConsole extends LitElement {
     try {
       const res = await fetch("/api/sync", { method: "POST" })
       const body = await res.json()
-      if (body.snapshot) {
-        this.data = body.snapshot
-      } else {
-        await this.load()
-      }
-      await this.loadHistory()
+      await this.load()
       this.busy = body.ok ? "ok" : "fail"
     } catch {
       this.busy = "fail"
@@ -565,14 +469,13 @@ class FmConsole extends LitElement {
 
   render() {
     return html`
-      <fm-head .data=${this.data} .mode=${this.mode} .error=${this.error}></fm-head>
+      <fm-head .data=${this.data} .mode=${this.mode} .error=${this.error} .day=${this.day} .today=${this.data?.today || ""}></fm-head>
       <main>
         ${this.data
           ? html`
-              <fm-stats .stats=${this.data.stats}></fm-stats>
-              <fm-tasks .tasks=${this.data.tasks}></fm-tasks>
-              <fm-prs .data=${this.data} .filter=${this.filter}></fm-prs>
-              <fm-history .hist=${this.hist} .days=${this.histDays} .day=${this.histDay}></fm-history>`
+              <fm-stats .stats=${this.data.stats} .scope=${this.data.isToday === false ? this.data.day : "今日"}></fm-stats>
+              <fm-tasks .tasks=${this.data.tasks} .scope=${this.data.isToday === false ? this.data.day : "今日"}></fm-tasks>
+              <fm-prs .data=${this.data} .filter=${this.filter}></fm-prs>`
           : html`
               <section class="panel">
                 <div class="empty">
@@ -581,7 +484,7 @@ class FmConsole extends LitElement {
                 </div>
               </section>`}
       </main>
-      <fm-foot .data=${this.data} .hist=${this.hist} .busy=${this.busy}></fm-foot>`
+      <fm-foot .data=${this.data} .busy=${this.busy}></fm-foot>`
   }
 }
 
@@ -590,6 +493,5 @@ customElements.define("fm-head", FmHead)
 customElements.define("fm-stats", FmStats)
 customElements.define("fm-tasks", FmTasks)
 customElements.define("fm-prs", FmPrs)
-customElements.define("fm-history", FmHistory)
 customElements.define("fm-foot", FmFoot)
 customElements.define("fm-console", FmConsole)

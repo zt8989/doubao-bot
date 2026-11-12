@@ -154,3 +154,44 @@ test("显式事件（建 PR / 合并 / 评论 / 关单）进历史，标题从�
   assert.equal(comment.title, "改 A", "标题按 key 从当前行反查")
   store.close()
 })
+
+test("snapshot 支持按天回看：状态回放到当天，只列那天有变化的单/PR", () => {
+  const store = tmpStore()
+  store.sync({ issues: { [KEY]: { title: "改 A", state: "done" } }, prSeen: {} })
+
+  const now = new Date()
+  const at = (n) => new Date(now.getTime() - n * 86400000).toISOString()
+  const day = (n) => {
+    const d = new Date(now.getTime() - n * 86400000)
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
+  }
+
+  store.event({ at: at(2), kind: "task_new", key: KEY, repo: "yyzl/win-ai-harness", number: 250, to: "planned" })
+  store.event({
+    at: at(1),
+    kind: "task_state",
+    key: KEY,
+    repo: "yyzl/win-ai-harness",
+    number: 250,
+    from: "planned",
+    to: "working",
+  })
+
+  const mid = store.snapshot({ day: day(1) })
+  assert.equal(mid.isToday, false)
+  assert.equal(mid.day, day(1))
+  assert.equal(mid.tasks.length, 1, "那天有状态变化的单要出现在列表里")
+  assert.equal(mid.tasks[0].state, "working", "状态回放到那天，不是今天的 done")
+  assert.equal(mid.stats.tasks, 1)
+  assert.equal(mid.stats.historyTasks, 1, "累计口径只算到那天为止出现过的")
+  assert.match(mid.tasks[0].url, /\/yyzl\/win-ai-harness\/issues\/250$/, "库里没有 url 时按仓库拼出工单页")
+
+  const before = store.snapshot({ day: day(5) })
+  assert.equal(before.tasks.length, 0, "事件之前的日子是空的")
+  assert.equal(before.stats.historyTasks, 0)
+
+  const today = store.snapshot({})
+  assert.equal(today.isToday, true)
+  assert.equal(today.tasks[0].state, "done", "不传 day 仍是今天的实时状态")
+  store.close()
+})

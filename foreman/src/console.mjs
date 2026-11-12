@@ -145,6 +145,7 @@ export class ConsoleStore {
       `),
       eventsSince: this.db.prepare("SELECT * FROM events WHERE at >= ? ORDER BY at ASC, id ASC"),
       eventsOnDay: this.db.prepare("SELECT * FROM events WHERE day = ? ORDER BY at ASC, id ASC"),
+      eventsUpToDay: this.db.prepare("SELECT * FROM events WHERE day <= ? ORDER BY at ASC, id ASC"),
       eventsForKey: this.db.prepare("SELECT * FROM events WHERE key = ? ORDER BY at ASC, id ASC"),
       countEvents: this.db.prepare("SELECT COUNT(*) AS c FROM events"),
       dayCounts: this.db.prepare(
@@ -386,52 +387,93 @@ export class ConsoleStore {
   }
 
   /** 当天视图（给 HTTP /api/snapshot）。 */
-  snapshot({ book, cfg, pr = {}, service = {} } = {}) {
+  snapshot({ book, cfg, pr = {}, service = {}, day = "" } = {}) {
     const now = new Date()
     const today = localDay(now)
+    const target = /^\d{4}-\d{2}-\d{2}$/.test(String(day || "")) ? String(day) : today
+    const isToday = target === today
 
-    const tasks = this.q.allTasks
-      .all()
-      .filter((r) => localDay(r.last_seen_at) === today)
-      .map((r) => ({
+    const allTasks = this.q.allTasks.all()
+    const allPrs = this.q.allPrs.all()
+
+    // 看今天：仍按 last_seen_at 取「当天有更新」的行，跟实时同步一致。
+    // 回看某天：状态从事件流水回放到那天结束，列表只列「那天新建或有过变化」的条目。
+    const stateAt = new Map()
+    const touchedAt = new Map()
+    const taskKeys = new Set()
+    const prKeys = new Set()
+    let taskRows
+    let prRows
+    if (isToday) {
+      taskRows = allTasks.filter((r) => localDay(r.last_seen_at) === today)
+      prRows = allPrs.filter((r) => localDay(r.last_seen_at) === today)
+    } else {
+      for (const e of this.q.eventsUpToDay.all(target)) {
+        if (e.to_state) stateAt.set(e.key, e.to_state)
+        if (e.day === target) touchedAt.set(e.key, e.at)
+        if (String(e.kind).startsWith("pr")) prKeys.add(e.key)
+        else taskKeys.add(e.key)
+      }
+      taskRows = allTasks.filter((r) => touchedAt.has(r.key) || localDay(r.first_seen_at) === target)
+      prRows = allPrs.filter((r) => touchedAt.has(r.key) || localDay(r.first_seen_at) === target)
+    }
+
+    // 有些行的 url 是空的（老数据/适配器没回），这里按仓库拼一发，保证页面上的号总能点开。
+    const base = String((cfg && cfg.gitea && cfg.gitea.baseUrl) || "http://106.54.199.229:3000").replace(/\/+$/, "")
+    const taskUrl = (r) => r.url || (r.repo ? `${base}/${r.repo}/issues/${r.number}` : "")
+    const prUrl = (r) => r.url || (r.repo ? `${base}/${r.repo}/pulls/${r.number}` : "")
+
+    const pastOf = (r) =>
+      isToday
+        ? null
+        : { state: stateAt.get(r.key) || r.state, at: touchedAt.get(r.key) || r.last_update_at }
+
+    const tasks = taskRows.map((r) => {
+      const past = pastOf(r)
+      const state = past ? past.state : r.state
+      const updatedAt = past ? past.at : r.last_update_at
+      return {
         key: r.key,
         repo: r.repo,
         number: r.number,
         title: r.title,
-        url: r.url,
-        state: r.state,
+        url: taskUrl(r),
+        state,
         branch: r.branch,
         worktree: r.worktree,
         attempts: r.attempts,
         note: r.note,
         agent: r.agent || "",
-        updatedAt: r.last_update_at,
-        updatedAtClock: clockOf(r.last_update_at),
+        updatedAt,
+        updatedAtClock: clockOf(updatedAt),
         firstSeenClock: clockOf(r.first_seen_at),
-      }))
+      }
+    })
 
-    const prs = this.q.allPrs
-      .all()
-      .filter((r) => localDay(r.last_seen_at) === today)
-      .map((r) => ({
+    const prs = prRows.map((r) => {
+      const past = pastOf(r)
+      const state = past ? past.state : r.state
+      return {
         key: r.key,
         repo: r.repo,
         number: r.number,
         title: r.title,
-        url: r.url,
+        url: prUrl(r),
         author: r.author,
         skipped: r.skipped,
-        state: r.state,
+        state,
         notifiedTo: r.notified_to,
         notifiedAt: r.notified_at,
         notifiedAtClock: clockOf(r.notified_at),
         seenAt: r.first_seen_at,
         seenAtClock: clockOf(r.first_seen_at),
-        pending: r.state === "pending",
-      }))
+        pending: state === "pending",
+      }
+    })
 
-    const totalTasks = Number(this.q.countTasks.get().c)
-    const totalPrs = Number(this.q.countPrs.get().c)
+    // 累计口径也要按那天算：回看时只算「到那天为止已经出现过的」。
+    const totalTasks = isToday ? Number(this.q.countTasks.get().c) : taskKeys.size
+    const totalPrs = isToday ? Number(this.q.countPrs.get().c) : prKeys.size
     const totalPolls = Number(this.q.countPolls.get().c)
     const prCfg = cfg?.prWatch || {}
 
@@ -439,6 +481,8 @@ export class ConsoleStore {
       generatedAt: now.toISOString(),
       generatedAtClock: `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`,
       today,
+      day: target,
+      isToday,
       service: {
         alive: true,
         pid: service.pid ?? process.pid,
