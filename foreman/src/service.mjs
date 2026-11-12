@@ -15,6 +15,7 @@ import { prWatchOnce, prWatchTarget, mergeFailureReason } from "./prwatch.mjs"
 import { plannerDecision, plannerTarget, plannerText, loadQueue } from "./planner.mjs"
 import { listPulls, mergePr, closeIssue, createPr, commentIssue } from "./gitea.mjs"
 import { ConsoleStore } from "./console.mjs"
+import { listSchedules, applySchedules, persistSchedules } from "./schedules.mjs"
 import { startConsoleHttp } from "./consolehttp.mjs"
 import { fileURLToPath } from "node:url"
 import { pingOnce, readPortFile } from "./svclient.mjs"
@@ -497,39 +498,69 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   }, cfg.pollSeconds * 1000)
   state.interval.unref?.()
 
-  // PR 监听：显式 opt-in（cfg.prWatch.enabled===true）才起；默认关。
   const doPrPoll = async () => prPollOnce(ctx)
   ctx.prPoll = doPrPoll
-  if (cfg.prWatch?.enabled === true) {
-    const intervalMs = Number(cfg.prWatch.intervalSeconds ?? 300) * 1000
-    state.prInterval = setInterval(() => {
-      if (!inWorkHours(cfg)) return
-      doPrPoll().catch((e) => log(`PR 扫描异常：${e.message}`))
-    }, intervalMs)
-    state.prInterval.unref?.()
-    state.prKick = setTimeout(() => {
-      if (!inWorkHours(cfg)) return
-      doPrPoll().catch((e) => log(`PR 扫描异常：${e.message}`))
-    }, 1000)
-    state.prKick.unref?.()
-  }
-
-  // 自动接单巡检：pickup.auto===true 才起，每 pickup.intervalSeconds 一次，且只在 workHours 内跑。
   const doPickup = async () => pickupOnce(ctx)
   ctx.pickup = doPickup
-  if (cfg.pickup?.auto === true) {
-    const intervalMs = Number(cfg.pickup.intervalSeconds ?? 1800) * 1000
-    state.pickupInterval = setInterval(() => {
-      if (!inWorkHours(cfg)) return
-      doPickup().catch((e) => log(`自动巡检异常：${e.message}`))
-    }, intervalMs)
-    state.pickupInterval.unref?.()
-    // 起服务 1s 后先跑一轮：重启即开始巡检，不用等满一个间隔（同一条单靠账本去重，不会重复派）。
-    state.pickupKick = setTimeout(() => {
-      if (!inWorkHours(cfg)) return
-      doPickup().catch((e) => log(`自动巡检异常：${e.message}`))
-    }, 1000)
-    state.pickupKick.unref?.()
+
+  // PR 扫描与自动接单两套定时器可按配置重排：页面上开关一改就重来，不用重启服务。
+  const armSchedules = () => {
+    if (state.prInterval) clearInterval(state.prInterval)
+    if (state.prKick) clearTimeout(state.prKick)
+    if (state.pickupInterval) clearInterval(state.pickupInterval)
+    if (state.pickupKick) clearTimeout(state.pickupKick)
+    state.prInterval = null
+    state.prKick = null
+    state.pickupInterval = null
+    state.pickupKick = null
+
+    // PR 监听：显式 opt-in（cfg.prWatch.enabled===true）才起；默认关。
+    if (cfg.prWatch?.enabled === true) {
+      const intervalMs = Number(cfg.prWatch.intervalSeconds ?? 300) * 1000
+      state.prInterval = setInterval(() => {
+        if (!inWorkHours(cfg)) return
+        doPrPoll().catch((e) => log(`PR 扫描异常：${e.message}`))
+      }, intervalMs)
+      state.prInterval.unref?.()
+      state.prKick = setTimeout(() => {
+        if (!inWorkHours(cfg)) return
+        doPrPoll().catch((e) => log(`PR 扫描异常：${e.message}`))
+      }, 1000)
+      state.prKick.unref?.()
+    }
+
+    // 自动接单巡检：pickup.auto===true 才起，每 pickup.intervalSeconds 一次，且只在 workHours 内跑。
+    if (cfg.pickup?.auto === true) {
+      const intervalMs = Number(cfg.pickup.intervalSeconds ?? 1800) * 1000
+      state.pickupInterval = setInterval(() => {
+        if (!inWorkHours(cfg)) return
+        doPickup().catch((e) => log(`自动巡检异常：${e.message}`))
+      }, intervalMs)
+      state.pickupInterval.unref?.()
+      // 开启后 1s 先跑一轮：页面上点开就不用等满一个间隔（同一条单靠账本去重，不会重复派）。
+      state.pickupKick = setTimeout(() => {
+        if (!inWorkHours(cfg)) return
+        doPickup().catch((e) => log(`自动巡检异常：${e.message}`))
+      }, 1000)
+      state.pickupKick.unref?.()
+    }
+  }
+  armSchedules()
+
+  // 页面上启停定时任务：改内存 cfg → 落盘 config.json → 立刻重排定时器。
+  const schedulesView = () => listSchedules(cfg, state)
+  ctx.schedules = schedulesView
+  ctx.applySchedules = (patch = {}) => {
+    applySchedules(cfg, patch)
+    try {
+      if (persistSchedules(cfg.configPath, patch, cfg)) log(`定时任务已写回配置：${Object.keys(patch).join(",")}`)
+    } catch (e) {
+      log(`定时任务写回配置失败：${e.message}`)
+    }
+    armSchedules()
+    const view = schedulesView()
+    log(`定时任务开关：${view.map((s) => `${s.id}=${s.enabled ? "on" : "off"}`).join(" ")}`)
+    return view
   }
 
   const close = async () => {

@@ -96,6 +96,11 @@ foreman status                # 在不在 + 监听明细 + lastPollAt / pollCoun
   - 开发：`npm run dev:console`（Vite dev server，自己起在 5173，接口仍需打到服务）。
   - 还没构建时 `/` 回 **503 + 构建提示页**，不会只给一个 404。
 - 页面右上角可切主题：亮 / 暗 / 自动（跟随系统）；选择存 `localStorage`，跟随系统时深浅色变化实时生效。
+- 页面顶部两个页签：**「工单与 PR」（可切日期回看某天）** 和 **「定时任务」**。
+  - 「定时任务」列出自动接单（`pickup.auto`）、PR 扫描（`prWatch.enabled`）、续接调度（`planner.enabled`）、工作时间窗（`workHours.offUntil` 临时闭嘴）四项，带运行状态、上次时间与已跑轮数；
+  - 点「开启/停止」会 `POST /api/schedules`（body `{"patch":{"pickup":true}}`）：先改内存里的 cfg、再写回 `config.json`、然后立刻重排定时器，**不用重启服务**；
+  - 「立即巡检」走 `POST /api/pickup`，等价于手动 `foreman pickup`。
+  - `GET /api/schedules` 返回同一份状态，脚本/CLI 也可用。
 
 ### 三个文件
 

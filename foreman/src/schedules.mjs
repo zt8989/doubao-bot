@@ -1,0 +1,115 @@
+// 定时任务开关：pickup.auto / prWatch.enabled / planner.enabled / workHours.offUntil
+// 页面上一键启停，写回 config.json 并立刻重排服务里的定时器（不用重启）。
+import fs from "node:fs"
+import { inWorkHours } from "./util.mjs"
+
+const pad = (n) => String(n).padStart(2, "0")
+
+export const SCHEDULE_IDS = ["pickup", "prWatch", "planner", "workHours"]
+
+// 临时闭嘴恢复的时刻：今天还没到开始时间且今天是工作日就今天，否则下一个工作日。
+export function nextWorkdayStart(cfg, at = new Date()) {
+  const w = cfg?.workHours ?? {}
+  const [h, m] = String(w.start ?? "08:30").split(":").map((x) => Number(x) || 0)
+  const days = (w.days ?? [1, 2, 3, 4, 5]).map(Number)
+  const onlyDays = w.enabled !== false
+  for (let i = 0; i < 8; i++) {
+    const probe = new Date(at.getFullYear(), at.getMonth(), at.getDate() + i, h, m, 0, 0)
+    if (probe.getTime() <= at.getTime()) continue
+    const day = probe.getDay() === 0 ? 7 : probe.getDay()
+    if (!onlyDays || days.includes(day)) return probe
+  }
+  return new Date(at)
+}
+
+const localIso = (d) =>
+  `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:00`
+
+/** 给页面看的开关状态。 */
+export function listSchedules(cfg, state = {}) {
+  const w = cfg?.workHours ?? {}
+  const offUntil = String(w.offUntil ?? "")
+  const paused = offUntil ? new Date(offUntil).getTime() > Date.now() : false
+  const pickup = cfg?.pickup ?? {}
+  const prw = cfg?.prWatch ?? {}
+  const pl = cfg?.planner ?? {}
+  return [
+    {
+      id: "pickup",
+      label: "自动接单",
+      enabled: pickup.auto === true,
+      intervalSeconds: Number(pickup.intervalSeconds ?? 1800),
+      detail: `每 ${Math.round(Number(pickup.intervalSeconds ?? 1800) / 60)} 分钟巡检，每轮最多 ${Number(pickup.maxPerRound ?? 1)} 条`,
+      lastAt: state.pickup?.lastAt || "",
+      count: Number(state.pickup?.count ?? 0),
+      lastResult: state.pickup?.lastResult || "",
+    },
+    {
+      id: "prWatch",
+      label: "PR 扫描",
+      enabled: prw.enabled === true,
+      intervalSeconds: Number(prw.intervalSeconds ?? 300),
+      detail: `每 ${Number(prw.intervalSeconds ?? 300)} 秒扫 open PR`,
+      lastAt: state.pr?.lastPollAt || "",
+      count: Number(state.pr?.pollCount ?? 0),
+      lastResult: Number(state.pr?.notifiedCount ?? 0) ? `累计通知 ${Number(state.pr.notifiedCount)} 次` : "",
+    },
+    {
+      id: "planner",
+      label: "续接调度",
+      enabled: pl.enabled === true,
+      intervalSeconds: 0,
+      detail: `跟随监听轮询；在跑上限 ${Number(pl.maxRunning ?? 2)}`,
+      lastAt: "",
+      count: 0,
+      lastResult: pl.enabled === true ? "" : "关闭后跑完不再催编排接单",
+    },
+    {
+      id: "workHours",
+      label: "工作时间窗",
+      // 这里 enabled 表示「现在允许运行」：闭嘴期间就是 false。
+      enabled: !paused,
+      intervalSeconds: 0,
+      detail: `周${(w.days ?? [1, 2, 3, 4, 5]).map((d) => "一二三四五六日"[Number(d) - 1]).join("/")} ${w.start ?? "08:30"}–${w.end ?? "17:30"}`,
+      lastAt: "",
+      count: 0,
+      lastResult: paused ? `闭嘴到 ${offUntil}` : inWorkHours(cfg) ? "当前在窗口内" : "当前不在窗口内",
+      offUntil: paused ? offUntil : "",
+    },
+  ]
+}
+
+/**
+ * 改开关：只动内存里的 cfg，返回新状态。
+ * workHours 的开关语义是「临时闭嘴 / 恢复」，不是改工作时段本身。
+ */
+export function applySchedules(cfg, patch = {}, at = new Date()) {
+  for (const id of SCHEDULE_IDS) {
+    if (!(id in patch)) continue
+    const on = patch[id] === true || patch[id] === "true"
+    if (id === "pickup") cfg.pickup = { ...(cfg.pickup ?? {}), auto: on }
+    else if (id === "prWatch") cfg.prWatch = { ...(cfg.prWatch ?? {}), enabled: on }
+    else if (id === "planner") cfg.planner = { ...(cfg.planner ?? {}), enabled: on }
+    else if (id === "workHours") cfg.workHours = { ...(cfg.workHours ?? {}), offUntil: on ? "" : localIso(nextWorkdayStart(cfg, at)) }
+  }
+  return listSchedules(cfg)
+}
+
+/**
+ * 写回配置文件：只改上面这四个开关，其余字段（含用户手写的格式/注释式排版）原样保留。
+ * 文件不存在就跳过——纯 CLI 跑的时候没有配置文件，开关只活在内存里。
+ */
+export function persistSchedules(file, patch = {}, cfg = {}) {
+  if (!file || !fs.existsSync(file)) return false
+  const raw = JSON.parse(fs.readFileSync(file, "utf8"))
+  for (const id of SCHEDULE_IDS) {
+    if (!(id in patch)) continue
+    const on = patch[id] === true || patch[id] === "true"
+    if (id === "pickup") raw.pickup = { ...(raw.pickup ?? {}), auto: on }
+    else if (id === "prWatch") raw.prWatch = { ...(raw.prWatch ?? {}), enabled: on }
+    else if (id === "planner") raw.planner = { ...(raw.planner ?? {}), enabled: on }
+    else if (id === "workHours") raw.workHours = { ...(raw.workHours ?? {}), offUntil: String(cfg?.workHours?.offUntil ?? "") }
+  }
+  fs.writeFileSync(file, JSON.stringify(raw, null, 2) + "\n")
+  return true
+}

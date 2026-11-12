@@ -304,6 +304,53 @@ class FmPrs extends LitElement {
   }
 }
 
+/* ---------------- 定时任务 ---------------- */
+class FmSchedules extends LitElement {
+  static properties = { schedules: { attribute: false }, busy: { type: String } }
+  createRenderRoot() {
+    return this
+  }
+  render() {
+    const rows = this.schedules || []
+    return html`
+      <section class="panel">
+        <div class="panel-head">
+          <h2>定时任务</h2>
+          <div class="panel-side">
+            <span class="hint">开关会写回 config.json，立刻生效，不用重启服务</span>
+            <button class="ghost" ?disabled=${this.busy === "pickup-run"} @click=${() => emit(this, "pickup-now")}>
+              ${this.busy === "pickup-run" ? "巡检中…" : "立即巡检"}
+            </button>
+          </div>
+        </div>
+        <ul class="sched-list">
+          ${rows.map((s) => html`
+            <li class="sched">
+              <div class="sched-main">
+                <span class=${"dot " + (s.enabled ? "on" : "off")}></span>
+                <span class="sched-name">${s.label}</span>
+                <span class=${"badge " + (s.enabled ? "notified" : "self")}>${s.enabled ? "运行中" : "已停止"}</span>
+                <span class="sched-detail">${s.detail || ""}</span>
+              </div>
+              <div class="sched-meta">
+                ${s.lastAt ? html`<span class="pr-note">上次 ${s.lastAt}</span>` : ""}
+                ${s.count ? html`<span class="pr-note">已跑 ${s.count} 轮</span>` : ""}
+                ${s.lastResult ? html`<span class="pr-note">${s.lastResult}</span>` : ""}
+              </div>
+              <div class="sched-acts">
+                <button
+                  class=${s.enabled ? "ghost danger" : "ghost"}
+                  ?disabled=${this.busy === s.id}
+                  @click=${() => emit(this, "schedule-toggle", { id: s.id, enabled: !s.enabled })}
+                >${this.busy === s.id ? "…" : s.enabled ? "停止" : "开启"}</button>
+              </div>
+            </li>`)}
+          ${rows.length ? "" : html`<li class="empty"><div class="empty-title">暂时取不到开关状态</div></li>`}
+        </ul>
+      </section>`
+  }
+}
+
 /* ---------------- 页脚 ---------------- */
 class FmFoot extends LitElement {
   static properties = {
@@ -346,6 +393,9 @@ class FmConsole extends LitElement {
     mode: { type: String },
     filter: { type: String },
     day: { type: String },
+    view: { type: String },
+    schedules: { attribute: false },
+    schedBusy: { type: String },
     busy: { type: String },
     error: { type: String },
   }
@@ -355,6 +405,10 @@ class FmConsole extends LitElement {
     this.data = null
     this.mode = "system"
     this.filter = "all"
+    // view：overview（工单/PR）/ schedules（定时任务页签）
+    this.view = "overview"
+    this.schedules = []
+    this.schedBusy = ""
     // day 为空 = 看今天；选了某天就回看那天的任务/PR。URL 上带 ?day= 也能直接打开那天。
     this.day = ""
     try {
@@ -392,16 +446,32 @@ class FmConsole extends LitElement {
       this.load()
     }
     this._onRefresh = () => this.syncNow()
+    this._onView = (e) => {
+      this.view = e.detail.view
+      if (this.view === "schedules") this.loadSchedules()
+    }
+    this._onSchedToggle = (e) => this.toggleSchedule(e.detail.id, e.detail.enabled)
+    this._onPickupNow = () => this.pickupNow()
     this.addEventListener("theme-set", this._onTheme)
     this.addEventListener("filter-set", this._onFilter)
     this.addEventListener("day-set", this._onDay)
     this.addEventListener("refresh", this._onRefresh)
+    this.addEventListener("view-set", this._onView)
+    this.addEventListener("schedule-toggle", this._onSchedToggle)
+    this.addEventListener("pickup-now", this._onPickupNow)
 
-    this._onFocus = () => this.load()
+    this._onFocus = () => {
+      this.load()
+      if (this.view === "schedules") this.loadSchedules()
+    }
     window.addEventListener("focus", this._onFocus)
 
     this.load()
-    this._loadTimer = setInterval(() => this.load(), 15000)
+    this.loadSchedules()
+    this._loadTimer = setInterval(() => {
+      this.load()
+      if (this.view === "schedules") this.loadSchedules()
+    }, 15000)
   }
 
   disconnectedCallback() {
@@ -412,6 +482,9 @@ class FmConsole extends LitElement {
     this.removeEventListener("filter-set", this._onFilter)
     this.removeEventListener("day-set", this._onDay)
     this.removeEventListener("refresh", this._onRefresh)
+    this.removeEventListener("view-set", this._onView)
+    this.removeEventListener("schedule-toggle", this._onSchedToggle)
+    this.removeEventListener("pickup-now", this._onPickupNow)
     super.disconnectedCallback()
   }
 
@@ -467,11 +540,64 @@ class FmConsole extends LitElement {
     }
   }
 
+  async loadSchedules() {
+    try {
+      const res = await fetch("/api/schedules", { cache: "no-store" })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const body = await res.json()
+      this.schedules = body.schedules || []
+    } catch (e) {
+      this.error = `服务 · 拿不到定时任务（${e.message}）`
+    }
+  }
+
+  async toggleSchedule(id, enabled) {
+    if (this.schedBusy) return
+    this.schedBusy = id
+    try {
+      await fetch("/api/schedules", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ patch: { [id]: enabled } }),
+      })
+      await this.loadSchedules()
+    } finally {
+      this.schedBusy = ""
+    }
+  }
+
+  async pickupNow() {
+    if (this.schedBusy) return
+    this.schedBusy = "pickup-run"
+    try {
+      await fetch("/api/pickup", { method: "POST" })
+      await this.loadSchedules()
+      await this.load()
+    } finally {
+      this.schedBusy = ""
+    }
+  }
+
   render() {
+    const views = [
+      { id: "overview", label: "工单与 PR" },
+      { id: "schedules", label: "定时任务" },
+    ]
     return html`
       <fm-head .data=${this.data} .mode=${this.mode} .error=${this.error} .day=${this.day} .today=${this.data?.today || ""}></fm-head>
       <main>
-        ${this.data
+        <div class="view-tabs">
+          ${views.map(
+            (v) => html`
+              <button
+                class=${"tab " + (this.view === v.id ? "is-active" : "")}
+                @click=${() => emit(this, "view-set", { view: v.id })}
+              >${v.label}</button>`
+          )}
+        </div>
+        ${this.view === "schedules"
+          ? html`<fm-schedules .schedules=${this.schedules} .busy=${this.schedBusy}></fm-schedules>`
+          : this.data
           ? html`
               <fm-stats .stats=${this.data.stats} .scope=${this.data.isToday === false ? this.data.day : "今日"}></fm-stats>
               <fm-tasks .tasks=${this.data.tasks} .scope=${this.data.isToday === false ? this.data.day : "今日"}></fm-tasks>
@@ -493,5 +619,6 @@ customElements.define("fm-head", FmHead)
 customElements.define("fm-stats", FmStats)
 customElements.define("fm-tasks", FmTasks)
 customElements.define("fm-prs", FmPrs)
+customElements.define("fm-schedules", FmSchedules)
 customElements.define("fm-foot", FmFoot)
 customElements.define("fm-console", FmConsole)

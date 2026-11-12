@@ -150,6 +150,32 @@ export function startConsoleHttp({ store, ctx, dir, host = "127.0.0.1", port = 7
         })
       }
 
+      if (pathname === "/api/schedules") {
+        if (req.method === "GET") return sendJson(res, 200, { ok: true, schedules: ctx.schedules?.() ?? [] })
+        if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
+        if (typeof ctx.applySchedules !== "function") return sendJson(res, 501, { ok: false, error: "schedules_not_supported" })
+        let body
+        try {
+          body = await readBody(req)
+        } catch (e) {
+          return sendJson(res, 400, { ok: false, error: e.code || "bad_request", message: e.message })
+        }
+        const patch = body?.patch ?? body ?? {}
+        try {
+          const schedules = ctx.applySchedules(patch)
+          return sendJson(res, 200, { ok: true, schedules })
+        } catch (e) {
+          return sendJson(res, 400, { ok: false, error: "bad_patch", message: e.message })
+        }
+      }
+
+      if (pathname === "/api/pickup") {
+        if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
+        if (typeof ctx.pickup !== "function") return sendJson(res, 501, { ok: false, error: "pickup_not_supported" })
+        const r = await ctx.pickup()
+        return sendJson(res, 200, { ok: r?.ok !== false, pickup: r })
+      }
+
       if (pathname === "/api/sync") {
         if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
         const r = await ctx.prPoll()
