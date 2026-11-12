@@ -898,6 +898,25 @@ export async function pollOnce(ctx) {
         log(`通知跳过 ${w.target}：通知节点已暂停`)
         continue
       }
+      // 已经归档 / 已关单合并的执行会话：结论不必再推给编排会话——
+      // 合并收尾时已经发过「合并完成」，这里再发一条只是重复。
+      // 节点照样落一次痕（不走 engine.emit，避免把跳过也算成「执行了 1 次」）。
+      const issKey = String(w.issueKey ?? "")
+      const bookIss = new Book(cfg.stateFile)
+      const iss = issKey ? bookIss.issue(issKey) : null
+      const prOf = Number(iss?.pr ?? 0)
+      const mergeKey = prOf ? `${w.repo || String(issKey).split("#")[0]}#${prOf}` : ""
+      const merged = mergeKey && bookIss.mergeAsk?.[mergeKey]?.status === "merged"
+      if (merged) {
+        const payload = { issueKey: issKey, target: w.target, kind: "archived-skip", detail: "会话已归档，跳过通知" }
+        book2.markNotified(w.target, decision.fingerprint, { phase: decision.phase, chars: status?.chars ?? 0 })
+        if (engine.lifecycle && typeof engine.lifecycle.emit === "function") await engine.lifecycle.emit("notice.delivered", payload)
+        else await engine.emit("notice.delivered", payload)
+        log(`通知跳过 ${w.target}：工单已关单合并（会话已归档，不再通知编排会话）`)
+        park()
+        continue
+      }
+
       // existing 才需要「发给谁」；new 模式每次都新建会话，跟哪个会话在跑无关。
       if (mode === "existing" && (!target || target === String(w.target))) {
         log(`通知跳过 ${w.target}：${nd.reason || "no-target"}`)

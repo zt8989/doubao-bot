@@ -272,17 +272,19 @@ class FmTasks extends LitElement {
                           <span class="wf-stage">${st.stage}</span>
                           <span class=${"badge " + (state === "current" ? "working" : state === "passed" ? "done" : "planned")}>${label}</span>
                           <span class="chip"><span class="mono">${n.count ?? 0}</span> 次</span>
-                          ${(() => {
-                            const own = run?.stageAt?.[st.stage] ?? ""
-                            const time = own || n.lastAt || ""
-                            const kind = own
-                              ? "本单在这个节点的更新时间"
-                              : n.lastAt
-                                ? "这个节点最近一次执行时间（不一定是本单）"
-                                : "本单最近更新时间"
-                            const text = stampText(time) || t.updatedAtClock || "—"
-                            return html`<span class="wf-time" title=${kind}><span class="k">更新</span> ${text}</span>`
-                          })()}
+                          ${state === "pending"
+                            ? "" // 还没跑到的节点没有更新时间：不占位、不显示
+                            : (() => {
+                                const own = run?.stageAt?.[st.stage] ?? ""
+                                const time = own || n.lastAt || ""
+                                const kind = own
+                                  ? "本单在这个节点的更新时间"
+                                  : n.lastAt
+                                    ? "这个节点最近一次执行时间（不一定是本单）"
+                                    : "本单最近更新时间"
+                                const text = stampText(time) || t.updatedAtClock || "—"
+                                return html`<span class="wf-time" title=${kind}><span class="k">更新</span> ${text}</span>`
+                              })()}
                           ${n.paused ? html`<span class="badge failed">已暂停</span>` : ""}
                         </div>
                         <div class="wf-node-sub">${st.description}</div>

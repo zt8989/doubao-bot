@@ -168,3 +168,35 @@ test("gone 之后又出现在侧边栏：清 gone 并重新判一轮", async () 
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("PR 已合并（会话已归档）：不再给编排会话补一条结论通知，但 notify 节点照样落痕", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-poll-archived-"))
+  try {
+    const cfg = { stateFile: path.join(dir, "state.json"), notify: { enabled: true, session: "boss", events: ["done"] }, deliver: { mode: "existing" } }
+    const book = new Book(cfg.stateFile)
+    book.setWatch({ target: "conv-a", name: "w", issueKey: "demo/demo#1", repo: "demo/demo", number: 1, notifyTo: "boss" })
+    book.setIssue("demo/demo#1", { state: "done", pr: 12 })
+    book.markMergeAsked("demo/demo#12", { pr: 12, status: "merged" })
+    const events = []
+    const calls = { notified: 0 }
+    const ctx = {
+      cfg,
+      state: { polling: false, watchers: new Map(), dwsErrors: 0, notifiedCount: 0 },
+      log: () => {},
+      gitea: {},
+      engine: { lifecycle: { emit: async (e, p) => events.push([e, p.kind]) }, emit: async () => {} },
+      dws: {
+        runningMap: async () => ({ "conv-a": { running: false, title: "w" } }),
+        status: async () => ({ streaming: false, finished: true, chars: 500, head: "H", tail: "T", status: "ok" }),
+        info: async () => ({ lastReply: '<RESULT>{"status":"done","pr":12}</RESULT>' }),
+        notify: async () => { calls.notified++ },
+      },
+    }
+    const r = await pollOnce(ctx)
+    assert.equal(r.notified, 0, "已合并归档的单不再通知编排会话")
+    assert.equal(calls.notified, 0)
+    assert.deepEqual(events, [["notice.delivered", "archived-skip"]], "notify 节点落一次「跳过」的痕，别一直挂待跑")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
