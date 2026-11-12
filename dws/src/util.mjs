@@ -192,3 +192,45 @@ export function isFreshTask(beforeConvId, afterConvId, { requireNewId = false } 
   if (requireNewId && !/^\d{8,}$/.test(after)) return false // 期望拿到具体新 id 却没拿到
   return true
 }
+
+// 侧边栏任务快照 → 合法会话 id 集合（豆包会话 id 是 8 位以上纯数字）。
+export function taskIds(tasks = []) {
+  return new Set(
+    (tasks ?? [])
+      .map((t) => String(t?.id ?? "").trim())
+      .filter((id) => /^\d{8,}$/.test(id))
+  )
+}
+
+const plainTitle = (s) => String(s ?? "").replace(/[\s\u200b-\u200f\ufeff]/g, "")
+
+/**
+ * pickNewTask：从「点新建前后的侧边栏快照」里认出刚建出来的那条会话。
+ *
+ * 为什么不能只看窗口 id：豆包是单实例、窗口只有一个。用户自己点了别的任务、
+ * 或者页面在跑回复期间被切走，location 里读到的就是**别人**的会话 id ——
+ * 新建前后"相同"会误判成没建，新建前后"不同"又会把别人的 id 记成本次新会话。
+ * 侧边栏任务集合的差集才是「这次点新建多出来的那条」，不受窗口焦点影响。
+ *
+ * 多条同时新增（用户也在建任务）时的取舍顺序：标题对得上 → 在跑的那条 → 列表最上面。
+ *   before/after: TASKS 快照（{ id, title, running, ... } 数组）
+ *   expectTitle:  期望标题（工单标题之类），只在多条新增时用来消歧，可留空
+ */
+export function pickNewTask(before = [], after = [], { expectTitle = "" } = {}) {
+  const known = taskIds(before)
+  const fresh = (after ?? []).filter((t) => {
+    const id = String(t?.id ?? "").trim()
+    return /^\d{8,}$/.test(id) && !known.has(id)
+  })
+  if (!fresh.length) return null
+  if (fresh.length === 1) return fresh[0]
+  const want = plainTitle(expectTitle)
+  if (want) {
+    const hit = fresh.find((t) => {
+      const got = plainTitle(t?.title)
+      return got && (got.includes(want) || want.includes(got))
+    })
+    if (hit) return hit
+  }
+  return fresh.find((t) => t?.running) ?? fresh[0]
+}

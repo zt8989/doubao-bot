@@ -49,7 +49,7 @@ dws doctor                           # 自检；--start 会真的拉起豆包查
 dws open --name win-ai-harness --repo yyzl/win-ai-harness --prompt "先看一眼仓库现状"
 dws open --name scratch --file /tmp/brief.md             # 长提示词走文件
 dws open --name scratch                                  # 只开任务，不发消息
-dws open --name notice --file /tmp/notice.md --no-wait    # 发首句但不等回复（只确认送达 + 回读新会话 id）
+dws open --name notice --file /tmp/notice.md --no-wait    # 发首句但不等回复（只确认送达 + 认出新会话 id）
 
 dws list                     # 豆包窗口里的全部工作任务 + 本地记录的会话
 dws projects                 # 侧边栏「项目」分组下的项目
@@ -75,6 +75,13 @@ dws 时，环境变量 `MCP_VM_CONVERSATION_ID` 就是那条会话的 id，命�
 
 `status` / `info` 需要连上豆包窗口；窗口里不是这条会话的任务时，会明确告诉你
 `不在当前窗口里（窗口里是另一个任务）`，并给出落盘的最后一次回复摘要。
+
+新建会话认的是**侧边栏任务集合的差集**：点「新建工作任务」前后各读一次侧边栏，多出来的
+那条就是本次会话（`dws open --json` 里 `locatedBy: "sidebar"`）。窗口 URL 里那个 id 只当兜底，
+因为豆包是单实例、窗口只有一个——用户点回自己的任务时读到的是别人的会话 id。只看窗口
+id 会给出两种假结论：明明建出来了却报「窗口没切到新会话」（编排于是重派一条，两条会话抢
+一个工作区），或者把用户自己那条任务记成本次新会话。回复没等到但侧边栏确实多出一条时，
+`open` 如实返回 `convId` + `replied: false`，不报失败。
 
 ## 配置
 

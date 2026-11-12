@@ -141,12 +141,16 @@ export class SessionManager {
     }
 
     const afterConvId = reply?.convId ?? ""
+    // 侧边栏差集认出来的新会话是硬证据：id 不在新建前的任务集合里，就不可能是旧会话，
+    // 也不受窗口被用户切走的影响。只有走窗口回读的老路时才需要 isFreshTask 兜底。
+    const locatedBySidebar = reply?.locatedBy === "sidebar" && /^\d{8,}$/.test(afterConvId)
     // 最后一道记账守卫：绝不再用「当前窗口 convId」兜底——没拿到与旧 id 不同的新 id 就抛错，
     // 不往 state.json 里落假记录。带 prompt 的情况 openTask 已要求具体新 id；不带 prompt 时
     // 新页可能还没有 id（空串），但不能等于 beforeConvId。
-    if (!isFreshTask(beforeConvId, afterConvId, { requireNewId: !!prompt })) {
+    if (!locatedBySidebar && !isFreshTask(beforeConvId, afterConvId, { requireNewId: !!prompt })) {
       throw new DoubaoError(
-        `新建工作任务失败：记账时拿到的会话 id（${afterConvId || "(空)"}）与新建前（${beforeConvId || "(空)"}）相同，拒绝落账。`,
+        `新建工作任务失败：记账时拿到的会话 id（${afterConvId || "(空)"}）与新建前（${beforeConvId || "(空)"}）相同，` +
+          `侧边栏里也没有多出新任务，拒绝落账。`,
         "doubao_new_task"
       )
     }
@@ -161,7 +165,7 @@ export class SessionManager {
       reply: replySummary(reply?.reply),
     })
     this.book.setActive(name)
-    return { session: this.book.session(name), reply: reply?.reply ?? null }
+    return { session: this.book.session(name), reply: reply?.reply ?? null, locatedBy: reply?.locatedBy ?? "" }
   }
 
   // send 在同一任务里续发；任务已经不在窗口里了就重开一条并带 handoff。
