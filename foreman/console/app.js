@@ -264,8 +264,8 @@ class FmTasks extends LitElement {
                     const n = nodes.find((x) => x.stage === st.stage) || {}
                     const state = at < 0 ? "pending" : i < at ? "passed" : i === at ? "current" : "pending"
                     const label = state === "passed" ? "已走过" : state === "current" ? "当前" : "待跑"
-                    // 已完成的节点（走过了，或整条流程已收口）不再给暂停按钮：只对还在跑/待跑的节点有效。
-                    const canToggle = !!run && run.status !== "done" && state !== "passed"
+                    // 只有「当前节点」能暂停：已走过的、还没跑到的（待跑）都不给按钮。
+                    const canToggle = !!run && run.status !== "done" && state === "current"
                     return html`
                       <li class=${"wf-node is-" + state}>
                         <div class="wf-node-main">
@@ -378,6 +378,9 @@ class FmWorkflows extends LitElement {
       </div></section>`
     }
     const nodeOf = (stage) => nodes.find((n) => n.stage === stage) || {}
+    // 只有「正在某个实例的当前节点上」或「已经跑过至少一次」的节点才能暂停；
+    // 完全没跑过的节点没有暂停的意义（暂停只会让将来第一次执行时被跳过）。
+    const currentStages = new Set(runs.filter((r) => r.status === "running").map((r) => r.stage))
     return html`
       <section class="panel">
         <div class="panel-head">
@@ -397,19 +400,23 @@ class FmWorkflows extends LitElement {
               <ol class="wf-nodes">
                 ${(f.stages || []).map((st) => {
                   const n = nodeOf(st.stage)
+                  const canPause = n.paused || currentStages.has(st.stage) || Number(n.count ?? 0) > 0
+                  const badge = n.paused ? "已暂停" : currentStages.has(st.stage) ? "当前节点" : Number(n.count ?? 0) > 0 ? "已跑过" : "未运行"
                   return html`
                     <li class=${"wf-node" + (n.paused ? " is-paused" : "")}>
                       <div class="wf-node-main">
                         <span class="wf-stage">${st.stage}</span>
-                        <span class=${"badge " + (n.paused ? "failed" : "done")}>${n.paused ? "已暂停" : "可运行"}</span>
+                        <span class=${"badge " + (n.paused ? "failed" : currentStages.has(st.stage) ? "working" : Number(n.count ?? 0) > 0 ? "done" : "planned")}>${badge}</span>
                         <span class="chip"><span class="mono">${n.count ?? 0}</span> 次</span>
                         <span class="pr-note">${n.lastAt ? `更新 ${stampText(n.lastAt)}` : "还没跑过"}</span>
                       </div>
                       <div class="wf-node-sub">${st.description}</div>
-                      <button class="ghost wf-btn" ?disabled=${this.busy === st.stage}
-                        @click=${() => emit(this, "node-toggle", { stage: st.stage, paused: !n.paused })}>
-                        ${n.paused ? "继续" : "暂停"}
-                      </button>
+                      ${canPause
+                        ? html`<button class="ghost wf-btn" ?disabled=${this.busy === st.stage}
+                            @click=${() => emit(this, "node-toggle", { stage: st.stage, paused: !n.paused })}>
+                            ${n.paused ? "继续" : "暂停"}
+                          </button>`
+                        : html`<span class="hint">未运行，不可暂停</span>`}
                     </li>`
                 })}
               </ol>
