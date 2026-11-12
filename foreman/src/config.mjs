@@ -46,6 +46,9 @@ export const DEFAULTS = {
     concurrency: 1,
     intervalSeconds: 60,
     cron: "",
+    // 合并助手交回 RESULT 后由 workflow 合并：mergeable=true 就自动走 runMergeTask。
+    // 置 false 只判断、不合（结论仍记进 mergeJudge，交给人处理）。
+    verdictAutoMerge: true,
   },
   // 收口通知：每条工单处理完，用 dws send 把结果回给「调用方会话」。
   // session 写 "auto" 就取环境变量 MCP_VM_CONVERSATION_ID（在豆包会话里跑 foreman 时就是那条会话），

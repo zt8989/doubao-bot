@@ -196,7 +196,13 @@ export async function deliverNewSession(ctx, { text = "", kind = "", repo = "", 
   try {
     const out = await dws.openNew({ name, prompt, noWait })
     const convId = String(out?.convId ?? "").trim()
-    new Book(cfg.stateFile).record(name, { convId, kind: `deliver:${laneName}`, notify: false, product: dc.product })
+    // notice 记触发类型：合并判断链路只消费「PR待合并」这条会话交回的 RESULT；
+    // 「合并完成」那类会话只做汇报，不再触发一次合并。
+    new Book(cfg.stateFile).record(name, {
+      convId, kind: `deliver:${laneName}`, notify: false, product: dc.product,
+      notice: String(kind ?? ""), repo: String(repo || watcher?.repo || ""),
+      createdAt: nowIso(),
+    })
     log(`已新建${laneName === "merge" ? "合并" : "派单"}会话投递：${name}${convId ? `（${convId}）` : ""}`)
     finishOperation(ctx, op, "success", `${name}${convId ? ` · 会话 ${convId}` : ""}`)
     return { session: name, convId, product: dc.product, lane: laneName }
@@ -964,6 +970,13 @@ export async function pollOnce(ctx) {
         }
       }
     }
+    // 合并助手交回的 RESULT 也在这轮收：判了可合就走 workflow 合并（runMergeTask）。
+    // 复用上面读过的侧边栏，不再切一次窗口；判过的会话落 mergeJudge，不再反复读。
+    try {
+      out.verdict = await mergeVerdictOnce(ctx, { sidebar })
+    } catch (e) {
+      log(`合并判断失败：${e.message}`)
+    }
     state.lastPollAt = nowIso()
     state.pollCount++
   } finally {
@@ -1133,6 +1146,254 @@ async function notifyMergeOutcome(ctx, task, out = {}) {
     // 通知失败不影响账本与合并事实，只记日志。
     log(`合并结果通知失败（不影响账本）：${e.message}`)
   }
+}
+
+// ---- 合并判断：合并助手交 RESULT → workflow 合并 ----
+//
+// 合并会话（deliver:merge，触发类型「PR待合并」）不再是执行者：它只判断可合性、
+// 帮解冲突，然后把结论写成 RESULT 交回来。这里负责消费那份 RESULT：
+// 判了可合就按串行链走 runMergeTask（与 CLI `foreman pr merge` 共用 ctx.mergeChain），
+// 判不下来就记账 + 写控制台，等人处理，不自己拍。
+//
+// 为什么不塞进 pollOnce 的 watcher 循环：这类会话 notify:false，故意不进监听（它是编排者），
+// 硬塞进去会跟「通知谁」的逻辑打架。这里只用侧边栏判 running，没在跑才读一次 info，
+// 判过就落 book.mergeJudge 不再读——单实例下读 info 要把窗口切到那条会话。
+
+const VERDICT_GRACE_MS = 60_000 // 刚投递的会话先别读：可能还没开始跑
+const VERDICT_RETRY_MS = 120_000 // 没取到结论 / 合并失败，隔两分钟再试
+const VERDICT_MAX_MERGE_ATTEMPTS = 2 // 判过可合的 PR 最多合两次（第二次兜 mergeNote 慢半拍）
+
+// 待判断的合并会话：只认 deliver:merge + 触发类型「PR待合并」。
+// 「合并完成」那类会话只是回执，不再触发一次合并。
+export function verdictSessions(book) {
+  const out = []
+  for (const [name, s] of Object.entries(book?.sessions ?? {})) {
+    if (String(s?.kind ?? "") !== "deliver:merge") continue
+    if (String(s?.notice ?? "") !== "PR待合并") continue
+    const convId = String(s?.convId ?? "").trim()
+    if (!convId) continue
+    out.push({
+      name,
+      convId,
+      repo: String(s?.repo ?? "").trim(),
+      // createdAt 才是投递时间（record() 每次都会刷 updatedAt），宽限期按它算。
+      at: String(s?.createdAt ?? s?.updatedAt ?? ""),
+    })
+  }
+  return out
+}
+
+// 一次判断最多交几条 PR：顶层一条，或 items 里的多条（逐条判定，mergeable=false 的剔掉）。
+function verdictTasks(result = {}, fallbackRepo = "") {
+  const list = []
+  const seen = new Set()
+  const push = (repo, pr, url) => {
+    const r = String(repo ?? "").trim()
+    const n = Number(pr) || 0
+    if (!r || !n) return
+    const key = `${r}#${n}`
+    if (seen.has(key)) return
+    seen.add(key)
+    list.push({ key, repo: r, pr: n, url: String(url ?? "") })
+  }
+  if (Array.isArray(result.items) && result.items.length) {
+    for (const it of result.items) push(it.repo || result.repo || fallbackRepo, it.pr, it.prUrl)
+  } else {
+    push(result.repo || fallbackRepo, result.pr, result.prUrl)
+  }
+  return list
+}
+
+// judgeMergeVerdict：把一条合并会话的 RESULT 翻成动作。纯函数，测试直接调。
+// action：
+//   wait  —— 还没交 RESULT（会话可能还在写），下一轮再看；
+//   merge —— 可合，tasks 交给 workflow 合并；
+//   done  —— 账本里已经合过了，只需要把这条会话标记收口；
+//   hold  —— 不合（不可合 / 需要拍板），记账等人；
+//   skip  —— 开关关了，不处理。
+export function judgeMergeVerdict({ cfg, record = {}, result = {}, book } = {}) {
+  const merge = cfg?.merge ?? {}
+  if (merge.enabled !== true) return { action: "skip", reason: "disabled", tasks: [] }
+  if (merge.verdictAutoMerge === false) return { action: "skip", reason: "verdict-auto-off", tasks: [] }
+  const status = String(result?.status ?? "").trim()
+  if (!status || status === "none") return { action: "wait", reason: "no-result", tasks: [] }
+
+  const repo = String(result?.repo || record?.repo || "").trim()
+  const all = verdictTasks({ ...result, repo }, repo)
+  // 顶层说不合，或逐条标了 mergeable=false 的都不合。
+  const tasks = all.filter((t) => {
+    const item = (result.items ?? []).find(
+      (i) => String(i.repo || repo) === t.repo && Number(i.pr) === t.pr,
+    )
+    return item ? item.mergeable !== false : result.mergeable !== false
+  })
+
+  if (status !== "done") {
+    return {
+      action: "hold",
+      reason: status,
+      question: String(result.question ?? ""),
+      summary: String(result.summary ?? ""),
+      tasks: [],
+    }
+  }
+  // 判断是这条链路的全部意义：RESULT 没写 mergeable 就不合（不能拿「没表态」当「可以合」）。
+  if (result.mergeable !== true) {
+    return {
+      action: "hold",
+      reason: result.mergeable === false ? "not-mergeable" : "no-mergeable-verdict",
+      summary: String(result.summary ?? ""),
+      tasks: [],
+    }
+  }
+  if (!tasks.length) return { action: "hold", reason: "no-pr", summary: String(result.summary ?? ""), tasks: [] }
+  const open = tasks.filter((t) => book?.mergeAsk?.[t.key]?.status !== "merged")
+  if (!open.length) return { action: "done", reason: "already-merged", tasks: [] }
+  return { action: "merge", reason: "", tasks: open }
+}
+
+// runVerdictTasks：把可合的 PR 交给 workflow（runMergeTask）落地。
+// 与 CLI 共用一条串行链：同一时刻不会并着合两条；合并结果按 notifyMergeOutcome 回一条「合并完成」。
+async function runVerdictTasks(ctx, { name = "", tasks = [], attempt = 1 } = {}) {
+  const { cfg, log = () => {} } = ctx
+  const ok = []
+  const failed = []
+  for (const t of tasks) {
+    new Book(cfg.stateFile).markMergeJudge(name, {
+      status: "merging", tasks, attempts: attempt, key: t.key, repo: t.repo, pr: t.pr,
+    })
+    const run = () =>
+      runMergeTask(ctx, { key: t.key, repo: t.repo, pr: t.pr, url: t.url ?? "", source: "verdict" })
+    const prev = ctx.mergeChain ?? Promise.resolve()
+    const mine = prev.then(run, run)
+    ctx.mergeChain = mine.then(() => {}, () => {})
+    let out = null
+    try {
+      out = await mine
+    } catch (e) {
+      out = { ok: false, reason: String(e?.message ?? e ?? "") }
+    }
+    if (out?.ok) ok.push(t.key)
+    else failed.push({ key: t.key, reason: out?.reason ?? "未知原因" })
+  }
+  const b = new Book(cfg.stateFile)
+  if (failed.length) {
+    const reason = failed.map((f) => `${f.key}：${f.reason}`).join("；").slice(0, 300)
+    b.markMergeJudge(name, { status: "merge-failed", tasks, attempts: attempt, reason })
+    log(`合并判断 → workflow 合并失败（${name}）：${reason}`)
+  } else {
+    b.markMergeJudge(name, { status: "merged", tasks: [], attempts: attempt, reason: ok.join("、") })
+    if (ok.length) log(`合并判断 → workflow 已合并：${ok.join("、")}（${name}）`)
+  }
+  return ok.length
+}
+
+// mergeJudgeStat：控制台/status 用的判断账统计。
+export function mergeJudgeStat(book) {
+  const stat = { pending: 0, merged: 0, held: 0, failed: 0, gone: 0, lastAt: "" }
+  for (const c of verdictSessions(book)) {
+    const st = String(book?.mergeJudge?.[c.name]?.status ?? "")
+    if (st === "merged") stat.merged++
+    else if (st === "held") stat.held++
+    else if (st === "merge-failed") stat.failed++
+    else if (st === "gone") stat.gone++
+    else stat.pending++
+    const at = String(book?.mergeJudge?.[c.name]?.at ?? "")
+    if (at && at > stat.lastAt) stat.lastAt = at
+  }
+  return stat
+}
+
+// mergeVerdictOnce：一轮「读合并助手的结论 → 走 workflow 合并」。
+// sidebar 传进来就复用（pollOnce 已经读过一次侧边栏），没传自己读一次。
+export async function mergeVerdictOnce(ctx, { sidebar = null } = {}) {
+  const { cfg, log = () => {} } = ctx
+  const out = { checked: 0, merged: 0, held: 0, gone: 0, waiting: 0 }
+  if (cfg?.merge?.enabled !== true) return out
+  const book0 = new Book(cfg.stateFile)
+  const cands = verdictSessions(book0)
+  if (!cands.length) return out
+  let side = sidebar
+  if (!side && typeof ctx.dws?.runningMap === "function") {
+    try {
+      side = await ctx.dws.runningMap()
+    } catch (e) {
+      log(`合并判断本轮跳过：读不到侧边栏（${e.message}）`)
+      return out
+    }
+  }
+  for (const c of cands) {
+    const led = new Book(cfg.stateFile).mergeJudge[c.name] ?? {}
+    const st = String(led.status ?? "")
+    // 终态：不再读这条会话。
+    if (["merged", "gone", "held"].includes(st)) continue
+    if (st === "merging") continue
+    if (st === "merge-failed" && Number(led.attempts ?? 0) >= VERDICT_MAX_MERGE_ATTEMPTS) continue
+    out.checked++
+    // 刚投递：先别读，也不判「已收起」（会话可能还没出现在侧边栏）。
+    const ageMs = Date.now() - Date.parse(c.at ?? "")
+    if (Number.isFinite(ageMs) && ageMs >= 0 && ageMs < VERDICT_GRACE_MS) continue
+    if (side?.[c.convId]?.running) continue
+    if (side && !side[c.convId]) {
+      new Book(cfg.stateFile).markMergeJudge(c.name, { status: "gone", reason: "会话已收起，结论没取到" })
+      out.gone++
+      log(`合并判断跳过 ${c.name}：会话已收起，没取到 RESULT`)
+      continue
+    }
+    // 已判「可合」但合并失败：不重读会话，隔一会儿再合一次（兜 mergeNote 慢半拍）。
+    if (st === "merge-failed") {
+      const agoMs = Date.now() - Date.parse(led.at ?? "")
+      if (Number.isFinite(agoMs) && agoMs >= 0 && agoMs < VERDICT_RETRY_MS) continue
+      out.merged += await runVerdictTasks(ctx, {
+        name: c.name, tasks: led.tasks ?? [], attempt: Number(led.attempts ?? 0) + 1,
+      })
+      continue
+    }
+    // 上一轮没读到结论：退避两分钟再读，避免每 20s 切一次用户窗口。
+    if (st === "no-result") {
+      const agoMs = Date.now() - Date.parse(led.at ?? "")
+      if (Number.isFinite(agoMs) && agoMs >= 0 && agoMs < VERDICT_RETRY_MS) continue
+    }
+
+    let result = null
+    try {
+      const info = await ctx.dws.info(c.convId)
+      const text = String(info?.lastReply ?? "")
+      if (text) result = parseResult(text)
+    } catch (e) {
+      log(`读合并会话 ${c.name} 的结论失败：${e.message}`)
+      // 记成 no-result：下一轮隔两分钟再读，别每 20s 就去切一次用户窗口。
+      new Book(cfg.stateFile).markMergeJudge(c.name, { status: "no-result", reason: "info-failed" })
+      continue
+    }
+    const d = judgeMergeVerdict({ cfg, record: c, result, book: new Book(cfg.stateFile) })
+    if (d.action === "wait") {
+      new Book(cfg.stateFile).markMergeJudge(c.name, { status: "no-result", reason: d.reason })
+      out.waiting++
+      continue
+    }
+    if (d.action === "skip") continue
+    if (d.action === "done") {
+      new Book(cfg.stateFile).markMergeJudge(c.name, { status: "merged", reason: d.reason, tasks: [] })
+      out.merged++
+      continue
+    }
+    if (d.action === "hold") {
+      new Book(cfg.stateFile).markMergeJudge(c.name, {
+        status: "held", reason: d.reason, question: d.question ?? "", summary: d.summary ?? "",
+      })
+      ctx.consoleStore?.event({
+        kind: "pr_judge", key: c.name, repo: c.repo, number: d.tasks?.[0]?.pr ?? null,
+        to: "held", detail: `不合：${d.reason}${d.question ? ` · ${d.question}` : ""}`,
+      })
+      out.held++
+      log(`合并判断 ${c.name}：不合（${d.reason}）${d.question || d.summary ? ` · ${d.question || d.summary}` : ""}`)
+      continue
+    }
+    // action=merge：判断到此为止，合并交给 workflow。
+    out.merged += await runVerdictTasks(ctx, { name: c.name, tasks: d.tasks, attempt: 1 })
+  }
+  return out
 }
 
 // ---- 连接处理 ----
@@ -1482,6 +1743,8 @@ export async function handleRequest(ctx, req) {
       merge: {
         // 合并通道已取消：只剩「还有几条待合并的 PR」，合不合由编排调 pr merge 决定。
         queued: Object.values(new Book(ctx.cfg.stateFile).mergeQueue ?? {}).filter((t) => String(t.status ?? "queued") === "queued").length,
+        // 合并助手的判断账：还在判几条、已合几条、挂着几条（判不下来的人处理）。
+        judge: mergeJudgeStat(new Book(ctx.cfg.stateFile)),
       },
       // 产品分组：每个产品一套仓库 + 自己的提示词/监控目录。
       products: (ctx.cfg.products ?? []).map((p) => ({

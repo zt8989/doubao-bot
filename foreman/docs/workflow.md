@@ -67,11 +67,20 @@ workflow 面板能看到两条流程的全部节点。
 - 状态落在 `state.json` 的 `workflow` 键：`{ paused: ["pickup"], counts: { pickup: { count, lastAt, firstAt, detail } } }`。
 - 接口：`foreman workflow view|pause|resume <节点>`（RPC），控制台走 `GET/POST /api/workflow`。
 
-## 合并通道已取消
+## 合并：合并助手只判断，workflow 落地
 
-合并不再有独立通道、独立定时任务、独立并发槽。PR 合不合由编排会话核对后
-`foreman pr merge <N> --repo R` **当场执行**（进程内一条串行链兜住并发，账本照样写）。
-会话跑完只把 `PR 已开好` 记进账本并发通知，通知里给合并入口。
+合并不再有独立通道、独立定时任务、独立并发槽。合不合由**合并助手会话**判断：
+
+1. `prWatch` 扫到别人的 open PR → 投递一条合并会话（`sessions.notice = "PR待合并"`）；
+2. 合并助手核对归属/基线，有冲突就在隔离工作区解掉并普通 push，然后交一个 RESULT
+   （`status` / `mergeable` / `conflict` / `repo` / `pr` / `prUrl`）；
+3. 服务的 `mergeVerdictOnce`（每轮 `pollOnce` 末尾，复用同一次侧边栏读取）消费这份结论：
+   - `mergeable=true` → 走 `runMergeTask`（与 CLI `foreman pr merge` 共用 `ctx.mergeChain`）合并 + 收尾流水线；
+   - `need_decision` / `blocked` / merge 失败 → 记 `mergeJudge`，写控制台 `pr_judge` 事件，交给人；
+   - 判过就不再读这条会话（读 `dws info` 要切用户窗口）；`merge.verdictAutoMerge: false` 时只判断不合。
+4. 合并结果照样回一条「合并完成」；这类回执会话不会被判断链路二次消费。
+
+会话跑完仍会把「PR 已开好」记进账本并发通知，但真正落地合并的是 workflow，不是会话自己。
 
 ## 适配器契约
 

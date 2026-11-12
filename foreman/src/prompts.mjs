@@ -210,7 +210,40 @@ function normalize(o, raw, block) {
     tests: String(o.tests ?? ""),
     summary: String(o.summary ?? o.note ?? ""),
     question: String(o.question ?? ""),
+    // 合并助手的结论字段：派单会话不填，但解析时一并带出来，
+    // 「读 RESULT 决定合不合」的地方就不用再自己抠原文。
+    mergeable: truthOf(o.mergeable),
+    conflict: String(o.conflict ?? "").trim(),
+    repo: String(o.repo ?? "").trim(),
+    base: String(o.base ?? "").trim(),
+    merged: truthOf(o.merged) === true,
+    items: Array.isArray(o.items) ? o.items.map(normalizeItem).filter((it) => it.repo || it.pr) : [],
     raw,
     block,
   }
+}
+
+// 逐条结论（合并助手一次交多条 PR）：只留判断要用的几个字段。
+function normalizeItem(it) {
+  const o = it ?? {}
+  const pr = Number(o.pr) > 0 ? Number(o.pr) : null
+  return {
+    status: String(o.status ?? "").trim(),
+    repo: String(o.repo ?? "").trim(),
+    pr,
+    prUrl: String(o.prUrl ?? ""),
+    mergeable: truthOf(o.mergeable),
+    conflict: String(o.conflict ?? "").trim(),
+    reason: String(o.reason ?? o.summary ?? "").trim(),
+  }
+}
+
+// truthOf：布尔/字符串都认（"true"/"1"/"yes"），没填返回 null——「没表态」不等于「可以合」。
+function truthOf(v) {
+  if (v === undefined || v === null || v === "") return null
+  if (v === true || v === false) return v
+  const t = String(v).trim().toLowerCase()
+  if (["true", "1", "yes", "y", "可以", "可合", "mergeable"].includes(t)) return true
+  if (["false", "0", "no", "n", "不可以", "不可合"].includes(t)) return false
+  return null
 }

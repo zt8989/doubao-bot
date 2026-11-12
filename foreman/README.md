@@ -45,22 +45,28 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 | 流程 | 干什么 | 并发 | 谁在推进 |
 | --- | --- | --- | --- |
 | **自有工单（own）** | 接单 → 建工作区 → 派活 → 开发 → 出 PR → 合并 → 关单 → 清理 → 归档 → 通知 | **同时最多 2 条在跑**（按 workflow 实例数算） | `pickup.auto` 定时器 + `foreman run` |
-| **他人 PR（review）** | 扫到 → 核对 → 合并 → 关单 → 清理 → 归档 → 通知 | 不占接单名额 | 「他人 PR 扫描」定时器 + `foreman pr merge` |
+| **他人 PR（review）** | 扫到 → 核对/判可合 → 解冲突 → **合并助手交 RESULT** → 合并 → 关单 → 清理 → 归档 → 通知 | 不占接单名额 | 「他人 PR 扫描」定时器 + 合并助手 + `runMergeTask` |
 
 - **合并通道已取消**：没有独立 lane、没有合并定时任务、没有独立并发槽（`src/lanes.mjs` 已删除）。
   `foreman pr merge` 当场执行合并，进程内一条串行链兜住并发，账本照样写。
+- **合并助手只判断、不合并**：`foreman-合并-*` 会话收到「PR 待合并」后核对归属/基线、帮解冲突，
+  然后交一个 RESULT（`mergeable` / `conflict` / `pr`）。服务的 `mergeVerdictOnce`（每轮 poll 末尾）消费这份结论：
+  `mergeable=true` 就走 `runMergeTask`（与 CLI 共用 `ctx.mergeChain`）合并并收尾；
+  `need_decision` / `blocked` 只记账 `mergeJudge` + 写控制台 `pr_judge` 事件，交给人。
+  `merge.verdictAutoMerge: false` 就只判断、不合。
 - **`pickup.maxRunning`（默认 2）** 是「同时有几条自有工单流程在跑」：`engine.active("own").length` 到顶就 `skipped: "slots-full"`；
   账本 `planned`/`working` 的单数只作兜底，服务重启时 `engine.restore(book)` 会把在跑的实例补回来。
   每轮补单数 = `min(maxRunning - 在跑数, maxPerRound)`，所以 `maxPerRound` 默认也跟着变成 2（空着两个槽就一轮补两条）。
 - 派单侧仍靠 `run.lock`（含 CLI `foreman run`）；合并不在定时器里跑，所以「正在合 PR」不会挡「正在派单」。
 - 会话层也分开：**派单会话**（`foreman-派单-<时间戳>`，读派单提示词，只做续跑/接单）与**合并会话**
-  （`foreman-合并-<时间戳>`，读合并提示词，只管合 PR）。账本 `sessions.kind` 记 `deliver:dispatch` / `deliver:merge` 区分。
+  （`foreman-合并-<时间戳>`，读合并提示词，判断可合性 + 解冲突，不自己合）。账本 `sessions.kind` 记 `deliver:dispatch` / `deliver:merge`，
+  `sessions.notice` 记触发类型（只有「PR待合并」会被合并判断链路消费，「合并完成」只是回执）。
 - 派单判定完一条会话，**不再当场合并、也不再入队**：会话自己 push + 开 PR，工单置 `pr-open`，
   通知里写「合并：PR 已开好，核对工单/改动后自己跑 `foreman pr merge <N>`」，然后立刻返回。
 - 合并结果单独通知：`foreman-合并-*` 会话（`deliver.mode: new`）或 `dws notify`（`existing`，回给登记的通知目标，
   **不回给已经收工的执行会话**）；CLI `foreman pr merge` 触发的合并不发通知。
 - `foreman status` 里能看：`pickup.maxRunning / inflight`、`lanes.dispatch.workflowActive`、`merge.queued`、
-  `workflow.{workflows,stages,nodes,active,runs,recent}`。
+  `merge.judge`（合并助手判断账：pending / merged / held / failed）、`workflow.{workflows,stages,nodes,active,runs,recent}`。
 
 ## 常驻服务与会话监听
 
@@ -174,13 +180,14 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 
 - `deliver.mode: "new"`（默认）：**每条通知都新建一条豆包会话**，且**按通道分两类会话**：
   - **派单会话**（`foreman-派单-<YYYYMMDD-HHmm>`）：读 `promptFile`（派单提示词），只做**续跑 / 接单**；
-  - **合并会话**（`foreman-合并-<YYYYMMDD-HHmm>`）：读 `mergePromptFile`（合并提示词，回落到 `promptFile`），只做**合 PR**。
+  - **合并会话**（`foreman-合并-<YYYYMMDD-HHmm>`）：读 `mergePromptFile`（合并提示词，回落到 `promptFile`），只做**判断可合性 + 解冲突**，交 RESULT 给 workflow 合并。
   首句 = 对应通道的提示词（运行时副本）+ `产品：<products[].name>` + `监控项目：<products[].projectDir>`
   + `触发：<类型>` + **`通道：派单（在跑 n / 上限 m）`** 或 **`通道：合并（1 并发，只管合 PR）`** + 这条通知正文，
   用 `dws open --no-wait` 投递（只确认首句送达，不等第一轮回复）。
   **这条会话是编排者，不是执行者**：首句明确写了「不要自己改代码实现工单」，通知正文只是决策输入，不是派给它的实现任务。
   提示词与项目目录按工单所属产品取（`products[]`）；没配 products 时用顶层 `deliver.promptFile` / `deliver.mergePromptFile` / `deliver.projectDir`。
-  新会话记进账本 `sessions`（`kind` = `deliver:dispatch` / `deliver:merge`）但 `notify: false`，**不纳入监听**——它是编排者，纳入会自己通知自己。
+  新会话记进账本 `sessions`（`kind` = `deliver:dispatch` / `deliver:merge`、`notice` = 触发类型）但 `notify: false`，**不纳入监听**——它是编排者，纳入会自己通知自己。
+  合并会话的判断结论由 `mergeVerdictOnce` 单独收（只认 `notice: "PR待合并"`，`merge.verdictAutoMerge` 关掉就只判不合）。
 - `deliver.mode: "existing"`：旧行为，塞回已有会话——目标 = 登记时写的 `notifyTo`，
   没写取 `notify.session`（`auto` → 环境变量 `MCP_VM_CONVERSATION_ID`）。合并结果不走执行会话自己。
 - 正文含仓库、工单号、结论类别、PR 链接（有则带）。结论类别由服务用 `dws info` 读最后回复、
@@ -224,7 +231,7 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
   - `earliest`（默认）= 账本 `sessions` 里**最早登记**、有 `convId` 的那个会话，即第一个调用方；
   - 也可以直接写死会话 id 或侧边栏标题。
 - 有冲突的 PR 默认过滤（`prWatch.filterConflicts`，查 `pr-view` 的 `mergeNote`），不合也不报。
-- 作者不是自己的 PR **只通知、监听里不合**（看不到关联工单）；通知带 `foreman pr merge <N> --repo R`，由合并会话核对工单后用 `foreman pr merge` 当场合（合并通道已取消，不再排队），合不了回理由。
+- 作者不是自己的 PR **只通知、监听里不合**（看不到关联工单）；通知先交给合并助手核对归属/基线、解冲突，它交回的 RESULT 里 `mergeable=true` 才由 workflow（`runMergeTask`）合并，判不下来就记 `mergeJudge` 交给人。
 - 去重记在 `state.json` 的 `prWatch` 键（`<repo>#<number>`），**发成功才盖 `notifiedAt`**；发送失败下一轮重试，重启不重发。
 - 账本里还没有调用方会话时：`existing` 模式这轮不发、也不记账；`new` 模式不受影响（每次都新建会话）。
 - 起服务 1s 后先扫一遍，之后按间隔跑。

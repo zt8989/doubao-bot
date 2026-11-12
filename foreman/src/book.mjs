@@ -95,6 +95,27 @@ export class Book {
     return this.mergeAsk[key]
   }
 
+  // 合并助手的判断账：{ "<合并会话名>": { status, reason, tasks, attempts, at } }
+  // status：merging / merged / merge-failed / held / no-result / gone。
+  // 一次判断只消费一次：判过就不再读这条会话（单实例下读 info 要切用户窗口）。
+  get mergeJudge() {
+    return this.data.mergeJudge ?? (this.data.mergeJudge = {})
+  }
+
+  markMergeJudge(name, patch = {}) {
+    this.reload()
+    const k = String(name ?? "")
+    const prev = this.mergeJudge[k] ?? {}
+    this.mergeJudge[k] = {
+      ...prev,
+      ...patch,
+      at: nowIso(),
+      attempts: Number(patch.attempts ?? prev.attempts ?? 0) || 0,
+    }
+    this.save()
+    return this.mergeJudge[k]
+  }
+
   issue(key) {
     return this.issues[key] ?? null
   }
