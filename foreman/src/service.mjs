@@ -645,6 +645,14 @@ export async function prPollOnce(ctx) {
       log(`PR 扫描失败：${e.message}`)
       return { ok: false, error: e.message }
     }
+    // 通知会话收尾：它报过的 PR 都合完了就归档，别把「PR待合并」会话一直留在侧边栏。
+    // 每轮扫描后统一扫一遍：自动合并、CLI 手动合并、原本已合（skipped=merged）都能收干净。
+    try {
+      const archivedNotes = await archiveMergedNotices({ dws, stateFile: cfg.stateFile, log })
+      if (archivedNotes.length) out.cleanup = [...(out.cleanup ?? []), ...archivedNotes]
+    } catch (e) {
+      log(`归档通知会话失败：${e.message}`)
+    }
     state.pr.lastPollAt = nowIso()
     state.pr.pollCount++
     if (out?.notified) state.pr.notifiedCount += out.notified
@@ -761,6 +769,7 @@ export async function pollOnce(ctx) {
             }
           }
           bookM.markMergeAsked(md.key, { pr: md.pr, url: md.prUrl, status: "merged" })
+          bookM.markPrSeen(md.key, { repo: md.repo, number: md.pr, url: md.prUrl, skipped: "merged", merged: true })
           merged = true
           out.merged = (out.merged ?? 0) + 1
           log(`已合并 ${md.repo}#${md.pr}（${md.key}）`)
@@ -771,6 +780,7 @@ export async function pollOnce(ctx) {
           const msg = String(e?.message ?? e ?? "")
           if (/无需重复合并|已经合并|已合并/.test(msg)) {
             bookM.markMergeAsked(md.key, { pr: md.pr, url: md.prUrl, status: "merged" })
+            bookM.markPrSeen(md.key, { repo: md.repo, number: md.pr, url: md.prUrl, skipped: "merged", merged: true })
             merged = true
             out.merged = (out.merged ?? 0) + 1
             log(`${md.repo}#${md.pr} 已经是合并状态，按已合并收尾（${md.key}）`)
@@ -792,6 +802,14 @@ export async function pollOnce(ctx) {
       // （豆包 adapter 在 pr.merged 上归档执行会话）。失败只记 notes，不推翻 merged。
       if (merged && resultOut) {
         resultOut.cleanup = await engine.afterMerge({ watcher: w, merge: md, book: bookM })
+        try {
+          const nn = await archiveMergedNotices({ dws, stateFile: cfg.stateFile, log })
+          if (resultOut.cleanup && nn.length) {
+            resultOut.cleanup.notes = [...(resultOut.cleanup.notes ?? []), ...nn]
+          }
+        } catch (e) {
+          log(`归档通知会话失败：${e.message}`)
+        }
       }
 
       const book2 = new Book(cfg.stateFile)
@@ -981,6 +999,38 @@ export async function cleanupPrArtifacts({ repoDir, worktree, branch = "" } = {}
   return { notes }
 }
 
+// archiveMergedNotices：一条「PR待合并」通知会话报过的 PR 全部合完后，自动把这条会话归档。
+// 早先只有执行会话会在 pr.merged 上被归档，通知会话没人管：一条条留在侧边栏里，
+// 既没人读也没人收（#235 与重复投递出的两条 #238 会话就是这么积下来的）。
+// 只动 foreman 自己新建的投递会话（notices 账本里登记的），不碰执行会话与用户自己的会话。
+export async function archiveMergedNotices({ dws, stateFile, log = () => {} } = {}) {
+  const notes = []
+  if (!dws || typeof dws.archive !== "function" || !stateFile) return notes
+  const b = new Book(stateFile)
+  for (const [target, info] of Object.entries(b.notices)) {
+    const prs = Array.isArray(info?.prs) ? info.prs : []
+    if (!prs.length) continue
+    const allDone = prs.every((k) => {
+      const rec = b.prSeen[k]
+      return rec && (rec.merged === true || rec.skipped === "merged")
+    })
+    if (!allDone) continue
+    const name = String(info?.name || target)
+    try {
+      await dws.archive(name)
+      new Book(stateFile).delNotice(target)
+      notes.push(`通知会话 ${name} 已归档`)
+      log(`已归档通知会话（它报的 PR 都合完了）：${name}`)
+    } catch (e) {
+      const msg = String(e?.message ?? e ?? "")
+      // 归档不成功不推翻合并事实：只记一笔，notice 记录留着，下一轮再试。
+      notes.push(`通知会话 ${name} 归档失败：${msg.slice(0, 120)}`)
+      log(`归档通知会话 ${name} 失败：${msg}`)
+    }
+  }
+  return notes
+}
+
 export async function handleRequest(ctx, req) {
   const id = req?.id
   const ok = (extra) => ({ id, ok: true, ...extra })
@@ -1093,6 +1143,8 @@ export async function handleRequest(ctx, req) {
       url: String(req.url ?? ""),
       alreadyMerged,
     })
+    // 通知会话收尾：它报的 PR 现在都合完了，自动归档，别把会话留在侧边栏。
+    done.notes.push(...(await archiveMergedNotices({ dws: ctx.dws, stateFile: ctx.cfg.stateFile, log: ctx.log })))
     ctx.consoleStore?.event({
       kind: "pr_merge", key: `${repo}#${number}`, repo, number,
       to: "merged", detail: `${style}${issueNo ? ` · 关单 #${issueNo}` : ""}`,

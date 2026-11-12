@@ -143,12 +143,14 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
   }
 
   let sentTo = target
+  let convId = ""
   try {
     if (useNew) {
       // 一轮可能跨多个仓库：全部来自同一个仓库才按产品取提示词，否则回落全局 deliver。
       const repo = fresh.every((pr) => pr.repo === fresh[0].repo) ? fresh[0].repo : ""
       const out = await deliver({ text: prNotifyText(fresh), kind: "PR待合并", repo })
       sentTo = out?.session || out?.convId || ""
+      convId = String(out?.convId ?? "")
     } else {
       await dws.notify(target, prNotifyText(fresh))
     }
@@ -158,6 +160,11 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
   }
   const book2 = new Book(cfg.stateFile)
   for (const pr of fresh) book2.markPrSeen(pr.key, { ...pr, notifiedTo: sentTo, via: useNew ? "new-session" : "existing" })
+  // 新建的投递会话登记进 notices：它报过的 PR 全合完之后由服务自动归档，
+  // 不然这些「PR待合并」会话会一条条留在侧边栏里（既没人读、也没人收）。
+  if (useNew && sentTo) {
+    book2.markNotice(sentTo, { name: sentTo, convId, kind: "PR待合并", prs: fresh.map((p) => p.key) })
+  }
   log(`PR 扫描：${fresh.length} 条新 PR 已交给 ${sentTo || "新会话"} 合并（${fresh.map((p) => `${p.repo}#${p.number}`).join("、")}）`)
   return { ok: true, checked, notified: fresh.length, conflicting, target, via: useNew ? "new-session" : "existing", prs: fresh.map((p) => p.key), at: nowIso() }
 }

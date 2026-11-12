@@ -34,7 +34,10 @@ export class Book {
   }
 
   // 记一条 PR 见过/已通知；notifiedAt 只有真发出去时才盖。
+  // 先 reload：PR 扫描与合并、CLI 会并发写同一个 state.json，拿着旧快照整文件覆盖会把
+  // 刚写进去的 notifiedTo 抹掉（#238 就是这么丢的；丢了就找不到该归档的通知会话）。
   markPrSeen(key, pr = {}) {
+    this.reload()
     const prev = this.prSeen[key] ?? {}
     this.prSeen[key] = {
       ...prev,
@@ -147,6 +150,34 @@ export class Book {
     const i = list.findIndex((w) => String(w.target) === String(target))
     if (i < 0) return false
     list.splice(i, 1)
+    this.save()
+    return true
+  }
+
+  // 通知会话账本：{ "<会话名>": { name, convId, kind, at, prs: ["repo#pr", ...] } }
+  // 只记 foreman 自己新建的投递会话，用来在它报过的 PR 全部合完后自动归档。
+  get notices() {
+    return this.data.notices ?? (this.data.notices = {})
+  }
+
+  markNotice(key, info = {}) {
+    this.reload()
+    const prev = this.notices[key] ?? {}
+    this.notices[key] = {
+      name: String(info.name ?? prev.name ?? key),
+      convId: String(info.convId ?? prev.convId ?? ""),
+      kind: String(info.kind ?? prev.kind ?? ""),
+      at: prev.at ?? nowIso(),
+      prs: info.prs ?? prev.prs ?? [],
+    }
+    this.save()
+    return this.notices[key]
+  }
+
+  delNotice(key) {
+    this.reload()
+    if (!this.notices[key]) return false
+    delete this.notices[key]
     this.save()
     return true
   }
