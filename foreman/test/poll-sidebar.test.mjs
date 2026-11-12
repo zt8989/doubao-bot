@@ -78,3 +78,58 @@ test("侧边栏读不到：退回逐条 status，不漏通知", async () => {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("收工那一轮处理完就落 idle，下一轮不再读 status", async () => {
+  const { ctx, calls, dir } = mkCtx({
+    runningMap: async () => ({ "conv-a": { running: false, title: "w" } }),
+    status: async () => ({ streaming: false, finished: true, chars: 500, head: "H", tail: "T", status: "ok" }),
+  })
+  try {
+    await pollOnce(ctx)
+    assert.equal(calls.status, 1)
+    assert.equal(new Book(ctx.cfg.stateFile).notified["conv-a"].idle, true)
+    const r2 = await pollOnce(ctx)
+    assert.equal(r2.checked, 1)
+    assert.equal(calls.status, 1, "第二轮到 idle 了，不该再读 status")
+    assert.equal(calls.info, 1, "也不该再读 info")
+    assert.equal(ctx.state.watchers.get("conv-a").lastPhase, "idle")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("侧边栏又报 running：清掉 idle，收工后再判一轮并再通知", async () => {
+  let running = true
+  const { ctx, calls, dir } = mkCtx({
+    runningMap: async () => ({ "conv-a": { running, title: "w" } }),
+    status: async () => ({ streaming: false, finished: true, chars: 900, head: "H2", tail: "T2", status: "ok" }),
+  })
+  try {
+    new Book(ctx.cfg.stateFile).markIdle("conv-a")
+    await pollOnce(ctx) // 在跑：只记一笔，不读 status
+    assert.equal(calls.status, 0)
+    assert.equal(new Book(ctx.cfg.stateFile).notified["conv-a"].idle, false)
+    running = false
+    const r2 = await pollOnce(ctx) // 收工：读一次 status，指纹变了要再通知
+    assert.equal(calls.status, 1)
+    assert.equal(r2.notified, 1)
+    assert.equal(calls.notified.length, 1)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("侧边栏里没有这条、但上次已通知过：不再读 status", async () => {
+  const { ctx, calls, dir } = mkCtx({
+    runningMap: async () => ({ "conv-b": { running: false, title: "别的会话" } }),
+    status: async () => { throw new Error("不在侧边栏收工过的会话不该再读 status") },
+  })
+  try {
+    new Book(ctx.cfg.stateFile).markNotified("conv-a", "fp123", { phase: "finished", chars: 500 })
+    await pollOnce(ctx)
+    assert.equal(calls.status, 0)
+    assert.equal(ctx.state.watchers.get("conv-a").lastPhase, "gone")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

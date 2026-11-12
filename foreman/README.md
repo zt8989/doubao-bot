@@ -139,7 +139,7 @@ foreman status                # 在不在 + 监听明细 + lastPollAt / pollCoun
 - `service.log` — 服务日志，与 `run.log` 分开
 
 三个路径都可在配置里覆盖（测试用临时目录）。账本 `state.json` 新增两个顶层键：
-`watch`（显式登记的监听清单）、`notified`（已通知的指纹去重）。
+`watch`（显式登记的监听清单）、`notified`（已通知的指纹去重，`idle` 标记「这次收工已处理」）。
 
 ### 监听与判定
 
@@ -152,9 +152,18 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 
 在听的会话 = 这轮 run 派出去的（自动登记）∪ `watch add` 显式盯的，按会话去重，显式优先。
 
-服务每 `pollSeconds`（默认 20s）先 `dws list --json` 读一次侧边栏（不切窗口），**还在跑的会话直接跳过**；只有没在跑的才逐个跑 `dws status`（它内部要 `goto` 切到目标会话，逐条跑会把用户窗口反复拽走）。自动巡检也先读侧边栏，但**默认不因此停派**（派单通道要并行 2 张单）：只有在配置里显式打开 `pickup.pauseWhileRunning: true`（想回到「豆包单实例一次只跑一条」的老行为）时，才有在跑会话就跳过本轮（`window-busy`）。
+服务每 `pollSeconds`（默认 20s）先 `dws list --json` 读一次侧边栏（不切窗口），**以侧边栏的 `running` 为监听主判据**：
 
-对被判定为「没在跑」的会话跑 `dws status`：
+- `running` 真 → 只记一笔，`dws status` / `dws info` 都不碰（这两个内部都要 `goto`，一个都不读才不会把用户窗口拽走）；
+- `running` 假、且这次收工已经处理过 → 直接跳过，一个字节都不读（`notified` 里记 `idle`）；
+- `running` 假、还没处理过 → 收工这轮读一次 `dws status` 判结论，该通知就通知，然后落 `idle`；
+- 侧边栏再把它报成 `running` 时清掉 `idle`，等下一次收工重新判一轮。
+
+读不到侧边栏（`dws list` 失败）才退化为每轮逐条 `dws status`，不因此漏通知。
+
+自动巡检也先读侧边栏，但**默认不因此停派**（派单通道要并行 2 张单）：只有在配置里显式打开 `pickup.pauseWhileRunning: true`（想回到「豆包单实例一次只跑一条」的老行为）时，才有在跑会话就跳过本轮（`window-busy`）。
+
+收工那轮对 `dws status` 的判定：
 
 - `streaming` 真 → running，不动；`chars: 0`（dws 的"还没开始"坑）→ pending，不动。
 - `finished` 真 → finished；finished/streaming 都假但 `chars > 0` 且有 status 文本 → settled。只有这两种算跑完。

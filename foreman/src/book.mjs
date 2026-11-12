@@ -271,6 +271,35 @@ export class Book {
     return this.notified[key]
   }
 
+  // 收工这一轮已经处理过（通知了，或者没什么可通知）：记一笔 idle。
+  // 之后每轮只看侧边栏的 running，不再逐条 dws status —— 读 status 会 goto，
+  // 把用户窗口一遍遍拽到被监听的会话上。
+  markIdle(target, extra = {}) {
+    this.reload()
+    const key = String(target)
+    const prev = this.notified[key] ?? {}
+    this.notified[key] = {
+      ...prev,
+      ...(extra.fingerprint ? { fingerprint: extra.fingerprint } : {}),
+      idle: true,
+      idleAt: nowIso(),
+    }
+    this.save()
+    return this.notified[key]
+  }
+
+  // 侧边栏又把它报成 running：清掉 idle，等下一次收工重新判一轮。
+  clearIdle(target) {
+    this.reload()
+    const key = String(target)
+    const prev = this.notified[key]
+    if (!prev || !prev.idle) return prev ?? null
+    prev.idle = false
+    prev.wokeAt = nowIso()
+    this.save()
+    return prev
+  }
+
   // reload 从盘上重读：服务里一次 notify 可能耗时几十秒，期间别的进程（run/CLI）
   // 也在写同一个 state.json，长时间持有快照再整文件覆盖会把它们的改动抹掉。
   reload() {
