@@ -127,3 +127,69 @@ export async function recentCommits(wt, base, n = 10) {
   const r = await git(["log", "--format=%h %s", `origin/${base}..HEAD`, `-n`, String(n)], { cwd: wt })
   return r.stdout.trim()
 }
+
+// cleanupMergedWorktree：PR 合并后的本地收尾——关 herdr 工作区、删 git worktree、安全删本地分支。
+// 全部尽力而为：任何一步失败只写进 notes，不反过来推翻「已经合并」这个事实；
+// worktree 有未提交改动时 git worktree remove 会拒绝，那就保留并写明原因（不 force）。
+export async function cleanupMergedWorktree({
+  repoDir,
+  worktree,
+  branch = "",
+  herdrBin = "herdr",
+  useHerdr = true,
+  log = () => {},
+} = {}) {
+  const notes = []
+  const out = { herdrClosed: false, worktreeRemoved: false, branchDeleted: false, notes }
+  if (!worktree) {
+    notes.push("账本里没有 worktree 记录，跳过本地清理")
+    return out
+  }
+  repoDir = expandHome(repoDir)
+  worktree = expandHome(worktree)
+
+  if (useHerdr) {
+    try {
+      const r = await exec(herdrBin, ["workspace", "list"], { timeout: 60000 })
+      const list = JSON.parse(r.stdout)?.result?.workspaces ?? []
+      const hits = list.filter((w) => w?.worktree?.checkout_path === worktree)
+      for (const w of hits) {
+        await exec(herdrBin, ["workspace", "close", w.workspace_id], { timeout: 60000 })
+        out.herdrClosed = true
+        notes.push(`herdr 工作区 ${w.label || w.workspace_id} 已关闭`)
+      }
+      if (!hits.length) notes.push("herdr 里没有这个 worktree 对应的工作区")
+    } catch (e) {
+      notes.push(`herdr 收尾失败：${String(e.message).slice(0, 200)}`)
+    }
+  }
+
+  if (fs.existsSync(worktree)) {
+    try {
+      await git(["worktree", "remove", worktree], { cwd: repoDir, timeout: 120000 })
+      out.worktreeRemoved = true
+      notes.push("worktree 已删除")
+    } catch (e) {
+      notes.push(`worktree 保留（删除被拒，可能有未提交改动）：${String(e.message).slice(0, 200)}`)
+    }
+  } else {
+    out.worktreeRemoved = true
+    notes.push("worktree 目录已不存在")
+  }
+  try {
+    await git(["worktree", "prune"], { cwd: repoDir, timeout: 60000 })
+  } catch (e) {
+    log(`worktree prune 失败：${e.message}`)
+  }
+
+  if (branch) {
+    try {
+      await git(["branch", "-d", branch], { cwd: repoDir, timeout: 60000 })
+      out.branchDeleted = true
+      notes.push(`本地分支 ${branch} 已删除`)
+    } catch {
+      notes.push(`本地分支 ${branch} 保留（-d 判定未合并或分支不存在）`)
+    }
+  }
+  return out
+}

@@ -68,17 +68,33 @@ export function handoff({ repo, issue, worktree, branch }) {
     .join("\n")
 }
 
-// deliverPrompt：每次新建会话的首句 = 固定提示词（运行时副本，路径只从配置来）
-// + 产品 + 监控项目 + 这一次要处理的通知正文。固定提示词原文不动，只在其后追加本次上下文。
-export function deliverPrompt({ fixed = "", projectDir = "", product = "", kind = "", text = "" } = {}) {
+// deliverPrompt：每次新建会话的首句 = 编排提示词（运行时副本，路径只从配置来）
+// + 产品 + 监控项目 + 触发原因 + 本次通知正文。
+// 关键：这是**编排**提示词，新会话只决定「续跑 / 继续接单 / 自动合并」，
+// 不是「编排提示词 + 去完成这张工单」——实现永远在执行会话里，不在这条投递会话里。
+export function deliverPrompt({ fixed = "", projectDir = "", product = "", kind = "", text = "", running = null, maxRunning = null } = {}) {
   const head = String(fixed ?? "").trim()
   if (!head) throw new Error("固定提示词为空：检查 deliver.promptFile / products[].promptFile 指向的文件")
   const body = String(text ?? "").trim()
   const online = []
   if (product) online.push(`产品：${String(product).trim()}`)
   if (projectDir) online.push(`监控项目：${String(projectDir).trim()}`)
-  if (kind) online.push(`本次投递：${kind}`)
-  return [head, "", "---", "", ...(online.length ? [...online, ""] : []), "下面是本次要处理的内容：", "", body].join("\n")
+  if (kind) online.push(`触发：${String(kind).trim()}`)
+  if (Number.isFinite(running)) {
+    online.push(`在跑任务：${running}${Number.isFinite(maxRunning) ? ` / 上限 ${maxRunning}` : ""}`)
+  }
+  return [
+    head,
+    "",
+    "---",
+    "",
+    ...(online.length ? [...online, ""] : []),
+    // 角色与三条路已经在编排提示词（上面的 MD）里写过了，这里只点一下入口，不再复述一遍。
+    "按上面的编排提示词做决定，不要亲手实现工单。",
+    "下面是本次通知的上下文（只是决策输入，不是派给你的实现任务）：",
+    "",
+    body,
+  ].join("\n")
 }
 
 // noticeSessionName：新建会话的名字（豆包侧边栏标题），带上投递类型与时间，便于复查。

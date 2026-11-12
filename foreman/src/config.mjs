@@ -227,6 +227,10 @@ export function loadConfig(explicit) {
   cfg.deliver.namePrefix = String(cfg.deliver.namePrefix ?? "").trim() || "foreman"
   cfg.deliver.waitFirstReply = cfg.deliver.waitFirstReply === true
 
+  // dws 可执行文件：常驻服务的 PATH 不一定有 dws，建议在配置里写绝对路径（支持 ~）。
+  cfg.dws = cfg.dws && typeof cfg.dws === "object" ? cfg.dws : {}
+  cfg.dws.bin = expandHome(String(cfg.dws.bin ?? "dws").trim()) || "dws"
+
   // 产品分组：每个产品 = 一套 repos + 自己的 promptFile / projectDir（留空回落顶层 deliver）。
   // cfg.repos 一律摊平成产品仓库的并集，后续捞单/PR 扫描不用区分来源。
   cfg.products = normalizeProducts(cfg, baseDir)

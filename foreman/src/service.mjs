@@ -8,6 +8,9 @@ import { nowIso, sleep, inWorkHours } from "./util.mjs"
 import { Book } from "./book.mjs"
 import { parseResult, deliverPrompt, noticeSessionName } from "./prompts.mjs"
 import { notifyTarget, shouldNotify, notifyText, runRound, acquireLock, releaseLock } from "./orchestrator.mjs"
+import { WorkflowEngine } from "./workflow/engine.mjs"
+import { DoubaoSessionAdapter } from "./workflow/adapters/doubao.mjs"
+import { GiteaTrackerAdapter } from "./workflow/adapters/gitea.mjs"
 import { prWatchOnce, prWatchTarget, mergeFailureReason } from "./prwatch.mjs"
 import { plannerDecision, plannerTarget, plannerText, loadQueue } from "./planner.mjs"
 import { listPulls, mergePr, closeIssue, createPr, commentIssue } from "./gitea.mjs"
@@ -166,7 +169,10 @@ export async function deliverNewSession(ctx, { text = "", kind = "", repo = "", 
   const { cfg, dws, log = () => {} } = ctx
   const dc = deliverContextFor(cfg, repo || watcher?.repo || "")
   const fixed = readFixedPrompt(cfg, repo || watcher?.repo || "")
-  const prompt = deliverPrompt({ fixed, projectDir: dc.projectDir, product: dc.product, kind, text })
+  // 把「在跑几条 / 上限几条」也喂给编排会话：它据此决定续跑、继续接单还是自动合并。
+  const running = ctx.state?.watchers?.size
+  const maxRunning = Number(cfg?.planner?.maxRunning) || null
+  const prompt = deliverPrompt({ fixed, projectDir: dc.projectDir, product: dc.product, kind, text, running, maxRunning })
   const name = noticeSessionName({ prefix: cfg?.deliver?.namePrefix ?? "foreman", kind })
   const noWait = cfg?.deliver?.waitFirstReply !== true
   const out = await dws.openNew({ name, prompt, noWait })
@@ -228,12 +234,17 @@ export function notifyDecision({ cfg, watcher, book, env = process.env, result }
   const issueLike = { repo, number, title }
   const outLike = {
     state: event,
+    session: String(watcher?.target ?? ""),
+    sessionName: String(watcher?.name ?? ""),
     branch,
     pr,
     prUrl,
     merged: !!result?.merged,
     mergeError: result?.mergeError || "",
+    cleanup: result?.cleanup ?? null,
     reason: result?.summary || result?.question || "",
+    // 没解析出 RESULT：把最后一条回复带给编排会话（parseResult 的 none 分支把原文放在 text 里）。
+    lastReply: result?.status === "none" ? String(result?.text ?? "").trim() : "",
   }
   return { send: true, target, event, reason: "", text: notifyText(issueLike, outLike) }
 }
@@ -311,6 +322,20 @@ export async function pickupOnce(ctx, { run = runRound } = {}) {
   if (cfg.pickup?.auto !== true) return { ok: true, skipped: "disabled" }
   if (!inWorkHours(cfg)) return { ok: true, skipped: "off-hours" }
   if (state.pickup?.running) return { ok: true, skipped: "busy" }
+  // 豆包单实例：被监听的会话还在跑就别开新会话。
+  // 否则 dws open 切不到新会话，要么派单失败，要么把 kickoff 发进正在跑的那条。
+  if (typeof ctx.dws?.runningMap === "function") {
+    try {
+      const sidebar = await ctx.dws.runningMap()
+      const busyIds = [...(state.watchers?.keys() ?? [])].filter((id) => sidebar?.[id]?.running)
+      if (busyIds.length) {
+        log(`自动巡检：${busyIds.join("、")} 还在跑，本轮不派新会话（豆包单实例）`)
+        return { ok: true, skipped: "window-busy", busy: busyIds }
+      }
+    } catch {
+      // 侧边栏读不到不拦派单：dws open 自己有「没切到新会话就报错」的兜底。
+    }
+  }
   // 和 CLI 的 foreman run 抢同一把锁：两边同时捞会把同一条单派两次。
   const lockFile = path.join(path.dirname(cfg.stateFile), "run.lock")
   const lock = acquireLock(lockFile)
@@ -326,6 +351,12 @@ export async function pickupOnce(ctx, { run = runRound } = {}) {
       maxTotal: Number(cfg.pickup.maxPerRound) || 1,
     })
     const dispatched = handled.filter((h) => h.state === "dispatched")
+    const engine = ctx.engine ?? new WorkflowEngine({ cfg, session: ctx.dws, log })
+    for (const h of dispatched) {
+      const issueKey = `${h.repo}#${h.number}`
+      await engine.emit("issue.picked", { issueKey })
+      await engine.emit("session.dispatched", { issueKey, target: h.convId ?? h.agent ?? "" })
+    }
     state.pickup.lastAt = nowIso()
     state.pickup.count = (state.pickup.count ?? 0) + 1
     state.pickup.lastResult = {
@@ -392,7 +423,15 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     for (const w of watchersFor(b, cfg)) state.watchers.set(String(w.target), { ...w })
   }
 
-  const ctx = { state, cfg, dws, gitea, log, close: null, prPoll: null, httpUrl: "", consoleStore: null }
+  // 通用 workflow：生命周期 + 适配器。ctx.dws / ctx.gitea 现在是**适配器**（旧调用面保留）。
+  // 豆包相关的一切（单实例护栏、侧边栏读状态、归档）都在 DoubaoSessionAdapter 里。
+  const engine = new WorkflowEngine({
+    cfg,
+    session: new DoubaoSessionAdapter({ driver: dws, cfg, log }),
+    tracker: new GiteaTrackerAdapter({ impl: gitea }),
+    log,
+  })
+  const ctx = { state, cfg, dws: engine.session, gitea: engine.tracker, engine, log, close: null, prPoll: null, httpUrl: "", consoleStore: null }
   // 投递通道：new 模式每次新建会话；这里只做一次绑定，调用侧不用关心实现。
   ctx.deliver = (opts) => deliverNewSession(ctx, opts)
 
@@ -563,6 +602,8 @@ export async function prPollOnce(ctx) {
 // 跑一轮：现读 book → 对每个 watcher 跑 dws.status → 该通知就 dws.info + dws.notify + 落 notified。
 export async function pollOnce(ctx) {
   const { state, cfg, dws, log, gitea } = ctx
+  // 直接构造 ctx 的调用方（测试/脚本）没有 engine 时补一个，保证流程事件照样发。
+  const engine = ctx.engine ?? new WorkflowEngine({ cfg, session: dws, tracker: gitea, log })
   if (state.polling) return { checked: 0, settled: 0, notified: 0, skipped: "busy" }
   state.polling = true
   const out = { checked: 0, settled: 0, notified: 0 }
@@ -571,9 +612,27 @@ export async function pollOnce(ctx) {
     const watchers = watchersFor(book, cfg)
     state.watchers = new Map(watchers.map((w) => [String(w.target), { ...w }]))
 
+    // 先读一次侧边栏（不切窗口）：还在跑的会话只看这里，不逐条 dws status。
+    // 否则每 20s 轮询都会把用户窗口 goto 到被监听的会话上（表现为「一直被切回某条会话」）。
+    let sidebar = null
+    if (typeof dws.runningMap === "function") {
+      try {
+        sidebar = await dws.runningMap()
+      } catch (e) {
+        // 读不到侧边栏就退化为老行为（逐条 status），不因此漏掉通知。
+        log(`读侧边栏状态失败，本轮退回逐条 status：${e.message}`)
+      }
+    }
+
     for (const w of watchers) {
       out.checked++
       const rec = state.watchers.get(String(w.target))
+      const side = sidebar?.[String(w.target)]
+      if (side?.running) {
+        rec.lastPhase = "running"
+        rec.lastPollAt = nowIso()
+        continue
+      }
       let status
       try {
         status = await dws.status(w.target)
@@ -613,6 +672,7 @@ export async function pollOnce(ctx) {
           const patch = { state: st }
           if (Number(result.pr)) { patch.pr = Number(result.pr); patch.prUrl = result.prUrl ?? "" }
           new Book(cfg.stateFile).setIssue(w.issueKey, patch)
+          await engine.emit("issue.concluded", { issueKey: w.issueKey, target: w.target, status: result.status, pr: result.pr ?? null })
         }
       }
 
@@ -643,6 +703,12 @@ export async function pollOnce(ctx) {
         log(`跳过自动合并 ${w.target}：${md.reason}`)
       }
       const resultOut = result ? { ...result, merged, mergeError } : result
+
+      // 合并成功后的通用收尾（workflow 引擎）：清工作区 → workspace.cleaned → pr.merged
+      // （豆包 adapter 在 pr.merged 上归档执行会话）。失败只记 notes，不推翻 merged。
+      if (merged && resultOut) {
+        resultOut.cleanup = await engine.afterMerge({ watcher: w, merge: md, book: bookM })
+      }
 
       const book2 = new Book(cfg.stateFile)
       const nd = notifyDecision({ cfg, watcher: w, book: book2, env: process.env, result: resultOut })
@@ -708,6 +774,7 @@ export async function pollOnce(ctx) {
         state.notifiedCount++
         out.notified++
         rec.notifiedAt = nowIso()
+        await engine.emit("notice.delivered", { issueKey: w.issueKey ?? "", target: sentTo, kind: planKind || nd.event })
         log(`已通知 ${sentTo}：${w.target} 跑完（${decision.phase}/${nd.event}）${planNote ? `，${planNote}` : ""}`)
       } catch (e) {
         state.dwsErrors++
@@ -921,18 +988,27 @@ export async function handleRequest(ctx, req) {
         notifiedCount: ctx.state.pr?.notifiedCount ?? 0,
         pending: ctx.state.pr?.pending ?? 0,
       },
+      workflow: {
+        stages: ctx.engine?.stages() ?? [],
+        recent: (ctx.engine?.lifecycle.history ?? []).slice(-12),
+        archiveAfterMerge: ctx.cfg.workflow?.archiveAfterMerge !== false,
+      },
     })
   }
 
   if (cmd === "watch add") {
     const target = String(req?.target ?? "").trim()
     if (!target) return fail("bad_request", "watch add 需要 target")
+    const repo = String(req?.repo ?? "")
+    const number = req?.number ?? null
     const entry = {
       target,
       name: String(req?.name ?? target),
-      issueKey: req?.issueKey ?? null,
-      repo: req?.repo ?? "",
-      number: req?.number ?? null,
+      // repo + number 能推出 issueKey 就写上：后面推进工单状态、合并后关单都靠它，
+      // 缺了会出现「PR 合了、通知也发了，但工单还挂在 working」。
+      issueKey: req?.issueKey ?? (repo && number ? `${repo}#${number}` : null),
+      repo,
+      number,
       notifyTo: String(req?.notifyTo ?? ""),
     }
     const book = new Book(ctx.cfg.stateFile)

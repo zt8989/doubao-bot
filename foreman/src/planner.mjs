@@ -67,7 +67,8 @@ export function plannerText({ cfg, kind, watcher, result, running, maxRunning, i
   const head = `【foreman】${watcher?.issueKey || `${watcher?.repo ?? ""}#${watcher?.number ?? ""}`}`
   if (kind === "check") {
     const lines = [
-      `【foreman · 需要你看一下】${watcher?.issueKey || ""} 跑完但不是 done`,
+      `【foreman · 需要你看一下】${watcher?.issueKey || `${watcher?.repo ?? ""}#${watcher?.number ?? ""}`} 跑完但不是 done`,
+      `执行会话：${watcher?.target ?? ""}${watcher?.name && watcher.name !== watcher.target ? `（${watcher.name}）` : ""}`,
       `状态：${result?.status ?? "无 RESULT"}`,
       result?.summary ? `原因：${String(result.summary).slice(0, 300)}` : "",
       result?.question ? `要问的：${String(result.question).slice(0, 300)}` : "",

@@ -53,17 +53,24 @@ test("readFixedPrompt：路径只从配置来，缺了/读不到/空文件都直
   }
 })
 
-test("deliverPrompt：固定提示词原文在前，监控项目与本次正文在后", () => {
+test("deliverPrompt：编排提示词原文在前，只给编排决策，不派实现任务", () => {
   const fixed = "# 工作原则\n1. 不阻塞"
   const text = "【foreman】demo/demo#2 状态：done"
-  const out = deliverPrompt({ fixed, projectDir: "/w/win-ai-stack", kind: "工单结论", text })
+  const out = deliverPrompt({ fixed, projectDir: "/w/win-ai-stack", kind: "工单结论", text, running: 1, maxRunning: 2 })
   assert.match(out, /^# 工作原则/)
   assert.match(out, /1\. 不阻塞/)
   assert.match(out, /监控项目：\/w\/win-ai-stack/)
-  assert.match(out, /本次投递：工单结论/)
-  assert.match(out, /下面是本次要处理的内容：/)
+  assert.match(out, /触发：工单结论/)
+  assert.match(out, /在跑任务：1 \/ 上限 2/)
   assert.match(out, /【foreman】demo\/demo#2 状态：done/)
-  // 没给项目/类型也要能拼出来
+  // 角色与三条路只在编排提示词（MD）里说一遍，组装层不复述，避免同一段身份说明出现两次。
+  assert.match(out, /按上面的编排提示词做决定，不要亲手实现工单/)
+  assert.match(out, /不是派给你的实现任务/)
+  assert.ok(!out.includes("你的角色是编排者，不是这张工单的执行者"))
+  assert.ok(!out.includes("由你决定下一步"))
+  // 不能再写成「本次要处理的内容」（那样 AI 会把它当工单去做）。
+  assert.ok(!out.includes("下面是本次要处理的内容"))
+  // 没给项目/类型/在跑数也要能拼出来
   assert.match(deliverPrompt({ fixed, text: "只有正文" }), /只有正文/)
   assert.throws(() => deliverPrompt({ fixed: "  ", text: "x" }), /固定提示词为空/)
 })

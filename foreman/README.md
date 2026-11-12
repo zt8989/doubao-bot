@@ -12,6 +12,10 @@
 foreman 自己不碰豆包内部实现（只走 dws 的命令行），也不手写 worktree（交给 herdr），
 Gitea 侧一律走 opencli。
 
+**架构：通用 workflow = 生命周期 + 适配器**（`src/workflow/`）。流程只认生命周期事件
+（捞单 → 工作区 → 派活 → 监听 → 结论 → 合并 → 清理 → 归档 → 通知），豆包 / Gitea / herdr 的差异全部收在
+`src/workflow/adapters/` 里；换会话载体或工单系统时写个适配器即可。详见 `docs/workflow.md`。
+
 ## 一轮做什么
 
 ```
@@ -80,8 +84,8 @@ foreman status                # 在不在 + 监听明细 + lastPollAt / pollCoun
 - 数据：账本（`issues` / `prWatch`）同步进 SQLite；唯一键 `"<owner>/<repo>#<number>"`，
   重复同步只更新状态与 `last_seen_at`，`first_seen_at` 保留第一次发现，**按工单去重、不重复出行**。
 - 接口：`GET /api/snapshot`（当天任务 + PR）、`GET /api/polls`（最近扫描记录）、
-  `GET /api/history?days=N`（历史事件，`days=0` 全部）、`POST /api/sync`（立刻扫一轮 PR 并落库）。
-- 页面第二块是「历史」：按天分组的事件流水，可切 今天 / 近 7 天 / 近 30 天 / 全部。
+  `GET /api/history?days=N&day=YYYY-MM-DD`（事件流水）、`POST /api/sync`（立刻扫一轮 PR 并落库）。
+- 顶栏有「看哪天」日期选择（原生日历）：换一天，指标卡 / 任务表 / PR 列表全部切成那天的口径（状态从 `events` 回放，标题写 `2026-11-11 分配任务`），非今天时出现「回到今天」；`/?day=YYYY-MM-DD` 也能直接打开那天。没有单独的「历史」面板。表格里的 `仓库#号` 是链接，点开就是 Gitea 的工单/PR 页面（新标签页）。
   事件表 `events` 跟账本同库，记 `task_new` / `task_state` / `task_attempt` / `pr_new` / `pr_state` /
   `pr_open` / `pr_merge` / `issue_comment` / `issue_close`。`sync` 比对上一行状态自动记（同一状态不重复），
   `pr open|merge`、`issue comment|close` 由服务显式记；老库第一次升级会按现有单/PR 回填一批（detail 标「（回填）」）。
@@ -115,7 +119,9 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 
 在听的会话 = 这轮 run 派出去的（自动登记）∪ `watch add` 显式盯的，按会话去重，显式优先。
 
-服务每 `pollSeconds`（默认 20s）对每个会话跑 `dws status`：
+服务每 `pollSeconds`（默认 20s）先 `dws list --json` 读一次侧边栏（不切窗口），**还在跑的会话直接跳过**；只有没在跑的才逐个跑 `dws status`（它内部要 `goto` 切到目标会话，逐条跑会把用户窗口反复拽走）。自动巡检同理：有被监听会话还在跑，本轮就不派新会话（`window-busy`），避免豆包单实例下开会话失败或把 kickoff 发进正在跑的会话。
+
+对被判定为「没在跑」的会话跑 `dws status`：
 
 - `streaming` 真 → running，不动；`chars: 0`（dws 的"还没开始"坑）→ pending，不动。
 - `finished` 真 → finished；finished/streaming 都假但 `chars > 0` 且有 status 文本 → settled。只有这两种算跑完。
@@ -124,9 +130,14 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 
 ### 通知口径：默认每次新建会话
 
-- `deliver.mode: "new"`（默认）：**每条通知都新建一条豆包会话**。首句 = `deliver.promptFile`
-  （固定提示词，运行时副本）+ `监控项目：<deliver.projectDir>` + 这条通知正文，
+- `deliver.mode: "new"`（默认）：**每条通知都新建一条豆包会话**。首句 = **编排提示词**
+  （运行时副本）+ `产品：<products[].name>` + `监控项目：<products[].projectDir>` + `触发：<类型>`
+  + `在跑任务：N / 上限 M` + 这条通知正文，
   用 `dws open --no-wait` 投递（只确认首句送达，不等第一轮回复）。
+  **这条会话是编排者，不是执行者**：任务完成、或在跑任务数低于上限时触发，由它决定
+  **续跑这条已完成的工单 / 继续接下一条待办 / 自动合并已开的 PR**；
+  首句明确写了「不要自己改代码实现工单」，通知正文只是决策输入，不是派给它的实现任务。
+  提示词与项目目录按工单所属产品取（`products[]`）；没配 products 时用顶层 `deliver.promptFile` / `deliver.projectDir`。
   新会话记进账本 `sessions` 但 `notify: false`，**不纳入监听**——它是编排者，纳入会自己通知自己。
 - `deliver.mode: "existing"`：旧行为，塞回已有会话——目标 = 登记时写的 `notifyTo`，
   没写取 `notify.session`（`auto` → 环境变量 `MCP_VM_CONVERSATION_ID`）。
@@ -211,6 +222,35 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 - 结论不是 `done` → 发「需要你看一下」，带状态/原因/分支/PR 和 `foreman retry` 提示
 - 同一 `(会话, 指纹)` 只提醒一次（账本 `planner.lastKey`）；目标 `planner.target`（默认 `auto` = 最早登记的调用方）
 
+### 产品分组（products）
+
+一个产品 = 一套自己的项目群（仓库列表）+ 单独的提示词 + 监控项目根目录：
+
+```json
+"products": [
+  {
+    "name": "win-ai-stack",
+    "projectDir": "~/Documents/workspace/win-ai-stack",
+    "promptFile": "~/.foreman/prompts/工作原则与工作流-提示词.md",
+    "repos": [
+      { "name": "win-ai-harness", "repo": "yyzl/win-ai-harness", "dir": "~/Documents/workspace/win-ai-stack/win-ai-harness", "base": "sit-20261126" },
+      { "name": "yyjz-oa-cloud", "repo": "yyzl/yyjz-oa-cloud", "dir": "~/Documents/workspace/win-ai-stack/YYJZ_OA_CLOUD", "base": "sit-20261126" }
+    ]
+  },
+  {
+    "name": "<另一个产品>",
+    "projectDir": "<它的项目根目录>",
+    "promptFile": "<这个产品自己的提示词文件>",
+    "repos": [ { "repo": "owner/name", "dir": "…", "base": "…" } ]
+  }
+]
+```
+
+- 配了 `products` 就以它为准：捞单、PR 扫描、投递都按产品走（内部把各产品仓库摊平成一张清单）；
+- `promptFile` / `projectDir` 留空时回落顶层 `deliver` 同名配置（老配置不用改）；
+- 加新产品只改配置：加一段 `products[]`，给它的提示词文件，重启服务即可，不用动代码；
+- PR 一轮可能跨多个仓库：全部来自同一仓库才按产品取提示词，混合时用全局 `deliver`。
+
 ### 自动巡检（pickup.auto）
 
 `pickup.auto: true` 时，服务自己就是调度器，不用外部 cron、也不用守着敲 `foreman run`：
@@ -275,13 +315,20 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
     "ignoreAuthors": ["<你的 Gitea 用户名>"],
     "notifyTarget": "earliest"
   },
-  "repos": [
+  "products": [
     {
-      "name": "win-ai-harness",
-      "repo": "yyzl/win-ai-harness",
-      "dir": "~/Documents/workspace/win-ai-harness",
-      "base": "sit-20261126",
-      "verify": ["mvn -q -DskipTests=false test"]
+      "name": "win-ai-stack",
+      "projectDir": "~/Documents/workspace/win-ai-stack",
+      "promptFile": "~/.foreman/prompts/工作原则与工作流-提示词.md",
+      "repos": [
+        {
+          "name": "win-ai-harness",
+          "repo": "yyzl/win-ai-harness",
+          "dir": "~/Documents/workspace/win-ai-stack/win-ai-harness",
+          "base": "sit-20261126",
+          "verify": ["mvn -q -DskipTests=false test"]
+        }
+      ]
     }
   ]
 }
@@ -289,7 +336,7 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 
 要点：
 
-- **基线写在 `repos[].base`**（本工程当前 `sit-20261126`），代码不写死；分支、worktree、验收的 `origin/<base>..HEAD` 都按它算。
+- **基线写在 `products[].repos[].base`**（没配 products 时是顶层 `repos[].base`；本工程当前 `sit-20261126`），代码不写死；分支、worktree、验收的 `origin/<base>..HEAD` 都按它算。
 - **`pickup.labelIds` 必须用数字 id，别用名字**。opencli 的列表接口不回 labels，
   按名字配会静默捞 0 条；`label-list` 能查名→id（`ready-for-agent` 当前是 5）。
 - 配了 `labelIds` 后不再拿名字做二次过滤（列表里本来就没有 labels）。

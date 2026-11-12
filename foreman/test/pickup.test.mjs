@@ -71,12 +71,16 @@ test("已处理过（CLOSED_STATES）的单不再捞", () => {
   }
 })
 
-test("working 且 attempts 到上限的跳过，没到上限的还能接", () => {
+test("在飞（working 无 lastFailure）的单不再捞，续跑交给编排/retry；派单失败且没到上限的还能自动重试", () => {
   const c = cfg()
-  const b = book({ "yyzl/win-ai-harness#1": { state: "working", attempts: 3 } })
-  assert.equal(eligible([issue(1)], repoCfg, c, b).length, 0)
-  const b2 = book({ "yyzl/win-ai-harness#1": { state: "working", attempts: 1 } })
-  assert.equal(eligible([issue(1)], repoCfg, c, b2).length, 1)
+  const inflight = book({ "yyzl/win-ai-harness#1": { state: "working", attempts: 1, lastFailure: "" } })
+  assert.equal(eligible([issue(1)], repoCfg, c, inflight).length, 0, "在跑的单每轮都捞会重复发「继续处理」")
+  const capped = book({ "yyzl/win-ai-harness#1": { state: "working", attempts: 3, lastFailure: "上次没跑通" } })
+  assert.equal(eligible([issue(1)], repoCfg, c, capped).length, 0)
+  const dispatchFailed = book({ "yyzl/win-ai-harness#1": { state: "working", attempts: 1, lastFailure: "上次没跑通" } })
+  assert.equal(eligible([issue(1)], repoCfg, c, dispatchFailed).length, 1)
+  const retried = book({ "yyzl/win-ai-harness#1": { state: "planned", attempts: 2 } })
+  assert.equal(eligible([issue(1)], repoCfg, c, retried).length, 1, "retry 放回队列的要能再接")
 })
 
 test("排序：默认最老先接，newest 反过来", () => {
@@ -201,4 +205,25 @@ test("自动巡检：队列空了只写一句话，不记派单", async () => {
   assert.equal(r.dispatched, 0)
   assert.equal(ctx.state.pickup.count, 1)
   assert.match(logs[0], /没有可接的活/)
+})
+
+test("自动巡检：有被监听会话还在跑就不开新会话（豆包单实例）", async () => {
+  const { ctx, logs } = pickupCtx()
+  ctx.state.watchers = new Map([["conv-running", { target: "conv-running" }]])
+  ctx.dws = { runningMap: async () => ({ "conv-running": { running: true } }) }
+  let called = 0
+  const r = await pickupOnce(ctx, { run: async () => { called++; return [] } })
+  assert.equal(r.skipped, "window-busy")
+  assert.deepEqual(r.busy, ["conv-running"])
+  assert.equal(called, 0)
+  assert.match(logs[0], /还在跑，本轮不派新会话/)
+})
+
+test("自动巡检：侧边栏读不到不拦派单（dws open 自己有兜底）", async () => {
+  const { ctx } = pickupCtx()
+  ctx.state.watchers = new Map([["conv-x", { target: "conv-x" }]])
+  ctx.dws = { runningMap: async () => { throw new Error("list 失败") } }
+  const r = await pickupOnce(ctx, { run: async () => [] })
+  assert.equal(r.ok, true)
+  assert.equal(r.skipped, undefined)
 })

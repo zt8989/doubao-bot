@@ -104,6 +104,23 @@ export class DwsDriver {
     }
   }
 
+  // runningMap：只读侧边栏（dws list --json），**不切窗口**。
+  // 逐条 dws status 会把窗口 goto 到被监听的会话——服务每 20s 轮询时用户窗口就被拽走。
+  // 返回 { <会话id>: { running, title, active } }；读不到时抛错，由调用方退化回老行为。
+  async runningMap() {
+    const r = await this.json(["list", "--json"], { timeout: 60000 })
+    const out = {}
+    for (const t of r?.tasks ?? []) {
+      if (t?.id) out[String(t.id)] = { running: t.running === true, title: t.title ?? "", active: t.active === true }
+    }
+    return out
+  }
+
+  // archive：归档收起会话（dws 会留一份 markdown 存档，不是删除）。合并完成后由生命周期调用。
+  async archive(name) {
+    return this.run(["archive", name], { timeout: 60000 })
+  }
+
   async status(name) {
     const r = await this.json(["status", name, "--json"], { timeout: 120000 })
     const list = Array.isArray(r?.status) ? r.status : [r?.status ?? r]

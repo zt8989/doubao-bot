@@ -53,3 +53,22 @@ test("notifyText：失败也要说清原因，长原因截断", () => {
 test("NOTIFY_EVENTS 覆盖 pr-open（不合并时停在 PR 也要通知）", () => {
   assert.ok(NOTIFY_EVENTS.includes("pr-open"))
 })
+
+test("notifyText：带执行会话 id，编排会话才能 dws info 排查", () => {
+  const text = notifyText(
+    { repo: "yyzl/yyjz-oa-cloud", number: 114, title: "统一路由" },
+    { state: "failed", session: "38453346828920834", sessionName: "开工", reason: "没跑完" }
+  )
+  assert.match(text, /执行会话：38453346828920834（开工）/)
+  assert.ok(!text.includes("没有检测到 RESULT"), "有结论时不贴原文")
+})
+
+test("notifyText：没有 RESULT 就把最后一条回复贴给编排 AI", () => {
+  const text = notifyText(
+    { repo: "yyzl/yyjz-oa-cloud", number: 114 },
+    { state: "failed", session: "38453346828920834", sessionName: "38453346828920834", lastReply: "我先把 gateway 的路由读了一遍，还没改。" }
+  )
+  assert.match(text, /执行会话：38453346828920834\n/, "名字和 id 一样就不重复写")
+  assert.match(text, /没有检测到 RESULT，执行会话的最后一条回复原文：/)
+  assert.match(text, /我先把 gateway 的路由读了一遍，还没改。/)
+})

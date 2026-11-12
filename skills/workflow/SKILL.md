@@ -49,7 +49,7 @@ description: 端到端接单工作流：派活、建工作区、开会话、监�
 - `deliver.mode: "existing"` 才是塞回已有会话：`session` 写 `auto` → 取 `MCP_VM_CONVERSATION_ID`；也可写会话 id 或侧边栏标题。
 - 命令行：`foreman run --notify <会话id|标题>` 只改这一轮登记的通知目标（`existing` 模式）；`--no-notify` = 这一轮不登记监听，因此没有通知。
 - `existing` 下三种情况**不发**：`notify.enabled: false`、目标就是被监听会话自己、没配目标也没有环境变量；结论不在 `notify.events` 白名单也不发（显式盯的 `session-done` 例外）。
-- 正文含仓库、单号、结论类别、PR 链接，以及合并结果（有则带）；发送失败只写 `service.log`、计 `dwsErrors`，不打断轮询。
+- 正文含仓库、单号、结论类别、执行会话 id（编排会话靠它 `dws info` 排查/续跑）、PR 链接，以及合并结果（有则带）；没解析出 RESULT 时贴执行会话最后一条回复原文（末 1500 字）。**自动合并成功后服务会做本地收尾**：关 herdr 工作区、删 worktree、本地分支 `-d` 安全删（有未提交改动就保留并写明），通知带「清理：…」和 `<RESULT>{status:done, merged:true, pr, cleanup}</RESULT>`，通知会话随后可 `dws archive` 归档。发送失败只写 `service.log`、计 `dwsErrors`，不打断轮询。
 - **服务没在跑时通知会丢**：`foreman ping` → `foreman serve` → `foreman watch list` 看登记 → `foreman watch poll` 补一轮 → `foreman status` 看 `lastPollAt` / `pollCount` / `dwsErrors`。
 
 ## PR 监听（服务里 5 分钟一轮）

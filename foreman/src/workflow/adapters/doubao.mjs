@@ -1,0 +1,81 @@
+// 豆包（dws）会话适配器：所有「豆包才有的事」都收在这里，workflow 不再直接碰 dws。
+//
+// 收进来的豆包特殊性：
+// - 单实例桌面窗口：同时只有一条前台会话，派新会话前要看被监听的会话是不是还在跑（window-busy）；
+// - 读状态会切窗口：优先用 runningMap() 读侧边栏，只有没在跑的才逐条 status；
+// - 通知会话用 open --no-wait 新建（openNew），执行会话用 open / send；
+// - 归档 = dws archive（会留一份 markdown 存档，不是删除）。
+import { DwsDriver } from "../../dwsdrv.mjs"
+
+export class DoubaoSessionAdapter {
+  constructor({ driver = null, cfg = {}, log = () => {} } = {}) {
+    this.driver = driver ?? new DwsDriver({ bin: cfg.dws?.bin ?? "dws", mode: cfg.dws?.mode ?? "local", model: cfg.dws?.model ?? "auto", log })
+    this.cfg = cfg
+    this.log = log
+    this.capabilities = { singleInstance: true }
+  }
+
+  // ---- SessionAdapter 契约 ----
+  openExecution({ name, repo = "", prompt }) {
+    return this.driver.open({ name, repo, prompt })
+  }
+
+  resumeExecution({ name, prompt }) {
+    return this.driver.send(name, prompt)
+  }
+
+  deliver({ name, prompt, noWait = true }) {
+    return this.driver.openNew({ name, prompt, noWait })
+  }
+
+  // 兼容旧调用面（orchestrator / 既有测试直接当 DwsDriver 用）：语义与上面的契约方法一一对应。
+  open(args) {
+    return this.openExecution(args)
+  }
+
+  send(name, prompt) {
+    return this.resumeExecution({ name, prompt })
+  }
+
+  openNew(args) {
+    return this.deliver(args)
+  }
+
+  status(target) {
+    return this.driver.status(target)
+  }
+
+  info(target) {
+    return this.driver.info(target)
+  }
+
+  notify(target, text) {
+    return this.driver.notify(target, text)
+  }
+
+  runningMap() {
+    return this.driver.runningMap()
+  }
+
+  archive(target) {
+    return this.driver.archive(target)
+  }
+
+  // ---- 豆包特有的护栏 ----
+  // 被监听的会话里还在跑的那些：单实例下这时候开新会话必然失败或写错会话。
+  async busyWatchers(watcherIds = []) {
+    if (typeof this.driver.runningMap !== "function") return []
+    const sidebar = await this.runningMap()
+    return watcherIds.filter((id) => sidebar?.[id]?.running)
+  }
+
+  // ---- 生命周期 ----
+  async on(event, payload = {}) {
+    if (event !== "pr.merged") return
+    if (this.cfg.workflow?.archiveAfterMerge === false) return
+    const target = String(payload.target ?? "")
+    if (!target) return
+    await this.archive(target)
+    this.log(`豆包会话已归档（合并完成）：${target}`)
+  }
+}

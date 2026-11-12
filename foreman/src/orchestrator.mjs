@@ -37,16 +37,35 @@ export function shouldNotify(notify = {}, state = "") {
   return events.includes(String(state ?? ""))
 }
 
-// 通知正文：一眼能看出哪条单、什么结果、有没有 PR。
+// 通知正文：一眼能看出哪条单、什么结果、有没有 PR、是哪条会话跑出来的。
+// 执行会话 id 必须带：编排会话要靠它 dws info 排查 / 续跑，光给工单号无从下手。
 export function notifyText(issue = {}, out = {}) {
   const title = String(issue.title ?? "").trim()
   const head = `${issue.repo ? `${issue.repo} ` : ""}#${issue.number}${title ? ` ${title}` : ""}`
   const lines = [`【foreman】${head}`, `状态：${out.state ?? "unknown"}`]
+  if (out.session) lines.push(`执行会话：${out.session}${out.sessionName && out.sessionName !== out.session ? `（${out.sessionName}）` : ""}`)
   if (out.branch) lines.push(`分支：${out.branch}`)
   if (out.pr) lines.push(`PR：#${out.pr}${out.prUrl ? ` ${out.prUrl}` : ""}`)
   if (out.merged) lines.push(`合并：已合并 PR #${out.pr}`)
   else if (out.mergeError) lines.push(`合并失败：${String(out.mergeError).slice(0, 200)}`)
+  if (out.cleanup?.notes?.length) lines.push(`清理：${out.cleanup.notes.join("；")}`)
   if (out.reason) lines.push(`原因：${String(out.reason).slice(0, 200)}`)
+  // 合并也交一个 RESULT 块：编排会话读完就能收尾、这条通知会话随后可归档（dws archive）。
+  if (out.merged && out.pr) {
+    const summary = [`PR #${out.pr} 已合并`, ...(out.cleanup?.notes ?? [])].join("；")
+    lines.push("", `<RESULT>${JSON.stringify({
+      status: "done",
+      pr: out.pr,
+      prUrl: out.prUrl || "",
+      merged: true,
+      cleanup: out.cleanup?.notes ?? [],
+      summary: summary.slice(0, 400),
+    })}</RESULT>`)
+  }
+  // 没有 RESULT 时把执行会话的最后一条回复贴出来：编排侧不用猜它卡在哪。
+  if (out.lastReply) {
+    lines.push("", "没有检测到 RESULT，执行会话的最后一条回复原文：", String(out.lastReply).slice(-1500))
+  }
   return lines.join("\n")
 }
 
@@ -66,6 +85,9 @@ export function eligible(issues, repoCfg, cfg, book) {
     if (cfg.pickup.onlyUnassigned && (it.assignees ?? []).length) return false
     const rec = book.issue(issueKey(repoCfg.repo, it.number))
     if (rec && CLOSED_STATES.has(rec.state)) return false
+    // 在飞（working 且不是派单失败）不再捞：续跑是编排 AI / 人工 foreman retry 的决定。
+    // 否则每轮巡检都会给同一张单再发一次「继续处理」（#268 被连派两次就是这么来的）。
+    if (rec && rec.state === "working" && !rec.lastFailure) return false
     if (rec && rec.state === "working" && (rec.attempts ?? 0) >= cfg.maxAttempts) return false
     return true
   })
