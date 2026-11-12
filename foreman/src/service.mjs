@@ -694,12 +694,36 @@ export async function pollOnce(ctx) {
     for (const w of watchers) {
       out.checked++
       const rec = state.watchers.get(String(w.target))
-      const side = sidebar?.[String(w.target)]
+      const key = String(w.target)
+      const side = sidebar?.[key]
+      // 监听的主判据就是侧边栏的 running：
+      // - 在跑 → 只记一笔，不读 status/info（这两个都要 goto，会一遍遍把用户窗口拽到这条会话上）；
+      // - 没在跑、且这次收工已经处理过 → 直接跳过，一个字节都不读；
+      // - 没在跑、还没处理过 → 收工这轮读一次 status 判结论，该通知就通知。
+      // 侧边栏再把它报成 running 时才清掉 idle，等下一次收工。
+      book.reload()
+      const led = book.notified[key] ?? {}
       if (side?.running) {
+        if (led.idle) book.clearIdle(key)
         rec.lastPhase = "running"
         rec.lastPollAt = nowIso()
         continue
       }
+      if (side && led.idle) {
+        rec.lastPhase = "idle"
+        rec.lastPollAt = nowIso()
+        continue
+      }
+      // 侧边栏里根本没有这条（已归档/已收起）：处理过收工的老会话直接跳过，
+      // 否则这类会话每轮都要 goto 一次 status，白拽窗口。
+      if (sidebar && !side && led.fingerprint) {
+        rec.lastPhase = "gone"
+        rec.lastPollAt = nowIso()
+        continue
+      }
+      // 收工处理完（无论通知了还是没什么可通知）就把这条落成 idle，下一轮只看 running。
+      // 读不到侧边栏时（side 空的退化路径）不落：没有 running 可看，还得靠 status 兜着。
+      const park = () => { if (side) new Book(cfg.stateFile).markIdle(key) }
       let status
       try {
         status = await dws.status(w.target)
@@ -708,7 +732,7 @@ export async function pollOnce(ctx) {
         log(`dws status ${w.target} 失败：${e.message}`)
         continue
       }
-      const prev = book.notified[String(w.target)] ?? {}
+      const prev = book.notified[key] ?? {}
       // 同一指纹最多尝试 maxAttempts 次：dws.send 会「消息到了却报发送失败」，
       // 不封顶就会每轮 poll 补发一次，把调用方会话刷成重复通知。
       const decision = judgePoll(prev, status, { maxAttempts: notifyMaxAttempts(cfg) })
@@ -716,7 +740,11 @@ export async function pollOnce(ctx) {
       rec.lastFingerprint = decision.fingerprint
       rec.lastPollAt = nowIso()
       if (decision.phase === "finished" || decision.phase === "settled") out.settled++
-      if (!decision.shouldNotify) continue
+      if (!decision.shouldNotify) {
+        // status 说还在跑（侧边栏那一下是慢半拍）就别落 idle，下一轮再看。
+        if (decision.phase !== "running") park()
+        continue
+      }
 
       // 跑完且指纹变了：读最后回复 → 判 event → 决定通知 → 发。
       let result = null
@@ -830,11 +858,13 @@ export async function pollOnce(ctx) {
       const text = [nd.send ? nd.text : "", planBlock].filter(Boolean).join("\n\n")
       if (!text) {
         log(`通知跳过 ${w.target}：${nd.reason || "empty"}`)
+        park()
         continue
       }
       // existing 才需要「发给谁」；new 模式每次都新建会话，跟哪个会话在跑无关。
       if (mode === "existing" && (!target || target === String(w.target))) {
         log(`通知跳过 ${w.target}：${nd.reason || "no-target"}`)
+        park()
         continue
       }
       // 先记账再发：发送本身可能几十秒，崩溃/假失败时不能让下一轮从零重发。
@@ -860,6 +890,7 @@ export async function pollOnce(ctx) {
         rec.notifiedAt = nowIso()
         await engine.emit("notice.delivered", { issueKey: w.issueKey ?? "", target: sentTo, kind: planKind || nd.event })
         log(`已通知 ${sentTo}：${w.target} 跑完（${decision.phase}/${nd.event}）${planNote ? `，${planNote}` : ""}`)
+        park()
       } catch (e) {
         state.dwsErrors++
         const n = notifyMaxAttempts(cfg)
@@ -871,6 +902,8 @@ export async function pollOnce(ctx) {
         log(`通知 ${sentTo || "新会话"} 失败（第 ${led?.attempts ?? 1}/${n} 次）：${e.message}`)
         if ((led?.attempts ?? 1) >= n) {
           log(`通知 ${sentTo || "新会话"} 放弃重试：${w.target} 同指纹已试 ${n} 次`)
+          // 次数用光还落 idle：不然这条会话每轮都要读一次 status，白白拽走用户窗口。
+          park()
         }
       }
     }
