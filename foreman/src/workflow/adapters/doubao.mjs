@@ -6,6 +6,7 @@
 // - 通知会话用 open --no-wait 新建（openNew），执行会话用 open / send；
 // - 归档 = dws archive（会留一份 markdown 存档，不是删除）。
 import { DwsDriver } from "../../dwsdrv.mjs"
+import { startOperation, finishOperation } from "../../operations.mjs"
 
 export class DoubaoSessionAdapter {
   constructor({ driver = null, cfg = {}, log = () => {} } = {}) {
@@ -75,7 +76,14 @@ export class DoubaoSessionAdapter {
     if (this.cfg.workflow?.archiveAfterMerge === false) return
     const target = String(payload.target ?? "")
     if (!target) return
-    await this.archive(target)
-    this.log(`豆包会话已归档（合并完成）：${target}`)
+    const op = startOperation(this, "archive", "归档执行会话", { key: String(payload.issueKey || ""), detail: target })
+    try {
+      await this.archive(target)
+      this.log(`豆包会话已归档（合并完成）：${target}`)
+      finishOperation(this, op, "success", target)
+    } catch (e) {
+      finishOperation(this, op, "failed", e.message)
+      throw e
+    }
   }
 }

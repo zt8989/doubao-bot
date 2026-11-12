@@ -190,8 +190,10 @@ test("自动巡检：派出一条就记账、写日志，结束后释放锁", as
   assert.equal(ctx.state.pickup.count, 1)
   assert.ok(ctx.state.pickup.lastAt)
   assert.deepEqual(ctx.state.pickup.lastResult.handled, ["yyzl/win-ai-harness#268:dispatched"])
-  assert.equal(logs.length, 1)
-  assert.match(logs[0], /自动巡检：/)
+  const businessLogs = logs.filter((s) => !s.startsWith("[操作]"))
+  assert.equal(businessLogs.length, 1)
+  assert.match(businessLogs[0], /自动巡检：/)
+  assert.ok(logs.some((s) => s.includes("[操作] 正在巡检并派单")))
   // 每轮最多 maxPerRound 条，靠 ctx.maxTotal 交给 runRound；不带 once（每个仓库都要看）。
   assert.equal(runCalls[0].maxTotal, 1)
   assert.equal(runCalls[0].once, undefined)
@@ -204,7 +206,7 @@ test("自动巡检：队列空了只写一句话，不记派单", async () => {
   const r = await pickupOnce(ctx, { run: async () => [] })
   assert.equal(r.dispatched, 0)
   assert.equal(ctx.state.pickup.count, 1)
-  assert.match(logs[0], /没有可接的活/)
+  assert.match(logs.find((s) => !s.startsWith("[操作]")), /没有可接的活/)
 })
 
 test("自动巡检：有被监听会话还在跑就不开新会话（豆包单实例）", async () => {

@@ -6,6 +6,7 @@ import { Lifecycle, EVENTS } from "./lifecycle.mjs"
 import { DoubaoSessionAdapter } from "./adapters/doubao.mjs"
 import { GiteaTrackerAdapter } from "./adapters/gitea.mjs"
 import { HerdrWorkspaceAdapter } from "./adapters/herdr.mjs"
+import { startOperation, finishOperation } from "../operations.mjs"
 
 export class WorkflowEngine {
   constructor({ cfg, session = null, tracker = null, workspace = null, hooks = null, log = () => {} } = {}) {
@@ -36,6 +37,10 @@ export class WorkflowEngine {
     const issueRec = issueKey ? (book.issue(issueKey) ?? {}) : {}
     const repoCfg = (this.cfg.repos ?? []).find((r) => r.repo === merge.repo)
     let cleanup
+    const op = startOperation(this, "cleanup", `清理工作区 ${issueKey || merge.key}`, {
+      key: issueKey || merge.key,
+      detail: issueRec.worktree || "检查 herdr 工作区与 git worktree",
+    })
     try {
       if (issueRec.worktree && repoCfg?.dir) {
         cleanup = await this.workspace.cleanup({ repoDir: repoCfg.dir, worktree: issueRec.worktree, branch: issueRec.branch ?? "" })
@@ -45,6 +50,7 @@ export class WorkflowEngine {
     } catch (e) {
       cleanup = { notes: [`本地清理失败：${e.message}`] }
     }
+    finishOperation(this, op, cleanup.notes?.some((n) => /失败/.test(n)) ? "failed" : "success", (cleanup.notes ?? []).join("；"))
     for (const n of cleanup.notes ?? []) this.log(`合并收尾 ${issueKey || merge.key}：${n}`)
 
     await this.emit(EVENTS.cleanup, { issueKey, key: merge.key, cleanup })

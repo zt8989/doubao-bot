@@ -17,6 +17,7 @@ import { listPulls, mergePr, closeIssue, createPr, commentIssue } from "./gitea.
 import { ConsoleStore } from "./console.mjs"
 import { listSchedules, applySchedules, persistSchedules, cronOf } from "./schedules.mjs"
 import { nextCronTime } from "./cron.mjs"
+import { startOperation, finishOperation } from "./operations.mjs"
 import { startConsoleHttp } from "./consolehttp.mjs"
 import { fileURLToPath } from "node:url"
 import { pingOnce, readPortFile } from "./svclient.mjs"
@@ -178,11 +179,19 @@ export async function deliverNewSession(ctx, { text = "", kind = "", repo = "", 
   const prompt = deliverPrompt({ fixed, projectDir: dc.projectDir, product: dc.product, kind, text, running, maxRunning })
   const name = noticeSessionName({ prefix: cfg?.deliver?.namePrefix ?? "foreman", kind })
   const noWait = cfg?.deliver?.waitFirstReply !== true
-  const out = await dws.openNew({ name, prompt, noWait })
-  const convId = String(out?.convId ?? "").trim()
-  new Book(cfg.stateFile).record(name, { convId, kind: "deliver", notify: false, product: dc.product })
-  log(`已新建会话投递：${name}${convId ? `（${convId}）` : ""}`)
-  return { session: name, convId, product: dc.product }
+  const key = watcher?.issueKey || repo || ""
+  const op = startOperation(ctx, "deliver", `投递${kind || "通知"}`, { key, detail: name })
+  try {
+    const out = await dws.openNew({ name, prompt, noWait })
+    const convId = String(out?.convId ?? "").trim()
+    new Book(cfg.stateFile).record(name, { convId, kind: "deliver", notify: false, product: dc.product })
+    log(`已新建会话投递：${name}${convId ? `（${convId}）` : ""}`)
+    finishOperation(ctx, op, "success", `${name}${convId ? ` · 会话 ${convId}` : ""}`)
+    return { session: name, convId, product: dc.product }
+  } catch (e) {
+    finishOperation(ctx, op, "failed", e.message)
+    throw e
+  }
 }
 
 // 服务侧判定该不该发。env 默认 process.env，便于测试注入。
@@ -344,6 +353,7 @@ export async function pickupOnce(ctx, { run = runRound } = {}) {
   const lock = acquireLock(lockFile)
   if (!lock) return { ok: true, skipped: "locked" }
   state.pickup.running = true
+  const op = startOperation(ctx, "pickup", "巡检并派单", { detail: `每轮最多 ${Number(cfg.pickup.maxPerRound) || 1} 条` })
   try {
     const book = new Book(cfg.stateFile)
     const handled = await run({
@@ -351,6 +361,7 @@ export async function pickupOnce(ctx, { run = runRound } = {}) {
       book,
       dws: ctx.dws,
       log,
+      consoleStore: ctx.consoleStore,
       maxTotal: Number(cfg.pickup.maxPerRound) || 1,
     })
     const dispatched = handled.filter((h) => h.state === "dispatched")
@@ -372,7 +383,14 @@ export async function pickupOnce(ctx, { run = runRound } = {}) {
       log("自动巡检：队列里没有可接的活")
     }
     return { ok: true, dispatched: dispatched.length, handled: state.pickup.lastResult.handled }
+  } catch (e) {
+    finishOperation(ctx, op, "failed", e.message)
+    throw e
   } finally {
+    if (ctx.consoleStore?.operationGet?.(op)?.status === "running") {
+      const r = state.pickup.lastResult
+      finishOperation(ctx, op, "success", r ? `派出 ${r.dispatched} 条${r.handled.length ? ` · ${r.handled.join("、")}` : " · 队列里没有可接的活"}` : "本轮结束")
+    }
     state.pickup.running = false
     releaseLock(lockFile)
   }
@@ -441,6 +459,10 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   const httpCfg = cfg.service?.http ?? {}
   const dbFile = path.resolve(String(httpCfg.db || "~/.foreman/console.db").replace(/^~/, os.homedir()))
   const consoleStore = new ConsoleStore(dbFile)
+  consoleStore.recoverOperations()
+  // workflow 里的清理、归档也走同一本操作日志。
+  engine.consoleStore = consoleStore
+  engine.session.consoleStore = consoleStore
   // 前端走 Vite 构建产物（console/dist）；源码在 console/，改完跑 npm run build:console。
   const consoleDir = path.join(path.dirname(path.dirname(fileURLToPath(import.meta.url))), "console", "dist")
 
@@ -727,6 +749,10 @@ export async function pollOnce(ctx) {
       let merged = false
       let mergeError = ""
       if (md.send) {
+        const mergeOp = startOperation(ctx, "merge", `合并 PR ${md.repo}#${md.pr}`, {
+          key: md.key,
+          detail: md.issueNumber ? `合并后关单 #${md.issueNumber}` : `${md.style} · 不 force merge`,
+        })
         try {
           await gitea.mergePr(md.repo, md.pr, { style: md.style, deleteBranch: md.deleteBranch })
           if (md.issueNumber) {
@@ -738,6 +764,7 @@ export async function pollOnce(ctx) {
           merged = true
           out.merged = (out.merged ?? 0) + 1
           log(`已合并 ${md.repo}#${md.pr}（${md.key}）`)
+          finishOperation(ctx, mergeOp, "success", md.issueNumber ? `已合并并关单 #${md.issueNumber}` : "已合并")
         } catch (e) {
           // 「已经合并」不算失败：opencli 对已合的 PR 回 EMPTY_RESULT + 提示无需重复合并，
           // 按字面判失败会把台账钉在 merge-failed，这张单就再也收不了尾。
@@ -747,11 +774,13 @@ export async function pollOnce(ctx) {
             merged = true
             out.merged = (out.merged ?? 0) + 1
             log(`${md.repo}#${md.pr} 已经是合并状态，按已合并收尾（${md.key}）`)
+            finishOperation(ctx, mergeOp, "success", "PR 已经是合并状态，继续收尾")
           } else {
             mergeError = await mergeFailureReason({ gitea, repo: md.repo, pr: md.pr, error: e })
             // 失败也记账：不 force merge，也不每轮重试同一张 PR。
             bookM.markMergeAsked(md.key, { pr: md.pr, url: md.prUrl, status: "failed", error: mergeError })
             log(`合并失败 ${md.repo}#${md.pr}：${mergeError}`)
+            finishOperation(ctx, mergeOp, "failed", mergeError)
           }
         }
       } else if (md.reason && !["disabled", "already-asked"].includes(md.reason)) {
@@ -990,13 +1019,18 @@ export async function handleRequest(ctx, req) {
     if (!repo || !head || !title) return fail("bad-request", "pr open 需要 repo / head / title")
     if (!base) return fail("bad-request", `配置里没有 ${repo} 的 repos[].base，也没给 --base`)
     let pr
+    const op = startOperation(ctx, "pr-open", `创建 PR ${repo}`, { key: repo, detail: `${base} ← ${head}` })
     try {
       pr = await ctx.gitea.createPr({ repo, base, head, title, body: String(req.body ?? "") })
     } catch (e) {
+      finishOperation(ctx, op, "failed", e.message)
       return fail("gitea-error", e.message)
     }
     const number = Number(pr.number ?? 0)
-    if (!number) return fail("no-pr-number", `PR 建了但拿不到编号：${pr.url ?? ""}`)
+    if (!number) {
+      finishOperation(ctx, op, "failed", `PR 建了但拿不到编号：${pr.url ?? ""}`)
+      return fail("no-pr-number", `PR 建了但拿不到编号：${pr.url ?? ""}`)
+    }
     const b = new Book(ctx.cfg.stateFile)
     b.markPrSeen(`${repo}#${number}`, {
       repo,
@@ -1016,6 +1050,7 @@ export async function handleRequest(ctx, req) {
     // 立刻落库，控制台不用等下一轮同步。
     try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
     ctx.log?.(`PR 建好 ${repo}#${number} ${pr.url ?? ""}（走 foreman）`)
+    finishOperation(ctx, op, "success", `${repo}#${number} · ${pr.url ?? ""}`)
     return ok({ repo, pr: number, url: pr.url ?? "", issue: issueNo || null })
   }
 
@@ -1026,6 +1061,7 @@ export async function handleRequest(ctx, req) {
     const style = String(req.style ?? ctx.cfg.merge?.style ?? "merge")
     const deleteBranch = req.deleteBranch !== undefined ? req.deleteBranch !== false : ctx.cfg.merge?.deleteBranch !== false
     let alreadyMerged = false
+    const op = startOperation(ctx, "merge", `合并 PR ${repo}#${number}`, { key: `${repo}#${number}`, detail: `${style} · 手动合并` })
     try {
       await ctx.gitea.mergePr(repo, number, { style, deleteBranch })
     } catch (e) {
@@ -1041,6 +1077,7 @@ export async function handleRequest(ctx, req) {
           new Book(ctx.cfg.stateFile).markMergeAsked(`${repo}#${number}`, { pr: number, status: "failed", error: reason })
         } catch {}
         ctx.log?.(`合并失败 ${repo}#${number}：${reason}`)
+        finishOperation(ctx, op, "failed", reason)
         return fail("merge-failed", reason)
       }
     }
@@ -1062,6 +1099,7 @@ export async function handleRequest(ctx, req) {
     })
     try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
     ctx.log?.(`已合并 ${repo}#${number}${issueNo ? `，关单 #${issueNo}` : ""}（走 foreman）${done.notes.length ? `；收尾：${done.notes.join("；")}` : ""}`)
+    finishOperation(ctx, op, "success", `${alreadyMerged ? "原本已合并" : "合并成功"}${done.notes.length ? ` · ${done.notes.join("；")}` : ""}`)
     return ok({ repo, number, merged: true, alreadyMerged, issue: issueNo || null, cleanup: done.notes })
   }
 

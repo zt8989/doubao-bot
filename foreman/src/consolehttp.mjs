@@ -150,6 +150,18 @@ export function startConsoleHttp({ store, ctx, dir, host = "127.0.0.1", port = 7
         })
       }
 
+      if (pathname === "/api/operations") {
+        const limit = Math.min(Number(url.searchParams.get("limit")) || 100, 500)
+        return sendJson(res, 200, {
+          ok: true,
+          operations: store.operations({
+            limit,
+            status: (url.searchParams.get("status") || "").trim(),
+            action: (url.searchParams.get("action") || "").trim(),
+          }),
+        })
+      }
+
       if (pathname === "/api/schedules") {
         if (req.method === "GET") return sendJson(res, 200, { ok: true, schedules: ctx.schedules?.() ?? [] })
         if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })

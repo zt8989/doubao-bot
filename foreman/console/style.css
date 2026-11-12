@@ -605,6 +605,32 @@ html[data-theme="dark"] .date-pick { color-scheme: dark; }
 
 .dot.off { background: color-mix(in srgb, var(--red, #ef4444) 65%, transparent); }
 
+/* ---------- 操作日志 ---------- */
+.operation-list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line-soft); }
+
+.operation {
+  display: grid;
+  grid-template-columns: 48px 10px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  padding: 13px 18px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.operation:last-child { border-bottom: none; }
+.operation.running { background: color-mix(in srgb, var(--accent) 4%, transparent); }
+.op-time { color: var(--dimmer); font-size: 12px; padding-top: 2px; }
+.operation .dot { margin-top: 6px; }
+.dot.done { background: var(--green, #22c55e); }
+.op-main { min-width: 0; }
+.op-title { font-size: 13px; color: var(--text); font-weight: 600; }
+.op-detail { margin-top: 4px; font-size: 12px; color: var(--dim); overflow-wrap: anywhere; white-space: pre-wrap; }
+.op-key { margin-top: 4px; font-size: 11px; color: var(--dimmer); }
+.op-result { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; }
+.badge.op-running { color: var(--accent); }
+.badge.op-success { color: var(--green, #22c55e); }
+.badge.op-failed, .badge.op-interrupted { color: var(--red, #ef4444); }
+
 /* ---------- 空态 ---------- */
 .empty {
   padding: 40px 18px 44px;

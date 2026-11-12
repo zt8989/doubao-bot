@@ -16,6 +16,7 @@ import {
   worktreeRemove,
 } from "./gitx.mjs"
 import { doneComment, holdComment, issueBranch, kickoff, prBody, resume } from "./prompts.mjs"
+import { startOperation, finishOperation } from "./operations.mjs"
 
 export const issueKey = (repo, n) => `${repo}#${n}`
 
@@ -136,9 +137,17 @@ export async function runRound(ctx) {
       if (ctx.maxTotal && handled.length >= ctx.maxTotal) break
       count++
       let out
+      const key = issueKey(repoCfg.repo, it.number)
+      const op = ctx.dryRun ? 0 : startOperation(ctx, "dispatch", `派单 ${key}`, {
+        key,
+        detail: it.title || "读工单、准备工作区并启动执行会话",
+      })
       try {
         out = await handleIssue(ctx, repoCfg, it)
+        const success = out.state === "dispatched" || out.state === "planned"
+        finishOperation(ctx, op, success ? "success" : "failed", out.convId ? `已派出到执行会话 · 分支 ${out.branch || "-"}` : out.reason || out.state)
       } catch (e) {
+        finishOperation(ctx, op, "failed", e.message)
         if (e.code === "app_unavailable") throw e
         log(`${repoCfg.repo} #${it.number} 派活失败：${e.message}`)
         out = { repo: repoCfg.repo, number: it.number, state: "failed", reason: e.message }

@@ -373,6 +373,60 @@ class FmSchedules extends LitElement {
   }
 }
 
+/* ---------------- 操作日志 ---------------- */
+class FmOperations extends LitElement {
+  static properties = { operations: { attribute: false }, filter: { type: String } }
+  createRenderRoot() {
+    return this
+  }
+  render() {
+    const all = this.operations || []
+    const current = this.filter || "all"
+    const rows = current === "all" ? all : all.filter((o) => o.status === current)
+    const filters = [
+      ["all", "全部"],
+      ["running", "进行中"],
+      ["success", "成功"],
+      ["failed", "失败"],
+      ["interrupted", "已中断"],
+    ]
+    const statusLabel = { running: "进行中", success: "成功", failed: "失败", interrupted: "已中断" }
+    return html`
+      <section class="panel">
+        <div class="panel-head">
+          <h2>操作日志</h2>
+          <div class="panel-side">
+            <span class="hint">派单、通知、合并、清理与归档；每 15 秒刷新</span>
+            <div class="tabs">
+              ${filters.map(([id, label]) => html`
+                <button class=${"tab " + (current === id ? "is-active" : "")}
+                  @click=${() => emit(this, "operation-filter", { filter: id })}
+                >${label} ${id === "all" ? all.length : all.filter((o) => o.status === id).length}</button>`)}
+            </div>
+          </div>
+        </div>
+        ${rows.length ? html`
+          <ul class="operation-list">
+            ${rows.map((o) => html`
+              <li class=${"operation " + o.status}>
+                <span class="op-time mono">${o.startedAtClock || "—"}</span>
+                <span class=${"dot " + (o.status === "running" ? "on" : o.status === "failed" || o.status === "interrupted" ? "off" : "done")}></span>
+                <div class="op-main">
+                  <div class="op-title">${o.status === "running" ? "正在" : ""}${o.title}</div>
+                  <div class="op-detail">${o.detail || "等待结果"}</div>
+                  ${o.key ? html`<div class="op-key mono">${o.key}</div>` : ""}
+                </div>
+                <div class="op-result">
+                  <span class=${"badge op-" + o.status}>${statusLabel[o.status] || o.status}</span>
+                  <span class="pr-note">${o.finishedAtClock ? `结束 ${o.finishedAtClock}` : "仍在执行"}</span>
+                </div>
+              </li>`)}
+          </ul>`
+          : html`<div class="empty"><div class="empty-title">这个分类下还没有操作日志</div><div class="empty-sub">派单或合并后会实时出现在这里</div></div>`}
+      </section>`
+  }
+}
+
 /* ---------------- 页脚 ---------------- */
 class FmFoot extends LitElement {
   static properties = {
@@ -417,6 +471,8 @@ class FmConsole extends LitElement {
     day: { type: String },
     view: { type: String },
     schedules: { attribute: false },
+    operations: { attribute: false },
+    opFilter: { type: String },
     schedBusy: { type: String },
     schedError: { type: String },
     busy: { type: String },
@@ -431,6 +487,8 @@ class FmConsole extends LitElement {
     // view：overview（工单/PR）/ schedules（定时任务页签）
     this.view = "overview"
     this.schedules = []
+    this.operations = []
+    this.opFilter = "all"
     this.schedBusy = ""
     this.schedError = ""
     // day 为空 = 看今天；选了某天就回看那天的任务/PR。URL 上带 ?day= 也能直接打开那天。
@@ -473,10 +531,14 @@ class FmConsole extends LitElement {
     this._onView = (e) => {
       this.view = e.detail.view
       if (this.view === "schedules") this.loadSchedules()
+      if (this.view === "operations") this.loadOperations()
     }
     this._onSchedToggle = (e) => this.toggleSchedule(e.detail.id, e.detail.enabled)
     this._onSchedSave = (e) => this.saveScheduleCron(e.detail.id, e.detail.cron)
     this._onPickupNow = () => this.pickupNow()
+    this._onOpFilter = (e) => {
+      this.opFilter = e.detail.filter
+    }
     this.addEventListener("theme-set", this._onTheme)
     this.addEventListener("filter-set", this._onFilter)
     this.addEventListener("day-set", this._onDay)
@@ -485,18 +547,22 @@ class FmConsole extends LitElement {
     this.addEventListener("schedule-toggle", this._onSchedToggle)
     this.addEventListener("schedule-save", this._onSchedSave)
     this.addEventListener("pickup-now", this._onPickupNow)
+    this.addEventListener("operation-filter", this._onOpFilter)
 
     this._onFocus = () => {
       this.load()
       if (this.view === "schedules") this.loadSchedules()
+      if (this.view === "operations") this.loadOperations()
     }
     window.addEventListener("focus", this._onFocus)
 
     this.load()
     this.loadSchedules()
+    this.loadOperations()
     this._loadTimer = setInterval(() => {
       this.load()
       if (this.view === "schedules") this.loadSchedules()
+      if (this.view === "operations") this.loadOperations()
     }, 15000)
   }
 
@@ -512,6 +578,7 @@ class FmConsole extends LitElement {
     this.removeEventListener("schedule-toggle", this._onSchedToggle)
     this.removeEventListener("schedule-save", this._onSchedSave)
     this.removeEventListener("pickup-now", this._onPickupNow)
+    this.removeEventListener("operation-filter", this._onOpFilter)
     super.disconnectedCallback()
   }
 
@@ -578,6 +645,17 @@ class FmConsole extends LitElement {
     }
   }
 
+  async loadOperations() {
+    try {
+      const res = await fetch("/api/operations?limit=100", { cache: "no-store" })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const body = await res.json()
+      this.operations = body.operations || []
+    } catch (e) {
+      this.error = `服务 · 拿不到操作日志（${e.message}）`
+    }
+  }
+
   async toggleSchedule(id, enabled) {
     if (this.schedBusy) return
     this.schedBusy = id
@@ -634,6 +712,7 @@ class FmConsole extends LitElement {
     const views = [
       { id: "overview", label: "工单与 PR" },
       { id: "schedules", label: "定时任务" },
+      { id: "operations", label: "操作日志" },
     ]
     return html`
       <fm-head .data=${this.data} .mode=${this.mode} .error=${this.error} .day=${this.day} .today=${this.data?.today || ""}></fm-head>
@@ -649,6 +728,8 @@ class FmConsole extends LitElement {
         </div>
         ${this.view === "schedules"
           ? html`<fm-schedules .schedules=${this.schedules} .busy=${this.schedBusy} .error=${this.schedError}></fm-schedules>`
+          : this.view === "operations"
+          ? html`<fm-operations .operations=${this.operations} .filter=${this.opFilter}></fm-operations>`
           : this.data
           ? html`
               <fm-stats .stats=${this.data.stats} .scope=${this.data.isToday === false ? this.data.day : "今日"}></fm-stats>
@@ -672,5 +753,6 @@ customElements.define("fm-stats", FmStats)
 customElements.define("fm-tasks", FmTasks)
 customElements.define("fm-prs", FmPrs)
 customElements.define("fm-schedules", FmSchedules)
+customElements.define("fm-operations", FmOperations)
 customElements.define("fm-foot", FmFoot)
 customElements.define("fm-console", FmConsole)

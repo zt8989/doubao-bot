@@ -81,6 +81,21 @@ const SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_events_at  ON events(at);
   CREATE INDEX IF NOT EXISTS idx_events_key ON events(key);
 
+  -- 操作日志：派单、合并、清理等长动作先写 running，结束时更新结果。
+  CREATE TABLE IF NOT EXISTS operations (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    action      TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    key         TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'running', -- running | success | failed | interrupted
+    detail      TEXT NOT NULL DEFAULT '',
+    started_at  TEXT NOT NULL,
+    finished_at TEXT NOT NULL DEFAULT ''
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_operations_started ON operations(started_at);
+  CREATE INDEX IF NOT EXISTS idx_operations_status ON operations(status);
+
   CREATE INDEX IF NOT EXISTS idx_tasks_last ON tasks(last_seen_at);
   CREATE INDEX IF NOT EXISTS idx_prs_last   ON prs(last_seen_at);
 `
@@ -151,9 +166,52 @@ export class ConsoleStore {
       dayCounts: this.db.prepare(
         "SELECT day, COUNT(*) AS c FROM events GROUP BY day ORDER BY day DESC LIMIT 60"
       ),
+      insertOperation: this.db.prepare(`
+        INSERT INTO operations (action, title, key, status, detail, started_at, finished_at)
+        VALUES (?, ?, ?, 'running', ?, ?, '')
+      `),
+      finishOperation: this.db.prepare(
+        "UPDATE operations SET status = ?, detail = ?, finished_at = ? WHERE id = ?"
+      ),
+      getOperation: this.db.prepare("SELECT * FROM operations WHERE id = ?"),
+      recentOperations: this.db.prepare("SELECT * FROM operations ORDER BY id DESC LIMIT ?"),
+      runningOperations: this.db.prepare("SELECT * FROM operations WHERE status = 'running' ORDER BY id ASC"),
     }
 
     this.backfillEvents()
+  }
+
+  operationStart({ action, title, key = "", detail = "", at = new Date().toISOString() }) {
+    const r = this.q.insertOperation.run(String(action), String(title), String(key), String(detail), String(at))
+    return Number(r.lastInsertRowid)
+  }
+
+  operationFinish(id, status, detail = "", at = new Date().toISOString()) {
+    this.q.finishOperation.run(String(status), String(detail).slice(0, 2000), String(at), Number(id))
+  }
+
+  operationGet(id) {
+    return this.q.getOperation.get(Number(id))
+  }
+
+  // 服务重启后，上次的 running 不可能还在继续，标成中断而不是永远显示「正在…」。
+  recoverOperations() {
+    for (const row of this.q.runningOperations.all()) {
+      this.operationFinish(row.id, "interrupted", row.detail || "服务重启，操作中断")
+    }
+  }
+
+  operations({ limit = 100, status = "", action = "" } = {}) {
+    const n = Math.min(Math.max(Number(limit) || 100, 1), 500)
+    return this.q.recentOperations.all(Math.min(n * 3, 500))
+      .filter((r) => (!status || r.status === status) && (!action || r.action === action))
+      .slice(0, n)
+      .map((r) => ({
+        ...r,
+        startedAtClock: clockOf(r.started_at),
+        finishedAtClock: clockOf(r.finished_at),
+        day: localDay(r.started_at),
+      }))
   }
 
   /**
