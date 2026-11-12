@@ -56,7 +56,8 @@ foreman watch poll               # 立刻跑一轮（checked / settled / notifie
 - 监听节奏沿用 `pollSeconds`（默认 20s）：对登记会话跑 `dws status`，`streaming` 真（running）或 `chars: 0`（pending，dws 的"还没开始"坑）不动；`finished` 真、或 finished/streaming 都假但 `chars > 0` 且有文本（settled）才算跑完；再要求「回复指纹变了」（指纹 = `sha1(chars|head|tail)` 前 12 位）。同一个 `(会话, 指纹)` 只通知一次，去重记在 state.json 的 `notified` 键，服务重启不重发。
 - 通知含仓库、单号、结论类别、PR 链接（有则带）；目标取登记的 `notifyTo`，没写取 `notify.session`（`auto` → `MCP_VM_CONVERSATION_ID`）。三种不发：`notify.enabled: false`、目标为空、目标就是被监听会话自己；结论不在 `notify.events` 白名单也不发（显式盯的 `session-done` 例外）。发送失败只写 `service.log`、`dwsErrors++`，不影响继续监听。
 - **控制台与 CLI 共用一条 HTTP**：服务只监听 `http://127.0.0.1:7317`（`service.http.port`，0 表示系统分配；实际端口写进 `service.port`）。CLI 走 `POST /api/rpc`（body 是 `{id, cmd, …}`）、探活走 `GET /api/ping`；浏览器访问 `/`。接口：`GET /api/snapshot`（当天任务 + PR；带 `?day=YYYY-MM-DD` 则回看那天）、`GET /api/polls`、`GET /api/history?days=N&day=`（事件流水原始数据）、`GET /api/operations?limit=100&status=running`（操作日志）、`POST /api/sync`（立刻扫一轮）。数据落在 SQLite `~/.foreman/console.db`，唯一键 `<owner>/<repo>#<number>`，按工单去重、重复同步不多出行。`tasks` 表带 `agent` 列（派给哪个会话），可按会话统计。`foreman pr open` / `foreman issue comment|close` 写完立刻 `sync` 落库，控制台不用等下一轮。没有 `service.http.enabled` 开关——HTTP 是唯一通道，服务起来就一定在听。
-- **操作日志页签**：派单、投递、建/合 PR、清理工作区、归档会话会显示「进行中 → 成功/失败」；重启时没收尾的标「已中断」。原始数据在 `operations` 表，`service.log` 同步写 `[操作]` 前缀。
+- **左侧导航栏**：「工单与 PR / 定时任务 / 操作日志」均为图标加文字，底部按钮可折叠成纯图标，状态记在 localStorage；窄屏自动只显示图标。
+- **操作日志页面**：派单、投递、建/合 PR、清理工作区、归档会话会显示「进行中 → 成功/失败」；重启时没收尾的标「已中断」。原始数据在 `operations` 表，`service.log` 同步写 `[操作]` 前缀。
 
 ## 回看某天（控制台顶部日期）
 

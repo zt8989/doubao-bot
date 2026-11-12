@@ -21,6 +21,7 @@ const STATE_LABEL = {
 
 
 const THEME_KEY = "foreman-theme"
+const SIDEBAR_KEY = "foreman-sidebar-collapsed"
 const pad2 = (n) => String(n).padStart(2, "0")
 const emit = (host, name, detail) =>
   host.dispatchEvent(new CustomEvent(name, { detail, bubbles: true, composed: true }))
@@ -44,6 +45,57 @@ class FmThemeSwitch extends LitElement {
       <div class="theme-switch" role="group" aria-label="主题">
         ${btn("light", "亮")}${btn("dark", "暗")}${btn("system", "自动")}
       </div>`
+  }
+}
+
+/* ---------------- 左侧导航 ---------------- */
+function navIcon(id) {
+  if (id === "overview") {
+    return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h8l4 4v14H7z"/><path d="M15 3v5h4M10 12h6M10 16h6M10 8h2"/></svg>`
+  }
+  if (id === "schedules") {
+    return html`<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2M8 2l-2 2M16 2l2 2"/></svg>`
+  }
+  return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h12M8 12h12M8 18h12"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></svg>`
+}
+
+class FmSidebar extends LitElement {
+  static properties = { view: { type: String }, collapsed: { type: Boolean } }
+  createRenderRoot() {
+    return this
+  }
+  render() {
+    const views = [
+      { id: "overview", label: "工单与 PR" },
+      { id: "schedules", label: "定时任务" },
+      { id: "operations", label: "操作日志" },
+    ]
+    return html`
+      <aside class=${"sidebar" + (this.collapsed ? " is-collapsed" : "")} aria-label="控制台导航">
+        <nav class="side-nav">
+          ${views.map((v) => html`
+            <button
+              class=${"side-link" + (this.view === v.id ? " is-active" : "")}
+              title=${v.label}
+              aria-label=${v.label}
+              aria-current=${this.view === v.id ? "page" : "false"}
+              @click=${() => emit(this, "view-set", { view: v.id })}
+            >
+              <span class="side-icon">${navIcon(v.id)}</span>
+              <span class="side-text">${v.label}</span>
+            </button>`)}
+        </nav>
+        <button
+          class="side-collapse"
+          title=${this.collapsed ? "展开导航" : "折叠导航"}
+          aria-label=${this.collapsed ? "展开导航" : "折叠导航"}
+          aria-expanded=${this.collapsed ? "false" : "true"}
+          @click=${() => emit(this, "sidebar-toggle")}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d=${this.collapsed ? "m9 5 7 7-7 7M4 5l7 7-7 7" : "m15 5-7 7 7 7M20 5l-7 7 7 7"}/></svg>
+          <span class="side-text">${this.collapsed ? "展开" : "折叠"}</span>
+        </button>
+      </aside>`
   }
 }
 
@@ -470,6 +522,7 @@ class FmConsole extends LitElement {
     filter: { type: String },
     day: { type: String },
     view: { type: String },
+    sidebarCollapsed: { type: Boolean },
     schedules: { attribute: false },
     operations: { attribute: false },
     opFilter: { type: String },
@@ -484,8 +537,13 @@ class FmConsole extends LitElement {
     this.data = null
     this.mode = "system"
     this.filter = "all"
-    // view：overview（工单/PR）/ schedules（定时任务页签）
+    // view：overview（工单/PR）/ schedules（定时任务）/ operations（操作日志）
     this.view = "overview"
+    try {
+      this.sidebarCollapsed = localStorage.getItem(SIDEBAR_KEY) === "1"
+    } catch {
+      this.sidebarCollapsed = false
+    }
     this.schedules = []
     this.operations = []
     this.opFilter = "all"
@@ -534,6 +592,12 @@ class FmConsole extends LitElement {
       if (this.view === "operations") this.loadOperations()
     }
     this._onSchedToggle = (e) => this.toggleSchedule(e.detail.id, e.detail.enabled)
+    this._onSidebarToggle = () => {
+      this.sidebarCollapsed = !this.sidebarCollapsed
+      try {
+        localStorage.setItem(SIDEBAR_KEY, this.sidebarCollapsed ? "1" : "0")
+      } catch {}
+    }
     this._onSchedSave = (e) => this.saveScheduleCron(e.detail.id, e.detail.cron)
     this._onPickupNow = () => this.pickupNow()
     this._onOpFilter = (e) => {
@@ -544,6 +608,7 @@ class FmConsole extends LitElement {
     this.addEventListener("day-set", this._onDay)
     this.addEventListener("refresh", this._onRefresh)
     this.addEventListener("view-set", this._onView)
+    this.addEventListener("sidebar-toggle", this._onSidebarToggle)
     this.addEventListener("schedule-toggle", this._onSchedToggle)
     this.addEventListener("schedule-save", this._onSchedSave)
     this.addEventListener("pickup-now", this._onPickupNow)
@@ -575,6 +640,7 @@ class FmConsole extends LitElement {
     this.removeEventListener("day-set", this._onDay)
     this.removeEventListener("refresh", this._onRefresh)
     this.removeEventListener("view-set", this._onView)
+    this.removeEventListener("sidebar-toggle", this._onSidebarToggle)
     this.removeEventListener("schedule-toggle", this._onSchedToggle)
     this.removeEventListener("schedule-save", this._onSchedSave)
     this.removeEventListener("pickup-now", this._onPickupNow)
@@ -709,23 +775,11 @@ class FmConsole extends LitElement {
   }
 
   render() {
-    const views = [
-      { id: "overview", label: "工单与 PR" },
-      { id: "schedules", label: "定时任务" },
-      { id: "operations", label: "操作日志" },
-    ]
     return html`
       <fm-head .data=${this.data} .mode=${this.mode} .error=${this.error} .day=${this.day} .today=${this.data?.today || ""}></fm-head>
-      <main>
-        <div class="view-tabs">
-          ${views.map(
-            (v) => html`
-              <button
-                class=${"tab " + (this.view === v.id ? "is-active" : "")}
-                @click=${() => emit(this, "view-set", { view: v.id })}
-              >${v.label}</button>`
-          )}
-        </div>
+      <div class="app-shell">
+        <fm-sidebar .view=${this.view} .collapsed=${this.sidebarCollapsed}></fm-sidebar>
+        <main>
         ${this.view === "schedules"
           ? html`<fm-schedules .schedules=${this.schedules} .busy=${this.schedBusy} .error=${this.schedError}></fm-schedules>`
           : this.view === "operations"
@@ -742,12 +796,14 @@ class FmConsole extends LitElement {
                   <div class="empty-sub">${this.error || "首次加载需要几秒"}</div>
                 </div>
               </section>`}
-      </main>
+        </main>
+      </div>
       <fm-foot .data=${this.data} .busy=${this.busy}></fm-foot>`
   }
 }
 
 customElements.define("fm-theme-switch", FmThemeSwitch)
+customElements.define("fm-sidebar", FmSidebar)
 customElements.define("fm-head", FmHead)
 customElements.define("fm-stats", FmStats)
 customElements.define("fm-tasks", FmTasks)
