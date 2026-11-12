@@ -3,7 +3,7 @@
 // 编排就去重派了一条；窗口 id 不同 → 把用户自己那条会话记成了本次新会话。
 import test from "node:test"
 import assert from "node:assert/strict"
-import { pickNewTask, taskIds } from "../src/util.mjs"
+import { pickNewTask, taskIds, freshTaskCandidates } from "../src/util.mjs"
 
 const t = (id, title, extra = {}) => ({ id, title, running: false, unread: 0, project: "", ...extra })
 
@@ -82,4 +82,33 @@ test("关键：判据只有差集，台账里那个「别的会话 id」不参�
 test("taskIds 只留合法会话 id", () => {
   const ids = taskIds([t("38453031255662594", "a"), t("", "b"), { nope: 1 }, null])
   assert.deepEqual([...ids], ["38453031255662594"])
+})
+
+test("并发多建：没标题线索时，当前被选中的那条优先（刚点新建的通常就是它）", () => {
+  const before = [t("38453301376290562", "修复接口兼容性问题")]
+  const after = [
+    t("38452531808461570", "续跑#268任务", { active: false }),
+    t("38452223875281410", "收到", { active: true }),
+    ...before,
+  ]
+  const [first] = freshTaskCandidates(before, after)
+  assert.equal(first?.id, "38452223875281410")
+})
+
+test("并发多建：标题命中的排最前，哪怕它不是当前选中的", () => {
+  const before = []
+  const after = [
+    t("38452531808461570", "续跑#268任务", { active: true }),
+    t("38452223875281410", "只回复两个字收到"),
+  ]
+  const cands = freshTaskCandidates(before, after, { expectTitle: "只回复两个字收到" })
+  assert.equal(cands[0]?.id, "38452223875281410")
+  assert.equal(cands.length, 2)
+})
+
+test("pickNewTask 就是候选里的第一个", () => {
+  const before = [t("38453301376290562", "修复接口兼容性问题")]
+  const after = [t("38452531808461570", "续跑#268任务"), t("38452223875281410", "收到"), ...before]
+  const cands = freshTaskCandidates(before, after)
+  assert.equal(pickNewTask(before, after)?.id, cands[0]?.id)
 })

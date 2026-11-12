@@ -5,7 +5,11 @@ import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
 import { App, Page } from "./cdp.mjs"
-import { sleep, isFreshTask, pickNewTask } from "./util.mjs"
+import { sleep, isFreshTask, pickNewTask, freshTaskCandidates } from "./util.mjs"
+
+// promptHead 把提示词压成用来认领「这句是不是我发的」的指纹：去空白、取前 40 字。
+// 别用整段比对：超长提示词在气泡里可能被折叠/转义，只认开头就够唯一了。
+const promptHead = (s) => String(s ?? "").replace(/[\s\u200b-\u200f\ufeff]/g, "").slice(0, 40)
 
 export const APPS = [
   { name: "豆包工作", mac: "DoubaoWork.app/Contents/MacOS/DoubaoWork", sub: "doubaowork" },
@@ -413,6 +417,75 @@ export class Doubao {
     }
   }
 
+  // locateNewCandidates 轮询侧边栏，等差集里出现候选；返回排好序的候选全集（可能不止一条）。
+  async locateNewCandidates(page, beforeTasks, { timeoutMs = 30000, expectTitle = "", signal } = {}) {
+    if (!Array.isArray(beforeTasks)) return []
+    const start = Date.now()
+    for (;;) {
+      const candidates = freshTaskCandidates(beforeTasks, (await this.readTasks(page, signal)) ?? [], {
+        expectTitle,
+      })
+      if (candidates.length) return candidates
+      if (Date.now() - start > timeoutMs) return []
+      await sleep(this.poll, signal)
+    }
+  }
+
+  // convHasPrompt 确认这条会话里确实有我们刚发的那句提示词。
+  // 差集只能说明「它是新的」，并发时（用户自己的 agent 也在建任务）会有多条新任务，
+  // 只有回读它自己的消息才能定案；对不上就换下一条候选。
+  async convHasPrompt(id, prompt, { signal } = {}) {
+    const head = promptHead(prompt)
+    if (!head) return true
+    try {
+      const page = await this.goto(id, signal)
+      const convo = await page.eval(CONVO)
+      const mine = (convo?.messages ?? []).filter((m) => m.role === "user").pop()
+      const got = promptHead(mine?.text ?? "")
+      return got ? got.includes(head) || head.includes(got) : false
+    } catch (e) {
+      if (signal?.aborted) throw e
+      return false
+    }
+  }
+
+  // replyOfConv 保证交出去的回复确实来自目标会话：等回复的这段时间里窗口可能被用户切走，
+  // 那会儿 waitReply 读到的整段内容是**别人**的会话（台账里的 url 也会跟着记错）。
+  // 切不到目标会话时宁可交空，也不把别人的回复当成它的结果。
+  async replyOfConv(id, reply, { timeoutMs = 120000, signal, force = false } = {}) {
+    const target = String(id ?? "").trim()
+    const at = String((await this.state(signal))?.convId ?? "").trim()
+    if (!force && at === target) {
+      if (reply) reply.convId = target
+      return reply ?? null
+    }
+    // 任务还在生成回复时点它，页面可能切不过去：隔一会儿重试，直到落定或超时。
+    let pinned = false
+    const deadline = Date.now() + timeoutMs
+    while (!pinned) {
+      try {
+        await this.goto(target, signal)
+        pinned = true
+      } catch (e) {
+        if (signal?.aborted) throw e
+      }
+      if (pinned || Date.now() > deadline) break
+      await sleep(1500, signal)
+    }
+    if (!pinned) return null
+    const page = await this.connect(signal)
+    let r = await page.eval(READ).catch(() => null)
+    const start = Date.now()
+    // 回复可能还在流：等它落定再交，别把半条回复当成第一轮的结果。
+    while (!(r?.reply && r?.finished) && Date.now() - start < timeoutMs) {
+      await sleep(this.poll, signal)
+      r = await page.eval(READ).catch(() => r)
+    }
+    // url 按目标 id 拼，别取「此刻的窗口地址」：回复读完后窗口可能又被切回用户自己那条，
+    // 那样记下来的 url 会把用户会话当成本次新建的。
+    return { ...(r ?? {}), convId: target, url: `chrome://doubao-chat/chat/${target}` }
+  }
+
   // openTask 新建一个工作任务，按需切模式/选模型，发第一条消息，等回复跑完。
   // noWait=true 时只确认首句送达并拿到新会话 id，不等第一轮回复（通知类新会话用）。
   async openTask(prompt, { mode = "local", model = "auto", project = "", noWait = false, signal, onUpdate } = {}) {
@@ -501,10 +574,32 @@ export class Doubao {
       throw e
     }
     // 主证据：侧边栏差集。窗口里读到的 id 可能是用户自己切过去的会话，不能当新会话 id。
-    const located = await this.locateNewTask(page, beforeTasks, { signal })
-    if (located?.id) {
-      reply.convId = located.id
-      return { convId: located.id, reply, locatedBy: "sidebar" }
+    const candidates = await this.locateNewCandidates(page, beforeTasks, { signal })
+    if (candidates.length) {
+      // 并发时（用户自己的 agent 也在建任务）差集会有好几条：回读候选会话自己的消息，
+      // 认领「首句是我发的那句」的那条；都对不上就退回候选首位，并标记未校验。
+      let picked = candidates[0]
+      let verified = false
+      if (candidates.length > 1) {
+        for (const cand of candidates.slice(0, 3)) {
+          if (await this.convHasPrompt(cand.id, prompt, { signal })) {
+            picked = cand
+            verified = true
+            break
+          }
+        }
+      }
+      // 回复一定从目标会话自己读（窗口在等回复期间可能被切走）；切不过去就交空。
+      const tail = await this.replyOfConv(picked.id, reply, { signal, force: true })
+      return {
+        convId: picked.id,
+        reply: tail,
+        url: tail?.url ?? "",
+        locatedBy: "sidebar",
+        candidates: candidates.length,
+        verified,
+        replyUnconfirmed: !tail,
+      }
     }
     // 兜底：窗口回读（老路）。拿到的会话 id 必须与新建前不同，否则就是没切走。此时提示词
     // 很可能发进了旧会话，绝不允许把旧 id 当新会话登记。

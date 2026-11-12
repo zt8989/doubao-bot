@@ -205,32 +205,41 @@ export function taskIds(tasks = []) {
 const plainTitle = (s) => String(s ?? "").replace(/[\s\u200b-\u200f\ufeff]/g, "")
 
 /**
- * pickNewTask：从「点新建前后的侧边栏快照」里认出刚建出来的那条会话。
+ * freshTaskCandidates：侧边栏差集里的候选，按「最可能是本次新建的」排好序。
  *
- * 为什么不能只看窗口 id：豆包是单实例、窗口只有一个。用户自己点了别的任务、
- * 或者页面在跑回复期间被切走，location 里读到的就是**别人**的会话 id ——
- * 新建前后"相同"会误判成没建，新建前后"不同"又会把别人的 id 记成本次新会话。
- * 侧边栏任务集合的差集才是「这次点新建多出来的那条」，不受窗口焦点影响。
- *
- * 多条同时新增（用户也在建任务）时的取舍顺序：标题对得上 → 在跑的那条 → 列表最上面。
- *   before/after: TASKS 快照（{ id, title, running, ... } 数组）
- *   expectTitle:  期望标题（工单标题之类），只在多条新增时用来消歧，可留空
+ * 差集只能证明「这几条是新的」，证明不了「哪条是我建的」——并发时用户自己的 agent
+ * 也在建任务，一次会多出好几条（#228 复跑就撞上过：我们的 smoke 会话被记成了另一条
+ * 编排会话）。所以这里只给候选顺序，由调用方再用内容校验（会话里首句是不是我刚发的
+ * 那句）定案：
+ *   标题对得上 → 当前正被选中（刚点新建那条通常是 active）→ 在跑的那条 → 列表顺序
+ *   before/after: TASKS 快照（{ id, title, active, running, ... } 数组）
+ *   expectTitle:  期望标题（工单标题之类），可留空
  */
-export function pickNewTask(before = [], after = [], { expectTitle = "" } = {}) {
+export function freshTaskCandidates(before = [], after = [], { expectTitle = "" } = {}) {
   const known = taskIds(before)
   const fresh = (after ?? []).filter((t) => {
     const id = String(t?.id ?? "").trim()
     return /^\d{8,}$/.test(id) && !known.has(id)
   })
-  if (!fresh.length) return null
-  if (fresh.length === 1) return fresh[0]
+  if (fresh.length <= 1) return fresh
   const want = plainTitle(expectTitle)
-  if (want) {
-    const hit = fresh.find((t) => {
-      const got = plainTitle(t?.title)
-      return got && (got.includes(want) || want.includes(got))
-    })
-    if (hit) return hit
-  }
-  return fresh.find((t) => t?.running) ?? fresh[0]
+  const titles = want
+    ? fresh.filter((t) => {
+        const got = plainTitle(t?.title)
+        return got && (got.includes(want) || want.includes(got))
+      })
+    : []
+  const rest = fresh.filter((t) => !titles.includes(t))
+  const active = rest.filter((t) => t?.active)
+  const running = rest.filter((t) => !t?.active && t?.running)
+  const others = rest.filter((t) => !t?.active && !t?.running)
+  return [...titles, ...active, ...running, ...others]
+}
+
+/**
+ * pickNewTask：只取候选里的第一个。
+ * 调用方拿不到内容校验时至少用「最可能的那条」，同时可以用 freshTaskCandidates 拿全集。
+ */
+export function pickNewTask(before = [], after = [], { expectTitle = "" } = {}) {
+  return freshTaskCandidates(before, after, { expectTitle })[0] ?? null
 }

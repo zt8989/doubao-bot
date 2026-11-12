@@ -159,13 +159,21 @@ export class SessionManager {
       repo,
       project,
       convId: afterConvId,
-      url: state.url,
+      // 窗口可能在等回复期间被切走：url 一律按 convId 拼，不取「此刻的窗口地址」，
+      // 否则会把用户自己那条会话的地址记到我们头上（#228 验收就记错过两次）。
+      url: afterConvId ? `chrome://doubao-chat/chat/${afterConvId}` : state.url,
       mode,
       model,
       reply: replySummary(reply?.reply),
     })
     this.book.setActive(name)
-    return { session: this.book.session(name), reply: reply?.reply ?? null, locatedBy: reply?.locatedBy ?? "" }
+    return {
+      session: this.book.session(name),
+      reply: reply?.reply ?? null,
+      locatedBy: reply?.locatedBy ?? "",
+      replyUnconfirmed: reply?.replyUnconfirmed ?? false,
+      verified: reply?.verified ?? false,
+    }
   }
 
   // send 在同一任务里续发；任务已经不在窗口里了就重开一条并带 handoff。
