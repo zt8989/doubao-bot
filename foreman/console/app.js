@@ -209,7 +209,14 @@ class FmTasks extends LitElement {
   // 一张单的节点时间线：run 当前停在哪，前序节点算走过、后序算待跑。
   detail(t) {
     const key = `${t.repo}#${t.number}`
-    const run = (this.runs || []).find((r) => r.key === key)
+    // 同一张单可能同时有「自有工单」与「他人 PR」两条流程的实例（比如自己的 PR 被别人也扫过）：
+    // 优先挑在跑的，其次挑自有工单那条，最后才退回别的，避免把自己的单显示成别人 PR 的流程。
+    const matches = (this.runs || []).filter((r) => r.key === key)
+    const run =
+      matches.find((r) => r.status === "running" && r.workflow === "own") ||
+      matches.find((r) => r.workflow === "own") ||
+      matches.find((r) => r.status === "running") ||
+      matches[0]
     const flow = (this.workflows || []).find((w) => w.id === (run?.workflow ?? "own"))
     const stages = flow?.stages ?? []
     const nodes = this.nodes || []

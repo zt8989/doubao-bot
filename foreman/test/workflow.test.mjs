@@ -44,6 +44,13 @@ test("Lifecycle：流程实例跟着事件推进阶段，关单即收口；暂�
   const restored = lc.restore({ "r#3": { state: "working" }, "r#4": { state: "done" } })
   assert.equal(restored.length, 2)
   assert.equal(restored.some((r) => r.key === "r#4"), false, "已完成的不占用名额")
+  // 合并关单、带 PR 的自有工单重启后补一条「走到 close 已完成」的记录，别再显示成未开始
+  const done = lc.restore({ "r#5": { state: "done", pr: 88, updatedAt: "2026-11-12T07:45:00.000Z" } })
+  const r5 = lc.runsList(20).find((r) => r.key === "r#5")
+  assert.equal(r5.stage, "close")
+  assert.equal(r5.status, "done")
+  assert.equal(r5.pr, 88)
+  assert.equal(done.some((r) => r.key === "r#5"), false, "完成的记录不占在跑名额")
 })
 
 test("Lifecycle：hooks 先跑、适配器按注册顺序跑，历史留痕；适配器报错不打断主流程", async () => {

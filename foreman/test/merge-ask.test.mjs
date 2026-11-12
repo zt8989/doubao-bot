@@ -141,3 +141,47 @@ test("runMergeTask：冲突 → 不 force merge、只记失败、调用方收到
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("runMergeTask：没写 workflow 时按账本推断——自有工单落 own，别人的 PR 落 review", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = mkCfg(dir)
+    const book = new Book(cfg.stateFile)
+    // 自有工单：账本里有派活痕迹（分支 / 工作区 / 执行会话）
+    book.setIssue("demo/demo#9", { state: "pr-open", pr: 12, branch: "fix/issue-9", worktree: "/tmp/wt-9", agent: "conv-work" })
+    const seen = []
+    const engine = {
+      paused: () => false,
+      setPaused: () => {},
+      emit: async (event, payload = {}) => { seen.push(`${event}:${payload.workflow ?? ""}`) },
+      afterMerge: async ({ workflow }) => { seen.push(`afterMerge:${workflow}`); return { notes: [] } },
+    }
+    const gitea = { mergePr: async () => {}, closeIssue: async () => {}, viewPr: async () => null }
+    const out = await runMergeTask(
+      { cfg, log: () => {}, gitea, dws: mkDws([], []), engine },
+      { key: "demo/demo#12", repo: "demo/demo", pr: 12, issue: 9, notify: false }
+    )
+    assert.equal(out.ok, true)
+    assert.equal(seen.includes("pr.reviewed:review"), false, "自有工单的 PR 不该被记成「他人 PR」流程")
+    assert.ok(seen.includes("issue.closed:own"), `关单事件应落在 own 流程，实际：${seen.join(",")}`)
+    assert.ok(seen.includes("afterMerge:own"))
+
+    // 别人的 PR：账本里没有这张单的派活痕迹 → review
+    const seen2 = []
+    const engine2 = {
+      paused: () => false,
+      setPaused: () => {},
+      emit: async (event, payload = {}) => { seen2.push(`${event}:${payload.workflow ?? ""}`) },
+      afterMerge: async ({ workflow }) => { seen2.push(`afterMerge:${workflow}`); return { notes: [] } },
+    }
+    const out2 = await runMergeTask(
+      { cfg, log: () => {}, gitea, dws: mkDws([], []), engine: engine2 },
+      { key: "demo/demo#13", repo: "demo/demo", pr: 13 }
+    )
+    assert.equal(out2.ok, true)
+    assert.ok(seen2.includes("pr.reviewed:review"), "别人的 PR 合并前先记「核对完」")
+    assert.ok(seen2.includes("afterMerge:review"))
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

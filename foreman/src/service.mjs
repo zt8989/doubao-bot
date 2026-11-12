@@ -956,6 +956,18 @@ export async function pollOnce(ctx) {
 
 // runMergeTask：合并一条 PR 并收尾（关单、摘监听、清工作区、归档执行会话），
 // 最后给合并会话发一条「合并完成」。合不了只记账不发脾气，也不 force merge。
+// 合并 / 关单是两条流程共用的阶段，必须落到对应那条流程上，否则控制台会张冠李戴
+// （自有工单的 PR 被记成「他人 PR」流程，run 停在 close，工单那条 own 永远卡在 pr-open）。
+function workflowForIssue({ book, repo, issueNo = 0, declared = "" } = {}) {
+  const wf = String(declared ?? "").trim()
+  if (wf === "own" || wf === "review") return wf
+  const issueKey = issueNo ? `${repo}#${Number(issueNo)}` : ""
+  const rec = issueKey && book?.issue ? book.issue(issueKey) : null
+  // 账本里有这张单的派活痕迹（分支/工作区/执行会话）→ 自有工单；否则是别人的 PR。
+  if (rec && (rec.branch || rec.worktree || rec.agent)) return "own"
+  return "review"
+}
+
 export async function runMergeTask(ctx, task = {}) {
   const { cfg, log = () => {} } = ctx
   const key = String(task.key ?? `${task.repo}#${task.pr}`)
@@ -965,9 +977,9 @@ export async function runMergeTask(ctx, task = {}) {
   if (!repo || !pr) return { ok: false, reason: "bad-task" }
   const style = String(task.style ?? cfg.merge?.style ?? "merge")
   const deleteBranch = task.deleteBranch !== false
-  // 这条 PR 属于哪条流程：own（自有工单的 PR）/ review（别人开的 PR）。
-  // 合并是两条流程共用的阶段，不带 workflow 就落不到对应那条流程上。
-  const workflow = String(task.workflow ?? "review")
+  // 这条 PR / 这张单属于哪条流程：显式指定就用它；没指定时按账本推断。
+  // foreman 派过的单一定有 branch / worktree / agent（own）；查不到痕迹的 PR 才是别人开的（review）。
+  const workflow = workflowForIssue({ book: new Book(cfg.stateFile), repo, issueNo, declared: task.workflow })
   const issueKeyFor = issueNo ? `${repo}#${issueNo}` : `${repo}#${pr}`
 
   // 账本里已经是合并状态：不重复合，直接把队列条目收掉。
@@ -1315,8 +1327,8 @@ export async function handleRequest(ctx, req) {
     const key = `${repo}#${number}`
     // 合并通道已取消：合并直接执行，不排队、不再有独立并发槽。
     // 只用一条进程内的串行链兜住：两条同时进来也不会并着合（合并要写账本，不能并发）。
-    // workflow 默认按「他人 PR」记：手动/编排会话调的合并，基本都是在核对别人的 PR。
-    const workflow = String(req.workflow ?? "review")
+    // 不写死「他人 PR」：交给 runMergeTask 按账本推断（自有工单的 PR 要落在 own 流程）。
+    const workflow = String(req.workflow ?? "").trim() || undefined
     const run = () =>
       runMergeTask(ctx, {
         key, repo, pr: number, issue: issueNo, url: String(req.url ?? ""),
@@ -1374,7 +1386,7 @@ export async function handleRequest(ctx, req) {
       issueKey: `${repo}#${number}`,
       key: `${repo}#${number}`,
       issue: number,
-      workflow: String(req.workflow ?? "review"),
+      workflow: workflowForIssue({ book: new Book(ctx.cfg.stateFile), repo, issueNo: number, declared: req.workflow }),
     })
     ctx.consoleStore?.event({ kind: "issue_close", key: `${repo}#${number}`, repo, number, to: "done" })
     try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}

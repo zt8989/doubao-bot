@@ -122,10 +122,10 @@ export class Lifecycle {
   }
 
   // 一条流程实例：同一个 workflow + 同一个工单/PR 只有一个，重复事件只推进阶段。
-  touchRun(workflow, key, { stage = "", status = "", pr = null } = {}) {
+  touchRun(workflow, key, { stage = "", status = "", pr = null, at = "" } = {}) {
     if (!workflow || !key) return null
     const rk = `${workflow}:${key}`
-    const now = new Date().toISOString()
+    const now = at || new Date().toISOString()
     let run = this.runs.get(rk)
     if (!run) {
       run = { workflow, key, stage: "", status: "running", startedAt: now, updatedAt: now, pr: null }
@@ -150,9 +150,18 @@ export class Lifecycle {
       "pr-open": "pr-open",
     }
     for (const [key, it] of Object.entries(issues ?? {})) {
-      const stage = stageOfIssue[String(it?.state ?? "")]
-      if (!stage) continue
-      this.touchRun("own", key, { stage, status: "running", pr: it?.pr ?? null })
+      const state = String(it?.state ?? "")
+      const at = String(it?.updatedAt ?? "")
+      const stage = stageOfIssue[state]
+      if (stage) {
+        this.touchRun("own", key, { stage, status: "running", pr: it?.pr ?? null, at })
+        continue
+      }
+      // 已经合并关单的自有工单：补一条走到 close 的完成记录，
+      // 否则控制台会显示成「未开始」，看起来像只走到一半。
+      if (state === "done" && Number(it?.pr ?? 0)) {
+        this.touchRun("own", key, { stage: "close", status: "done", pr: it.pr, at })
+      }
     }
     return this.active("own")
   }
