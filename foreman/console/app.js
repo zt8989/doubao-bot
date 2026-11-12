@@ -359,6 +359,28 @@ class FmTasks extends LitElement {
 }
 
 /* ---------------- 定时任务 ---------------- */
+// 上次结果可能是字符串，也可能是 { dispatched, handled } 这种对象：别在页面上渲染成 [object Object]。
+const resultText = (v) => {
+  if (!v) return ""
+  if (typeof v === "string") return v
+  if (typeof v === "number") return String(v)
+  if (typeof v === "object") {
+    if (v.skipped) return `跳过 · ${SKIP_LABEL[v.skipped] || v.skipped}`
+    if (Number.isFinite(Number(v.dispatched))) return `派出 ${Number(v.dispatched)} 条`
+    return ""
+  }
+  return String(v)
+}
+const SKIP_LABEL = {
+  disabled: "这项没开",
+  "off-hours": "不在工作时间",
+  busy: "上一轮还没跑完",
+  locked: "另一个进程正占着锁",
+  "slots-full": "在跑名额已满",
+  "node-paused": "节点已暂停",
+  "window-busy": "被监听的会话还在跑",
+}
+
 class FmSchedules extends LitElement {
   static properties = { schedules: { attribute: false }, busy: { type: String }, error: { type: String } }
   createRenderRoot() {
@@ -376,9 +398,7 @@ class FmSchedules extends LitElement {
           <h2>定时任务</h2>
           <div class="panel-side">
             <span class="hint">cron 格式：分 时 日 月 周；也支持第 6 段秒</span>
-            <button class="ghost" ?disabled=${this.busy === "pickup-run"} @click=${() => emit(this, "pickup-now")}>
-              ${this.busy === "pickup-run" ? "巡检中…" : "立即巡检"}
-            </button>
+            <span class="hint">「立即执行」不看时间与开关，只跑一轮</span>
           </div>
         </div>
         ${this.error ? html`<div class="sched-error">${this.error}</div>` : ""}
@@ -394,9 +414,16 @@ class FmSchedules extends LitElement {
               <div class="sched-meta">
                 ${s.lastAt ? html`<span class="pr-note">上次 ${s.lastAt}</span>` : ""}
                 ${s.count ? html`<span class="pr-note">已跑 ${s.count} 轮</span>` : ""}
-                ${s.lastResult ? html`<span class="pr-note">${s.lastResult}</span>` : ""}
+                ${s.lastResult ? html`<span class="pr-note">${resultText(s.lastResult)}</span>` : ""}
               </div>
               <div class="sched-acts">
+                ${s.runnable
+                  ? html`<button
+                      class="ghost"
+                      ?disabled=${this.busy === `run-${s.id}` || this.busy !== "" || s.running}
+                      @click=${() => emit(this, "schedule-run", { id: s.id })}
+                    >${this.busy === `run-${s.id}` ? "执行中…" : s.runLabel || "立即执行"}</button>`
+                  : ""}
                 <button
                   class=${s.enabled ? "ghost danger" : "ghost"}
                   ?disabled=${this.busy === s.id}
@@ -567,6 +594,18 @@ class FmConsole extends LitElement {
     return this
   }
 
+  // 左侧导航的吸附位置跟着顶栏真实高度走（顶栏一行 / 窄屏换行都能对上），
+  // 免得写死 px 让侧边栏在滚动第一下跳一下。
+  _syncTopbarHeight() {
+    const bar = this.querySelector("fm-head .topbar")
+    const h = bar ? Math.round(bar.getBoundingClientRect().height) : 0
+    if (h > 0) document.documentElement.style.setProperty("--fm-topbar-h", `${h}px`)
+  }
+
+  updated() {
+    this._syncTopbarHeight()
+  }
+
   connectedCallback() {
     super.connectedCallback()
     try {
@@ -600,7 +639,7 @@ class FmConsole extends LitElement {
       } catch {}
     }
     this._onSchedSave = (e) => this.saveScheduleCron(e.detail.id, e.detail.cron)
-    this._onPickupNow = () => this.pickupNow()
+    this._onScheduleRun = (e) => this.runScheduleNow(e.detail.id)
     this._onOpFilter = (e) => {
       this.opFilter = e.detail.filter
     }
@@ -611,7 +650,7 @@ class FmConsole extends LitElement {
     this.addEventListener("sidebar-toggle", this._onSidebarToggle)
     this.addEventListener("schedule-toggle", this._onSchedToggle)
     this.addEventListener("schedule-save", this._onSchedSave)
-    this.addEventListener("pickup-now", this._onPickupNow)
+    this.addEventListener("schedule-run", this._onScheduleRun)
     this._onNodeToggle = (e) => this.toggleNode(e.detail)
     this.addEventListener("node-toggle", this._onNodeToggle)
     this.addEventListener("operation-filter", this._onOpFilter)
@@ -623,6 +662,9 @@ class FmConsole extends LitElement {
       if (this.view === "operations") this.loadOperations()
     }
     window.addEventListener("focus", this._onFocus)
+
+    this._onResize = () => this._syncTopbarHeight()
+    window.addEventListener("resize", this._onResize)
 
     this.load()
     this.loadWorkflow()
@@ -639,6 +681,7 @@ class FmConsole extends LitElement {
   disconnectedCallback() {
     clearInterval(this._loadTimer)
     window.removeEventListener("focus", this._onFocus)
+    window.removeEventListener("resize", this._onResize)
     this._mq?.removeEventListener?.("change", this._onSystemTheme)
     this.removeEventListener("theme-set", this._onTheme)
     this.removeEventListener("day-set", this._onDay)
@@ -647,7 +690,7 @@ class FmConsole extends LitElement {
     this.removeEventListener("sidebar-toggle", this._onSidebarToggle)
     this.removeEventListener("schedule-toggle", this._onSchedToggle)
     this.removeEventListener("schedule-save", this._onSchedSave)
-    this.removeEventListener("pickup-now", this._onPickupNow)
+    this.removeEventListener("schedule-run", this._onScheduleRun)
     this.removeEventListener("node-toggle", this._onNodeToggle)
     this.removeEventListener("operation-filter", this._onOpFilter)
     super.disconnectedCallback()
@@ -799,13 +842,22 @@ class FmConsole extends LitElement {
     }
   }
 
-  async pickupNow() {
+  async runScheduleNow(id) {
     if (this.schedBusy) return
-    this.schedBusy = "pickup-run"
+    this.schedBusy = `run-${id}`
+    this.schedError = ""
     try {
-      await fetch("/api/pickup", { method: "POST" })
+      const res = await fetch("/api/schedules/run", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id }),
+      })
+      const body = await res.json()
+      if (!res.ok || body.ok === false) throw new Error(body.message || `HTTP ${res.status}`)
       await this.loadSchedules()
       await this.load()
+    } catch (e) {
+      this.schedError = `立即执行失败：${e.message}`
     } finally {
       this.schedBusy = ""
     }

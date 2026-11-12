@@ -561,13 +561,25 @@ html[data-theme="dark"] .date-pick { color-scheme: dark; }
 
 .app-shell main { flex: 1; min-width: 0; }
 
-.sidebar {
+/*
+ * 吸附必须挂在 <fm-sidebar> 这个弹性子项上：它内部固定高度的 <aside> 做 sticky 时，
+ * 包含块（宿主自己）高度和 aside 一样高，没有可吸的余量，会跟着页面一起滚走。
+ * top 由 JS 按顶栏真实高度算（--fm-topbar-h），滚动时位置不再变。
+ */
+.app-shell > fm-sidebar {
   position: sticky;
-  top: 88px;
+  top: calc(var(--fm-topbar-h, 69px) + 24px);
   z-index: 5;
+  display: block;
   flex: 0 0 auto;
-  width: 176px;
+  align-self: flex-start;
   margin: 24px 0 0 20px;
+}
+
+.sidebar {
+  position: relative;
+  z-index: 1;
+  width: 176px;
   padding: 8px;
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -772,7 +784,8 @@ footer {
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   table.tasks th.col-try, table.tasks td:nth-child(5) { display: none; }
   .pr-title { flex-basis: 100%; }
-  .sidebar { top: 126px; width: 44px; margin: 14px 0 0 8px; padding: 6px; }
+  .app-shell > fm-sidebar { top: calc(var(--fm-topbar-h, 112px) + 14px); margin: 14px 0 0 8px; }
+  .sidebar { width: 44px; padding: 6px; }
   .sidebar .side-text { display: none; }
   .sidebar .side-link, .sidebar .side-collapse { justify-content: center; padding-left: 0; padding-right: 0; }
   main { padding: 14px 10px 8px; }
