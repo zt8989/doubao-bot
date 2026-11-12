@@ -1061,7 +1061,15 @@ export async function runMergeTask(ctx, task = {}) {
       book,
     })
   }
-  const notes = [...(done.notes ?? []), ...(cleanup?.notes ?? [])]
+  // 通知会话收尾：它报的 PR 现在都合完了，自动归档，别把「PR待合并」会话留在侧边栏。
+  // 合完当场扫一遍（不等下一轮 PR 扫描）；归档失败只记 notes，不推翻合并事实。
+  let archivedNotes = []
+  try {
+    archivedNotes = await archiveMergedNotices({ dws: ctx.dws, stateFile: cfg.stateFile, log })
+  } catch (e) {
+    log(`归档通知会话失败：${e.message}`)
+  }
+  const notes = [...(done.notes ?? []), ...(cleanup?.notes ?? []), ...archivedNotes]
   book.markMergeTask(key, { status: "merged", mergedAt: nowIso(), notes })
   ctx.consoleStore?.event({
     kind: "pr_merge", key, repo, number: pr,
