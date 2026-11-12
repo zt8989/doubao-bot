@@ -151,6 +151,19 @@ export class Book {
     return true
   }
 
+  // delWatchIssue 按工单摘监听：同一条单可能有多个会话（补派过就会有），一次摘一条。
+  // 合并/关单后调用，别让已经收口的单继续被轮询（否则还会按指纹继续出通知）。
+  delWatchIssue(issueKey) {
+    const key = String(issueKey ?? "")
+    if (!key) return false
+    const list = this.watch
+    const i = list.findIndex((w) => String(w.issueKey ?? "") === key)
+    if (i < 0) return false
+    list.splice(i, 1)
+    this.save()
+    return true
+  }
+
   // 记录 (target, 指纹) 已通知，重启后不再重发。
   markNotified(target, fingerprint, extra = {}) {
     this.reload()
