@@ -15,7 +15,8 @@ import { prWatchOnce, prWatchTarget, mergeFailureReason } from "./prwatch.mjs"
 import { plannerDecision, plannerTarget, plannerText, loadQueue } from "./planner.mjs"
 import { listPulls, mergePr, closeIssue, createPr, commentIssue } from "./gitea.mjs"
 import { ConsoleStore } from "./console.mjs"
-import { listSchedules, applySchedules, persistSchedules } from "./schedules.mjs"
+import { listSchedules, applySchedules, persistSchedules, cronOf } from "./schedules.mjs"
+import { nextCronTime } from "./cron.mjs"
 import { startConsoleHttp } from "./consolehttp.mjs"
 import { fileURLToPath } from "node:url"
 import { pingOnce, readPortFile } from "./svclient.mjs"
@@ -503,25 +504,42 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   const doPickup = async () => pickupOnce(ctx)
   ctx.pickup = doPickup
 
-  // PR 扫描与自动接单两套定时器可按配置重排：页面上开关一改就重来，不用重启服务。
+  // PR 扫描与自动接单都由 cron 驱动：页面上改表达式立刻重排，不用重启服务。
+  // 老的 intervalSeconds 仍会读，但没配 cron 时折成分钟级 cron（见 cronOf）。
   const armSchedules = () => {
-    if (state.prInterval) clearInterval(state.prInterval)
-    if (state.prKick) clearTimeout(state.prKick)
-    if (state.pickupInterval) clearInterval(state.pickupInterval)
-    if (state.pickupKick) clearTimeout(state.pickupKick)
-    state.prInterval = null
-    state.prKick = null
-    state.pickupInterval = null
-    state.pickupKick = null
+    for (const k of ["prInterval", "prKick", "pickupInterval", "pickupKick"]) {
+      if (state[k]) clearTimeout(state[k])
+      state[k] = null
+    }
+    state.pr.nextAt = ""
+    state.pickup.nextAt = ""
+
+    const armOne = (kind, expr, run) => {
+      const timerKey = kind === "pr" ? "prInterval" : "pickupInterval"
+      const label = kind === "pr" ? "PR 扫描" : "自动巡检"
+      let next
+      try {
+        next = nextCronTime(expr)
+      } catch (e) {
+        log(`${label}的 cron 不合法（${expr}）：${e.message}`)
+        return
+      }
+      if (!next) {
+        log(`${label}的 cron 两年内没有触发点：${expr}`)
+        return
+      }
+      state[kind].nextAt = next.toISOString()
+      state[timerKey] = setTimeout(() => {
+        state[timerKey] = null
+        if (inWorkHours(cfg)) run().catch((e) => log(`${label}异常：${e.message}`))
+        if (!state.closed) armOne(kind, expr, run)
+      }, Math.max(0, next.getTime() - Date.now()))
+      state[timerKey].unref?.()
+    }
 
     // PR 监听：显式 opt-in（cfg.prWatch.enabled===true）才起；默认关。
     if (cfg.prWatch?.enabled === true) {
-      const intervalMs = Number(cfg.prWatch.intervalSeconds ?? 300) * 1000
-      state.prInterval = setInterval(() => {
-        if (!inWorkHours(cfg)) return
-        doPrPoll().catch((e) => log(`PR 扫描异常：${e.message}`))
-      }, intervalMs)
-      state.prInterval.unref?.()
+      armOne("pr", cronOf(cfg, "prWatch"), doPrPoll)
       state.prKick = setTimeout(() => {
         if (!inWorkHours(cfg)) return
         doPrPoll().catch((e) => log(`PR 扫描异常：${e.message}`))
@@ -529,15 +547,10 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
       state.prKick.unref?.()
     }
 
-    // 自动接单巡检：pickup.auto===true 才起，每 pickup.intervalSeconds 一次，且只在 workHours 内跑。
+    // 自动接单巡检：pickup.auto===true 才起，且只在 workHours 内跑。
     if (cfg.pickup?.auto === true) {
-      const intervalMs = Number(cfg.pickup.intervalSeconds ?? 1800) * 1000
-      state.pickupInterval = setInterval(() => {
-        if (!inWorkHours(cfg)) return
-        doPickup().catch((e) => log(`自动巡检异常：${e.message}`))
-      }, intervalMs)
-      state.pickupInterval.unref?.()
-      // 开启后 1s 先跑一轮：页面上点开就不用等满一个间隔（同一条单靠账本去重，不会重复派）。
+      armOne("pickup", cronOf(cfg, "pickup"), doPickup)
+      // 开启后 1s 先跑一轮：页面上点开就不用等到下一个 cron 点（同一条单靠账本去重，不会重复派）。
       state.pickupKick = setTimeout(() => {
         if (!inWorkHours(cfg)) return
         doPickup().catch((e) => log(`自动巡检异常：${e.message}`))
@@ -567,9 +580,9 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     if (state.closed) return
     state.closed = true
     if (state.interval) clearInterval(state.interval)
-    if (state.prInterval) clearInterval(state.prInterval)
+    if (state.prInterval) clearTimeout(state.prInterval)
     if (state.prKick) clearTimeout(state.prKick)
-    if (state.pickupInterval) clearInterval(state.pickupInterval)
+    if (state.pickupInterval) clearTimeout(state.pickupInterval)
     if (state.pickupKick) clearTimeout(state.pickupKick)
     await new Promise((r) => consoleHttp.server.close(r))
     consoleStore.close()

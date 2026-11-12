@@ -4,7 +4,8 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { listSchedules, applySchedules, persistSchedules, nextWorkdayStart } from "../src/schedules.mjs"
+import { listSchedules, applySchedules, persistSchedules, nextWorkdayStart, cronOf } from "../src/schedules.mjs"
+import { validateCron, nextCronTime } from "../src/cron.mjs"
 import { inWorkHours } from "../src/util.mjs"
 import { startConsoleHttp } from "../src/consolehttp.mjs"
 
@@ -21,11 +22,39 @@ test("listSchedules：四个开关都在，workHours 的 enabled 表示当前是
   assert.deepEqual(rows.map((r) => r.id), ["pickup", "prWatch", "planner", "workHours"])
   assert.equal(rows[0].enabled, false)
   assert.equal(rows[1].enabled, true)
-  assert.match(rows[0].detail, /1800|30 分钟/)
+  assert.match(rows[0].detail, /每轮最多 1 条/)
+  assert.equal(rows[0].cron, "*/30 * * * *")
+  assert.equal(rows[1].cron, "*/5 * * * *")
   // 用工作日中午的时间点判断，避免跑测试时正好在窗口外
   const noon = new Date()
   const inside = applySchedules(cfg, {})
   assert.equal(inside.find((r) => r.id === "workHours").enabled, true)
+})
+
+test("cron：校验表达式、计算下一次，配置优先于 intervalSeconds", () => {
+  assert.equal(validateCron("*/15 8-17 * * 1-5").ok, true)
+  assert.equal(validateCron("0 9 * * 1,3,5").ok, true)
+  assert.equal(validateCron("bad").ok, false)
+  const next = nextCronTime("*/15 * * * *", new Date(2026, 10, 12, 10, 1, 0))
+  assert.equal(next.getHours(), 10)
+  assert.equal(next.getMinutes(), 15)
+  const cfg = baseCfg()
+  assert.equal(cronOf(cfg, "pickup"), "*/30 * * * *")
+  assert.equal(cronOf({ pickup: { cron: "0 9 * * 1-5", intervalSeconds: 1800 } }, "pickup"), "0 9 * * 1-5")
+})
+
+test("applySchedules：对象 patch 可只改 cron 或同时改开关，非法 cron 不落内存", () => {
+  const cfg = baseCfg()
+  const rows = applySchedules(cfg, { pickup: { cron: "*/15 8-17 * * 1-5" } })
+  assert.equal(cfg.pickup.cron, "*/15 8-17 * * 1-5")
+  assert.equal(cfg.pickup.auto, false, "只改时间不应顺手打开")
+  assert.equal(rows[0].cron, "*/15 8-17 * * 1-5")
+  applySchedules(cfg, { prWatch: { enabled: false, cron: "0 */2 * * *" } })
+  assert.equal(cfg.prWatch.enabled, false)
+  assert.equal(cfg.prWatch.cron, "0 */2 * * *")
+  assert.throws(() => applySchedules(cfg, { pickup: { cron: "bad" } }), /cron 不合法/)
+  assert.equal(cfg.pickup.cron, "*/15 8-17 * * 1-5")
+  assert.throws(() => applySchedules(cfg, { planner: { cron: "* * * * *" } }), /没有 cron/)
 })
 
 test("applySchedules：翻转 pickup / prWatch / planner", () => {
@@ -93,6 +122,19 @@ test("persistSchedules：只改开关字段，其余配置原样保留", () => {
 
   // 没配置文件时不做任何事（CLI 单独跑的场景）
   assert.equal(persistSchedules("", { pickup: true }, cfg), false)
+})
+
+test("persistSchedules：对象 patch 同时写 enabled 与 cron", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-sched-cron-"))
+  const file = path.join(dir, "config.json")
+  fs.writeFileSync(file, JSON.stringify({ pickup: { auto: false, me: "233151" }, prWatch: { enabled: true } }))
+  const cfg = baseCfg()
+  applySchedules(cfg, { pickup: { enabled: true, cron: "*/15 8-17 * * 1-5" } })
+  persistSchedules(file, { pickup: { enabled: true, cron: "*/15 8-17 * * 1-5" } }, cfg)
+  const raw = JSON.parse(fs.readFileSync(file, "utf8"))
+  assert.equal(raw.pickup.auto, true)
+  assert.equal(raw.pickup.cron, "*/15 8-17 * * 1-5")
+  assert.equal(raw.pickup.me, "233151")
 })
 
 test("HTTP：/api/schedules 读写开关，/api/pickup 立刻跑一轮", async () => {

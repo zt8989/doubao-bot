@@ -2,6 +2,7 @@
 // 页面上一键启停，写回 config.json 并立刻重排服务里的定时器（不用重启）。
 import fs from "node:fs"
 import { inWorkHours } from "./util.mjs"
+import { validateCron } from "./cron.mjs"
 
 const pad = (n) => String(n).padStart(2, "0")
 
@@ -26,6 +27,18 @@ const localIso = (d) =>
   `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:00`
 
 /** 给页面看的开关状态。 */
+/**
+ * 某项任务的 cron 表达式：配了 cron 就用 cron，否则按老的 intervalSeconds 折成分钟级 cron。
+ * 会话监听是 20 秒一轮，不在这里（cron 最小粒度是分钟）。
+ */
+export function cronOf(cfg, id) {
+  const section = cfg?.[id] ?? {}
+  if (String(section.cron ?? "").trim()) return String(section.cron).trim()
+  const seconds = Number(section.intervalSeconds ?? (id === "pickup" ? 1800 : 300))
+  const minutes = Math.max(1, Math.round(seconds / 60))
+  return minutes === 1 ? "* * * * *" : `*/${minutes} * * * *`
+}
+
 export function listSchedules(cfg, state = {}) {
   const w = cfg?.workHours ?? {}
   const offUntil = String(w.offUntil ?? "")
@@ -38,8 +51,10 @@ export function listSchedules(cfg, state = {}) {
       id: "pickup",
       label: "自动接单",
       enabled: pickup.auto === true,
+      cron: cronOf(cfg, "pickup"),
+      nextAt: state.pickup?.nextAt || "",
       intervalSeconds: Number(pickup.intervalSeconds ?? 1800),
-      detail: `每 ${Math.round(Number(pickup.intervalSeconds ?? 1800) / 60)} 分钟巡检，每轮最多 ${Number(pickup.maxPerRound ?? 1)} 条`,
+      detail: `每轮最多 ${Number(pickup.maxPerRound ?? 1)} 条`,
       lastAt: state.pickup?.lastAt || "",
       count: Number(state.pickup?.count ?? 0),
       lastResult: state.pickup?.lastResult || "",
@@ -48,8 +63,10 @@ export function listSchedules(cfg, state = {}) {
       id: "prWatch",
       label: "PR 扫描",
       enabled: prw.enabled === true,
+      cron: cronOf(cfg, "prWatch"),
+      nextAt: state.pr?.nextAt || "",
       intervalSeconds: Number(prw.intervalSeconds ?? 300),
-      detail: `每 ${Number(prw.intervalSeconds ?? 300)} 秒扫 open PR`,
+      detail: "扫配置里各仓库的 open PR",
       lastAt: state.pr?.lastPollAt || "",
       count: Number(state.pr?.pollCount ?? 0),
       lastResult: Number(state.pr?.notifiedCount ?? 0) ? `累计通知 ${Number(state.pr.notifiedCount)} 次` : "",
@@ -80,20 +97,44 @@ export function listSchedules(cfg, state = {}) {
 }
 
 /**
- * 改开关：只动内存里的 cfg，返回新状态。
+ * 改开关与 cron：只动内存里的 cfg，返回新状态。
+ * patch 每项可以是布尔（纯开关），也可以是对象：
+ *   { pickup: { enabled: true, cron: "*\/15 8-17 * * 1-5" } }
+ * enabled 省略表示只改 cron；cron 非法直接抛错，不落盘、不重排。
  * workHours 的开关语义是「临时闭嘴 / 恢复」，不是改工作时段本身。
  */
 export function applySchedules(cfg, patch = {}, at = new Date()) {
   for (const id of SCHEDULE_IDS) {
     if (!(id in patch)) continue
-    const on = patch[id] === true || patch[id] === "true"
-    if (id === "pickup") cfg.pickup = { ...(cfg.pickup ?? {}), auto: on }
-    else if (id === "prWatch") cfg.prWatch = { ...(cfg.prWatch ?? {}), enabled: on }
-    else if (id === "planner") cfg.planner = { ...(cfg.planner ?? {}), enabled: on }
-    else if (id === "workHours") cfg.workHours = { ...(cfg.workHours ?? {}), offUntil: on ? "" : localIso(nextWorkdayStart(cfg, at)) }
+    const raw = patch[id]
+    const obj = raw && typeof raw === "object" ? raw : { enabled: raw === true || raw === "true" }
+    if ("cron" in obj && id !== "pickup" && id !== "prWatch") throw new Error(`${id} 不是独立定时任务，没有 cron 可改`)
+    const next = {}
+    if ("enabled" in obj) next.enabled = obj.enabled === true || obj.enabled === "true"
+    if ("cron" in obj) {
+      const v = validateCron(obj.cron)
+      if (!v.ok) throw new Error(`${id} 的 cron 不合法：${v.error}`)
+      next.cron = v.expression
+    }
+    if (id === "pickup") {
+      cfg.pickup = { ...(cfg.pickup ?? {}) }
+      if ("enabled" in next) cfg.pickup.auto = next.enabled
+      if ("cron" in next) cfg.pickup.cron = next.cron
+    } else if (id === "prWatch") {
+      cfg.prWatch = { ...(cfg.prWatch ?? {}) }
+      if ("enabled" in next) cfg.prWatch.enabled = next.enabled
+      if ("cron" in next) cfg.prWatch.cron = next.cron
+    } else if (id === "planner") {
+      if ("enabled" in next) cfg.planner = { ...(cfg.planner ?? {}), enabled: next.enabled }
+    } else if (id === "workHours" && "enabled" in next) {
+      cfg.workHours = { ...(cfg.workHours ?? {}), offUntil: next.enabled ? "" : localIso(nextWorkdayStart(cfg, at)) }
+    }
   }
   return listSchedules(cfg)
 }
+
+/** 开关对应的配置键名（pickup.auto，其余是 enabled）。 */
+const FLAG_KEY = { pickup: "auto", prWatch: "enabled", planner: "enabled" }
 
 /**
  * 写回配置文件：只改上面这四个开关，其余字段（含用户手写的格式/注释式排版）原样保留。
@@ -104,11 +145,16 @@ export function persistSchedules(file, patch = {}, cfg = {}) {
   const raw = JSON.parse(fs.readFileSync(file, "utf8"))
   for (const id of SCHEDULE_IDS) {
     if (!(id in patch)) continue
-    const on = patch[id] === true || patch[id] === "true"
-    if (id === "pickup") raw.pickup = { ...(raw.pickup ?? {}), auto: on }
-    else if (id === "prWatch") raw.prWatch = { ...(raw.prWatch ?? {}), enabled: on }
-    else if (id === "planner") raw.planner = { ...(raw.planner ?? {}), enabled: on }
-    else if (id === "workHours") raw.workHours = { ...(raw.workHours ?? {}), offUntil: String(cfg?.workHours?.offUntil ?? "") }
+    const value = patch[id]
+    const obj = value && typeof value === "object" ? value : { enabled: value === true || value === "true" }
+    const section = { ...(raw[id] ?? {}) }
+    if (id === "workHours") {
+      if ("enabled" in obj) section.offUntil = String(cfg?.workHours?.offUntil ?? "")
+    } else {
+      if ("enabled" in obj) section[FLAG_KEY[id]] = obj.enabled === true || obj.enabled === "true"
+      if ("cron" in obj) section.cron = String(cfg?.[id]?.cron ?? obj.cron)
+    }
+    raw[id] = section
   }
   fs.writeFileSync(file, JSON.stringify(raw, null, 2) + "\n")
   return true

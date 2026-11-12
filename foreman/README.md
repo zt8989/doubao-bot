@@ -97,8 +97,9 @@ foreman status                # 在不在 + 监听明细 + lastPollAt / pollCoun
   - 还没构建时 `/` 回 **503 + 构建提示页**，不会只给一个 404。
 - 页面右上角可切主题：亮 / 暗 / 自动（跟随系统）；选择存 `localStorage`，跟随系统时深浅色变化实时生效。
 - 页面顶部两个页签：**「工单与 PR」（可切日期回看某天）** 和 **「定时任务」**。
-  - 「定时任务」列出自动接单（`pickup.auto`）、PR 扫描（`prWatch.enabled`）、续接调度（`planner.enabled`）、工作时间窗（`workHours.offUntil` 临时闭嘴）四项，带运行状态、上次时间与已跑轮数；
-  - 点「开启/停止」会 `POST /api/schedules`（body `{"patch":{"pickup":true}}`）：先改内存里的 cfg、再写回 `config.json`、然后立刻重排定时器，**不用重启服务**；
+  - 「定时任务」列出自动接单（`pickup.auto`）、PR 扫描（`prWatch.enabled`）、续接调度（`planner.enabled`）、工作时间窗（`workHours.offUntil` 临时闭嘴）四项，带运行状态、上次时间、下次触发与已跑轮数；
+  - 自动接单与 PR 扫描的时间可自由编辑 **cron 表达式**：标准 5 段「分 时 日 月 周」，也支持第 6 段秒；对应配置 `pickup.cron` / `prWatch.cron`。没配 cron 时仍兼容旧的 `intervalSeconds`，折成分钟级表达式；
+  - 点「开启/停止」或「保存时间」会 `POST /api/schedules`（如 `{"patch":{"pickup":{"enabled":true,"cron":"*/15 8-17 * * 1-5"}}}`）：先校验并改内存 cfg、再写回 `config.json`、然后立刻重排定时器，**不用重启服务**；非法 cron 返回 400，不会落盘；
   - 「立即巡检」走 `POST /api/pickup`，等价于手动 `foreman pickup`。
   - `GET /api/schedules` 返回同一份状态，脚本/CLI 也可用。
 

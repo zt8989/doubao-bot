@@ -306,9 +306,13 @@ class FmPrs extends LitElement {
 
 /* ---------------- 定时任务 ---------------- */
 class FmSchedules extends LitElement {
-  static properties = { schedules: { attribute: false }, busy: { type: String } }
+  static properties = { schedules: { attribute: false }, busy: { type: String }, error: { type: String } }
   createRenderRoot() {
     return this
+  }
+  saveCron(id) {
+    const input = this.querySelector(`input[data-cron="${id}"]`)
+    if (input) emit(this, "schedule-save", { id, cron: input.value.trim() })
   }
   render() {
     const rows = this.schedules || []
@@ -317,12 +321,13 @@ class FmSchedules extends LitElement {
         <div class="panel-head">
           <h2>定时任务</h2>
           <div class="panel-side">
-            <span class="hint">开关会写回 config.json，立刻生效，不用重启服务</span>
+            <span class="hint">cron 格式：分 时 日 月 周；也支持第 6 段秒</span>
             <button class="ghost" ?disabled=${this.busy === "pickup-run"} @click=${() => emit(this, "pickup-now")}>
               ${this.busy === "pickup-run" ? "巡检中…" : "立即巡检"}
             </button>
           </div>
         </div>
+        ${this.error ? html`<div class="sched-error">${this.error}</div>` : ""}
         <ul class="sched-list">
           ${rows.map((s) => html`
             <li class="sched">
@@ -344,6 +349,23 @@ class FmSchedules extends LitElement {
                   @click=${() => emit(this, "schedule-toggle", { id: s.id, enabled: !s.enabled })}
                 >${this.busy === s.id ? "…" : s.enabled ? "停止" : "开启"}</button>
               </div>
+              ${s.cron !== undefined
+                ? html`<div class="sched-cron">
+                    <span class="cron-label">cron</span>
+                    <input
+                      class="cron-input"
+                      data-cron=${s.id}
+                      value=${s.cron || ""}
+                      spellcheck="false"
+                      placeholder="*/30 * * * *"
+                      @keydown=${(e) => { if (e.key === "Enter") this.saveCron(s.id) }}
+                    />
+                    <button class="ghost" ?disabled=${this.busy === `cron-${s.id}`} @click=${() => this.saveCron(s.id)}>
+                      ${this.busy === `cron-${s.id}` ? "保存中…" : "保存时间"}
+                    </button>
+                    <span class="pr-note">${s.nextAt ? `下次 ${s.nextAt}` : s.enabled ? "等待排期" : "开启后生效"}</span>
+                  </div>`
+                : ""}
             </li>`)}
           ${rows.length ? "" : html`<li class="empty"><div class="empty-title">暂时取不到开关状态</div></li>`}
         </ul>
@@ -396,6 +418,7 @@ class FmConsole extends LitElement {
     view: { type: String },
     schedules: { attribute: false },
     schedBusy: { type: String },
+    schedError: { type: String },
     busy: { type: String },
     error: { type: String },
   }
@@ -409,6 +432,7 @@ class FmConsole extends LitElement {
     this.view = "overview"
     this.schedules = []
     this.schedBusy = ""
+    this.schedError = ""
     // day 为空 = 看今天；选了某天就回看那天的任务/PR。URL 上带 ?day= 也能直接打开那天。
     this.day = ""
     try {
@@ -451,6 +475,7 @@ class FmConsole extends LitElement {
       if (this.view === "schedules") this.loadSchedules()
     }
     this._onSchedToggle = (e) => this.toggleSchedule(e.detail.id, e.detail.enabled)
+    this._onSchedSave = (e) => this.saveScheduleCron(e.detail.id, e.detail.cron)
     this._onPickupNow = () => this.pickupNow()
     this.addEventListener("theme-set", this._onTheme)
     this.addEventListener("filter-set", this._onFilter)
@@ -458,6 +483,7 @@ class FmConsole extends LitElement {
     this.addEventListener("refresh", this._onRefresh)
     this.addEventListener("view-set", this._onView)
     this.addEventListener("schedule-toggle", this._onSchedToggle)
+    this.addEventListener("schedule-save", this._onSchedSave)
     this.addEventListener("pickup-now", this._onPickupNow)
 
     this._onFocus = () => {
@@ -484,6 +510,7 @@ class FmConsole extends LitElement {
     this.removeEventListener("refresh", this._onRefresh)
     this.removeEventListener("view-set", this._onView)
     this.removeEventListener("schedule-toggle", this._onSchedToggle)
+    this.removeEventListener("schedule-save", this._onSchedSave)
     this.removeEventListener("pickup-now", this._onPickupNow)
     super.disconnectedCallback()
   }
@@ -554,13 +581,38 @@ class FmConsole extends LitElement {
   async toggleSchedule(id, enabled) {
     if (this.schedBusy) return
     this.schedBusy = id
+    this.schedError = ""
     try {
-      await fetch("/api/schedules", {
+      const res = await fetch("/api/schedules", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ patch: { [id]: enabled } }),
       })
+      const body = await res.json()
+      if (!res.ok || body.ok === false) throw new Error(body.message || `HTTP ${res.status}`)
       await this.loadSchedules()
+    } catch (e) {
+      this.schedError = `开关失败：${e.message}`
+    } finally {
+      this.schedBusy = ""
+    }
+  }
+
+  async saveScheduleCron(id, cron) {
+    if (this.schedBusy) return
+    this.schedBusy = `cron-${id}`
+    this.schedError = ""
+    try {
+      const res = await fetch("/api/schedules", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ patch: { [id]: { cron } } }),
+      })
+      const body = await res.json()
+      if (!res.ok || body.ok === false) throw new Error(body.message || `HTTP ${res.status}`)
+      this.schedules = body.schedules || []
+    } catch (e) {
+      this.schedError = `保存失败：${e.message}`
     } finally {
       this.schedBusy = ""
     }
@@ -596,7 +648,7 @@ class FmConsole extends LitElement {
           )}
         </div>
         ${this.view === "schedules"
-          ? html`<fm-schedules .schedules=${this.schedules} .busy=${this.schedBusy}></fm-schedules>`
+          ? html`<fm-schedules .schedules=${this.schedules} .busy=${this.schedBusy} .error=${this.schedError}></fm-schedules>`
           : this.data
           ? html`
               <fm-stats .stats=${this.data.stats} .scope=${this.data.isToday === false ? this.data.day : "今日"}></fm-stats>
