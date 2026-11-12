@@ -80,10 +80,17 @@ foreman status                # 在不在 + 监听明细 + lastPollAt / pollCoun
 - 数据：账本（`issues` / `prWatch`）同步进 SQLite；唯一键 `"<owner>/<repo>#<number>"`，
   重复同步只更新状态与 `last_seen_at`，`first_seen_at` 保留第一次发现，**按工单去重、不重复出行**。
 - 接口：`GET /api/snapshot`（当天任务 + PR）、`GET /api/polls`（最近扫描记录）、
-  `POST /api/sync`（立刻扫一轮 PR 并落库）。
+  `GET /api/history?days=N`（历史事件，`days=0` 全部）、`POST /api/sync`（立刻扫一轮 PR 并落库）。
+- 页面第二块是「历史」：按天分组的事件流水，可切 今天 / 近 7 天 / 近 30 天 / 全部。
+  事件表 `events` 跟账本同库，记 `task_new` / `task_state` / `task_attempt` / `pr_new` / `pr_state` /
+  `pr_open` / `pr_merge` / `issue_comment` / `issue_close`。`sync` 比对上一行状态自动记（同一状态不重复），
+  `pr open|merge`、`issue comment|close` 由服务显式记；老库第一次升级会按现有单/PR 回填一批（detail 标「（回填）」）。
 - `port` 允许写 `0`（系统分配端口，主要给测试）；实际端口一样写进端口文件。
 - 没有 `enabled` 开关：HTTP 是唯一通道，服务起来就一定在听。要停服务用 SIGTERM / Ctrl-C。
-- 页面源码在 `foreman/console/`（纯原生 HTML/CSS/JS，无依赖）。
+- 前端是 **Lit 组件**（源码 `foreman/console/`：`index.html` / `app.js` / `style.css`），用 **Vite** 构建成 `console/dist`，**服务直接从本地下发，不依赖 CDN、也没有运行时 vendor 文件**。
+  - 构建：`npm run build:console`（改完前端跑一次；静态文件每次请求现读，服务不用重启）。
+  - 开发：`npm run dev:console`（Vite dev server，自己起在 5173，接口仍需打到服务）。
+  - 还没构建时 `/` 回 **503 + 构建提示页**，不会只给一个 404。
 - 页面右上角可切主题：亮 / 暗 / 自动（跟随系统）；选择存 `localStorage`，跟随系统时深浅色变化实时生效。
 
 ### 三个文件
@@ -115,16 +122,21 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 - 指纹 = `sha1(chars|head|tail)` 前 12 位。**跑完 + 指纹相对上次已通知的指纹变了**，才发一次；
   同一个 `(会话, 指纹)` 只发一次，去重记在 `state.json` 的 `notified` 键——**服务重启也不重发**。
 
-### 通知口径
+### 通知口径：默认每次新建会话
 
-- 目标 = 登记时写的 `notifyTo`，没写取 `notify.session`（`auto` → 环境变量 `MCP_VM_CONVERSATION_ID`）。
+- `deliver.mode: "new"`（默认）：**每条通知都新建一条豆包会话**。首句 = `deliver.promptFile`
+  （固定提示词，运行时副本）+ `监控项目：<deliver.projectDir>` + 这条通知正文，
+  用 `dws open --no-wait` 投递（只确认首句送达，不等第一轮回复）。
+  新会话记进账本 `sessions` 但 `notify: false`，**不纳入监听**——它是编排者，纳入会自己通知自己。
+- `deliver.mode: "existing"`：旧行为，塞回已有会话——目标 = 登记时写的 `notifyTo`，
+  没写取 `notify.session`（`auto` → 环境变量 `MCP_VM_CONVERSATION_ID`）。
 - 正文含仓库、工单号、结论类别、PR 链接（有则带）。结论类别由服务用 `dws info` 读最后回复、
   按 RESULT 映射：`done` / `needs-human` / `blocked` / `failed`；读不到或没有工单记录 → `session-done`。
-- **三种不发**：`notify.enabled: false`；目标为空（no-target）；目标正好是被监听的会话自己（self）。
-  另外结论不在 `notify.events` 白名单里也不发（显式盯的 `session-done` 不做事件过滤）。
-- **`--notify` 只改登记的通知目标**：`foreman run --notify <会话id|标题>` = 这一轮派出去的会话，登记监听时通知目标写谁。
+- **不发的情况**：`notify.enabled: false`；结论不在 `notify.events` 白名单里；
+  `existing` 模式下目标为空（no-target）或目标正好是被监听的会话自己（self）。
+- **`--notify` 只影响 `existing` 模式**：`foreman run --notify <会话id|标题>` = 这一轮派出去的会话，登记监听时通知目标写谁。
   **`--no-notify` 只表示本轮不登记监听**：这一轮的会话不会被盯，也就不会有通知。
-- 通知发送失败只写 `service.log`、`dwsErrors++`，不打断轮询。
+- 投递失败只写 `service.log`、`dwsErrors++`，不打断轮询；同一指纹最多试 `notify.maxAttempts` 次。
 
 ### 服务没在跑时，通知会丢
 
@@ -134,19 +146,33 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 2. `foreman watch poll` —— 立刻重放一轮，已跑完且指纹没通知过的会补发。
 3. `foreman status` —— 看 `lastPollAt` / `pollCount` / `dwsErrors`，判断服务是没在跑，还是在跑但一直出错。
 
+## 工作时间窗
+
+两套定时器（会话监听、PR 扫描）只在 `workHours` 窗口里跑，窗口外跳过，不打扰：
+
+```json
+"workHours": { "enabled": true, "days": [1,2,3,4,5], "start": "08:30", "end": "18:30", "offUntil": "" }
+```
+
+- `days`：1=周一 … 7=周日；`start`/`end` 左闭右开（到 18:30 就停）
+- `offUntil`：临时闭嘴时间点（ISO 带时区），到点自动恢复
+- 不配 `workHours` 或 `enabled: false` = 全天跑；手动 `foreman pr poll` / `watch poll` 不受窗口限制
+- `foreman status` 里 `workHours.active` 显示当前是否在窗口内
+
 ## PR 监听（默认 5 分钟一轮）
 
 服务里还有一条独立定时器，每 `prWatch.intervalSeconds`（默认 300s）扫一遍 `repos[]` 下各仓库的 open PR：
 
 - 列表走 `opencli gitea pull-list --repo <owner/name> --state open`（新加的只读适配器命令，带回 `author`）。
 - 作者在 `prWatch.ignoreAuthors`（自己的账号，由 `pickup.me` 补齐）里的 PR 跳过，只记一笔 `skipped: "self"`。
-- 其余 PR 合成一条消息，用 `dws notify` 发给 `prWatch.notifyTarget`：
+- 其余 PR 合成一条消息投递出去：`deliver.mode: "new"`（默认）**新建一条会话**（首句带固定提示词 + 监控项目；
+  会话名形如 `foreman-PR待合并-<YYYYMMDD-HHmm>`）；`deliver.mode: "existing"` 才用 `dws notify` 发给 `prWatch.notifyTarget`：
   - `earliest`（默认）= 账本 `sessions` 里**最早登记**、有 `convId` 的那个会话，即第一个调用方；
   - 也可以直接写死会话 id 或侧边栏标题。
 - 有冲突的 PR 默认过滤（`prWatch.filterConflicts`，查 `pr-view` 的 `mergeNote`），不合也不报。
 - 作者不是自己的 PR **只通知、监听里不合**（看不到关联工单）；通知带 `foreman pr merge <N> --repo R`，由编排 agent 核对工单后合并，合不了回理由。
 - 去重记在 `state.json` 的 `prWatch` 键（`<repo>#<number>`），**发成功才盖 `notifiedAt`**；发送失败下一轮重试，重启不重发。
-- 账本里还没有调用方会话时这轮不发、也不记账，等有调用方了下一轮补发。
+- 账本里还没有调用方会话时：`existing` 模式这轮不发、也不记账；`new` 模式不受影响（每次都新建会话）。
 - 起服务 1s 后先扫一遍，之后按间隔跑。
 
 ```bash
@@ -163,6 +189,7 @@ foreman run --once               # 真跑一轮（每仓库 perRepoPerRound 条�
 foreman run --every 1800         # 常驻，每 1800s 一轮
 foreman run --notify <会话id|标题>  # 这一轮派出的会话，登记监听时通知目标写谁
 foreman run --no-notify          # 这一轮不登记监听，因此不会有通知（连同其它参数一起用）
+foreman pickup                   # 手动催服务跑一轮自动巡检（不用等下一个间隔）
 foreman tasks                    # 每条工单到哪一步、卡在哪
 foreman pr poll                  # 立刻扫一轮 PR（别人的单报给最早登记的调用方）
 foreman pr list                  # 看 PR 监听账本
@@ -183,6 +210,17 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 - 结论 `done` + 在跑单 `< maxRunning`（默认 2）+ 队列还有可接工单 → 发「可以继续接单」，正文带工单列表（`listLimit` 条，默认 5）
 - 结论不是 `done` → 发「需要你看一下」，带状态/原因/分支/PR 和 `foreman retry` 提示
 - 同一 `(会话, 指纹)` 只提醒一次（账本 `planner.lastKey`）；目标 `planner.target`（默认 `auto` = 最早登记的调用方）
+
+### 自动巡检（pickup.auto）
+
+`pickup.auto: true` 时，服务自己就是调度器，不用外部 cron、也不用守着敲 `foreman run`：
+
+- 每 `pickup.intervalSeconds`（默认 1800 = 30 分钟）跑一轮捞单，且只在 `workHours`（工作日 08:30–17:30）里跑；
+- 起服务 1s 后先跑一轮，重启即开始巡检；同一工单靠账本去重（`working` 状态不会再捞），不会重复派；
+- 每轮最多派 `pickup.maxPerRound` 条（默认 1，豆包单实例，一次只派一条）；
+- 和 CLI 的 `foreman run` 抢同一把 `run.lock`：两边同时捞会把同一条单派两次，所以谁先拿到锁谁跑；
+- 只派活、不等结果；跑完的结论仍由 `pollSeconds` 轮询后按 `deliver` 口径投递；
+- `foreman status` 里有 `pickup` 段（`auto/intervalSeconds/lastAt/count/lastResult`），`foreman pickup` 可手动催一轮。
 
 ## 配置
 
@@ -210,9 +248,20 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
     "labelIds": [5],
     "excludeLabels": ["needs-human", "ready-for-human", "needs-info", "wontfix", "agent-blocked"],
     "onlyUnassigned": true,
-    "order": "oldest"
+    "order": "oldest",
+    "auto": true,
+    "intervalSeconds": 1800,
+    "maxPerRound": 1
   },
+  "workHours": { "enabled": true, "days": [1, 2, 3, 4, 5], "start": "08:30", "end": "17:30", "offUntil": "" },
   "merge": { "enabled": false, "style": "merge", "deleteBranch": true },
+  "deliver": {
+    "mode": "new",
+    "promptFile": "~/.foreman/prompts/工作原则与工作流-提示词.md",
+    "projectDir": "~/Documents/workspace/win-ai-stack",
+    "namePrefix": "foreman",
+    "waitFirstReply": false
+  },
   "notify": {
     "enabled": true,
     "session": "auto",
@@ -247,14 +296,16 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 - `merge.enabled` 默认 **false**：只开 PR 不合并，状态停在 `pr-open`。设为 `true` 即自动合并，
   合并由**编排自己**执行（`merge.by: foreman`，默认）：服务在会话 `done` + 带 PR + 自证非空时直接 `pr-merge` + `close`，
   每张 PR 只合一次（账本 `mergeAsk` 记 `merged`/`failed`），冲突只记录并通知、不 force merge。
-- **通知默认开、且只有常驻服务这一条路**：会话跑完后，由服务用 `dws send` 把「哪条单 + 结论类别 + 分支 + PR 链接（有则带）」
-  回给登记的通知目标——默认取 `notify.session`（`auto` 时取环境变量 `MCP_VM_CONVERSATION_ID`，
-  也可以写成别的会话 id 或侧边栏标题）。run 自己不发通知。
-- **`--notify` / `--no-notify` 只管登记**：`foreman run --notify <会话id|标题>` 把这一轮派出会话的通知目标写它；
-  `--no-notify` 表示这一轮不登记监听、也就不会有通知。要永久关：`notify.enabled: false`。
-- **什么时候不发**：`notify.enabled: false`；目标为空（`session: "auto"` 但当前环境没有 `MCP_VM_CONVERSATION_ID`，也没写死目标）；
-  目标正好是被监听会话自己；结论不在 `notify.events` 白名单里（默认只发上面那 6 个，`working`/`planned` 不发；
-  显式盯的 `session-done` 例外）。通知本身失败只写 `service.log`、计 `dwsErrors`，不打断轮询。
+- **`deliver` 管「通知往哪去」**：`mode: "new"`（默认）每次新建会话投递，`promptFile` 是固定提示词的运行时副本路径
+  （`~/.foreman/prompts/` 下；路径只从配置来，代码里没有内置文案），`projectDir` 是写进首句的监控项目，
+  `waitFirstReply: false` 表示只确认首句送达、不等第一轮回复。`mode: "existing"` 退回塞回已有会话。
+- **通知默认开、且只有常驻服务这一条路**：会话跑完后，由服务按 `deliver.mode` 投递
+  「哪条单 + 结论类别 + 分支 + PR 链接（有则带）」。run 自己不发通知。
+- **`--notify` / `--no-notify` 只管登记**：`foreman run --notify <会话id|标题>` 把这一轮派出会话的通知目标写它
+  （只对 `deliver.mode: existing` 有意义）；`--no-notify` 表示这一轮不登记监听、也就不会有通知。要永久关：`notify.enabled: false`。
+- **什么时候不发**：`notify.enabled: false`；结论不在 `notify.events` 白名单里（默认只发上面那 6 个，
+  `working`/`planned` 不发；显式盯的 `session-done` 例外）；`existing` 模式下目标为空、或目标正好是被监听会话自己。
+  投递本身失败只写 `service.log`、计 `dwsErrors`，不打断轮询。
 - **`service.enabled: false`** 等价于每条命令都带 `--no-service`：不再握手、不自动拉起服务。
   `pidFile` / `logFile` / `service.http.portFile` 都可在配置里改路径（测试用临时目录）。
 - `verify` 是逐条 `bash -lc` 跑在工作区里的验收命令；空数组表示只查"干净 + 有提交"。
@@ -273,7 +324,8 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 
 ## 边界
 
-- 会话负责"在 worktree 里改 + 自测 + `git push` + `foreman pr open` 开 PR"，边界写进首句提示词；PR / 工单的写操作只走 foreman（`pr open`、`issue comment|close`），直接 `opencli gitea` 写会让账本与控制台统计断档。
+- 会话负责"在 worktree 里改 + 自测 + `git push` + `foreman pr open` 开 PR"，边界写进首句提示词。
+- **收口只有两条：建 PR（`pr open`）与合并（`pr merge`）**——账本要把 PR 挂到「单 + 会话」，合并要幂等。工单侧的读、建单、评论、改标签、关单都直接 `opencli gitea`，`herdr`、`dws` 会话也直连；这些动作只是不留痕于 `console.db`。
 - 合并由服务在 `merge.enabled: true` 时执行（`merge.by: foreman`，默认），会话不合并；`verify` / `publish` 代码保留但没接线。
 - 不做 force merge：合并失败就停下，工单留言交人。
 - 豆包是单实例：用户自己开着豆包时 dws 会报 `app_busy`，整轮终止（不逐条重试），让对方 ⌘Q 后再跑。

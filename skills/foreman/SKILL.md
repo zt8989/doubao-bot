@@ -1,6 +1,6 @@
 ---
 name: foreman
-description: 接单编排 CLI（项目 foreman，命令 foreman）：用 opencli 读内网 Gitea 的 ready-for-agent 工单、用 herdr 从 origin/<base> 开 worktree、用 dws 把活派给豆包会话后立即返回（不验收、不 push：会话自测通过后自己 push，并经 `foreman pr open` 开 PR，PR/工单写操作都收口在 foreman），常驻服务异步监听会话、跑完把结论与 PR 回通知。当用户说自动接单、接工单、把工单派给豆包、批量跑 Gitea 工单、看某条工单处理到哪、把卡住的单放回队列，或提到 foreman 时报 app_busy / locked / pr-open 时使用。dws 只管豆包会话、opencli 只管 Gitea、herdr 只管 worktree，串联是 foreman 的事。它带一个常驻服务：CLI 每次启动先跟服务握手，会话由服务异步监听，跑完再回通知（只有异步一条路径，没有同步发送）。整条链路的验收口径见 workflow。提到 foreman 但报「服务没起 / service_unavailable / 监听没收到」也用本技能。
+description: 接单编排 CLI（项目 foreman，命令 foreman）：用 opencli 读内网 Gitea 的 ready-for-agent 工单、用 herdr 从 origin/<base> 开 worktree、用 dws 把活派给豆包会话后立即返回（不验收、不 push：会话自测通过后自己 push，并经 `foreman pr open` 开 PR），常驻服务异步监听会话、跑完把结论与 PR 回通知。只收口两件事：**建 PR（`foreman pr open`）与合并（`foreman pr merge`）**——它们要写账本、要幂等；Gitea 的读、建单/改单/评论/关单、dws 会话、herdr 一律直连，不经 foreman。当用户说自动接单、接工单、把工单派给豆包、批量跑 Gitea 工单、看某条工单处理到哪、把卡住的单放回队列，或提到 foreman 时报 app_busy / locked / pr-open 时使用。它带一个常驻服务：CLI 每次启动先跟服务握手，会话由服务异步监听，跑完再回通知（只有异步一条路径，没有同步发送）。整条链路的验收口径见 workflow。提到 foreman 但报「服务没起 / service_unavailable / 监听没收到」也用本技能。
 ---
 
 # foreman：接单编排
@@ -14,6 +14,24 @@ description: 接单编排 CLI（项目 foreman，命令 foreman）：用 opencli
 | `opencli gitea` | 工单/PR 读写（复用 Chrome 登录态） | Chrome 里已登录 Gitea；每条命令 20–40s |
 | `herdr` | 建 git worktree（顺带在 herdr 里挂工作区） | `herdr` server 在跑（`herdr status`） |
 | `dws` | 豆包会话（开会话/续说/读状态/读对话） | 豆包**单实例**，用户自己开着时要先 ⌘Q |
+
+## 收口边界（只有两条）
+
+**必须经 foreman**——因为它们要给账本写东西，绕过就是断档：
+
+| 动作 | 命令 | 为什么非它不可 |
+| --- | --- | --- |
+| 建 PR | `foreman pr open` | PR 与「哪条单、哪个会话」的对应只有它知道；直接 `opencli gitea pr` 建的 PR 在账本里不存在，控制台看不到 |
+| 合并 PR | `foreman pr merge` | 每张 PR 只合一次的幂等（`mergeAsk`）+ 合完推进 `done` / 关单 |
+
+**其余一律直连，不经 foreman**：
+
+- Gitea 的**读**：`pr-view` / `issue-view` / `search` / `pull-list` / `label-list` / `milestone` / `explore`。
+- Gitea 的**其它写**：`issue`（建单）、`issue-comment`、`issue-edit`（标题/正文/标签/指派）、`close` / `reopen`、`assign` / `due` / `milestone-set`。
+- `dws` 全部会话类命令（`open` / `send` / `status` / `info` / `list` / `use` / `steer` / `stop` / `archive` / `notify`）。
+- `herdr` 全部。
+
+理由：读不产生状态、改了也不推进状态机，这些下一轮 `search --label` / `pull-list` 自然读到最新值，没有东西依赖它们实时进账本。`foreman issue comment|close` 还在、用了会顺手落库，但**不是必须**。
 
 ## 常驻服务（异步监听）
 
@@ -29,12 +47,31 @@ foreman watch rm <会话id|标题>     # 取消登记
 foreman watch poll               # 立刻跑一轮（checked / settled / notified），取证补漏
 ```
 
+- **自动巡检（`pickup.auto: true`）**：服务自己按 `pickup.intervalSeconds`（默认 1800s）在工作时间窗（`workHours`，默认工作日 08:30–17:30）里捞单，起服务 1s 后先跑一轮；每轮最多 `pickup.maxPerRound`（默认 1）条，和 CLI 的 `foreman run` 抢同一把 `run.lock`，账本 `working` 去重所以不会重复派。**不用外部 cron，也不用守着敲 `foreman run`**。`foreman pickup` 手动催一轮；`foreman status` 的 `pickup` 段看 `lastAt/count/lastResult`。
+
 - **CLI 启动即握手**（除 `serve` / `help`）：任意子命令起来先读端口文件 `~/.foreman/service.port`（服务写的纯数字），拿它去 `GET /api/ping`；通了直接跑，不通就自动拉起服务、等服务把端口写进文件再连（上限 `handshakeTimeoutMs`，默认 5s）。**CLI 与服务的通信全程 HTTP，没有 unix socket。** 起不来非零退出，打印 `✗ foreman 服务没起来：<原因>` + 两条可执行提示（`foreman serve`、`cat ~/.foreman/service.log`），照做，别手动猜。
 - 逃生开关 `--no-service`：跳过握手与自动拉起，只跑这一条命令（测试与排障用）；配置 `service.enabled: false` 等价于一直带它。
 - 服务文件都在 `~/.foreman/` 下：`service.port`（实际端口，纯数字一行）、`foreman.pid`（pid/port/http/portFile/启动时间/版本）、`service.log`。重复启动只回「已在运行」（`already-running`），不会起第二个；端口被别的进程占着报 `port-in-use`；停用 SIGTERM 或前台 Ctrl-C。
 - 监听节奏沿用 `pollSeconds`（默认 20s）：对登记会话跑 `dws status`，`streaming` 真（running）或 `chars: 0`（pending，dws 的"还没开始"坑）不动；`finished` 真、或 finished/streaming 都假但 `chars > 0` 且有文本（settled）才算跑完；再要求「回复指纹变了」（指纹 = `sha1(chars|head|tail)` 前 12 位）。同一个 `(会话, 指纹)` 只通知一次，去重记在 state.json 的 `notified` 键，服务重启不重发。
 - 通知含仓库、单号、结论类别、PR 链接（有则带）；目标取登记的 `notifyTo`，没写取 `notify.session`（`auto` → `MCP_VM_CONVERSATION_ID`）。三种不发：`notify.enabled: false`、目标为空、目标就是被监听会话自己；结论不在 `notify.events` 白名单也不发（显式盯的 `session-done` 例外）。发送失败只写 `service.log`、`dwsErrors++`，不影响继续监听。
-- **控制台与 CLI 共用一条 HTTP**：服务只监听 `http://127.0.0.1:7317`（`service.http.port`，0 表示系统分配；实际端口写进 `service.port`）。CLI 走 `POST /api/rpc`（body 是 `{id, cmd, …}`）、探活走 `GET /api/ping`；浏览器访问 `/`。接口：`GET /api/snapshot`（当天任务 + PR）、`GET /api/polls`、`POST /api/sync`（立刻扫一轮）。数据落在 SQLite `~/.foreman/console.db`，唯一键 `<owner>/<repo>#<number>`，按工单去重、重复同步不多出行。`tasks` 表带 `agent` 列（派给哪个会话），可按会话统计。`foreman pr open` / `foreman issue comment|close` 写完立刻 `sync` 落库，控制台不用等下一轮。没有 `service.http.enabled` 开关——HTTP 是唯一通道，服务起来就一定在听。
+- **控制台与 CLI 共用一条 HTTP**：服务只监听 `http://127.0.0.1:7317`（`service.http.port`，0 表示系统分配；实际端口写进 `service.port`）。CLI 走 `POST /api/rpc`（body 是 `{id, cmd, …}`）、探活走 `GET /api/ping`；浏览器访问 `/`。接口：`GET /api/snapshot`（当天任务 + PR）、`GET /api/polls`、`GET /api/history?days=N`（历史事件）、`POST /api/sync`（立刻扫一轮）。数据落在 SQLite `~/.foreman/console.db`，唯一键 `<owner>/<repo>#<number>`，按工单去重、重复同步不多出行。`tasks` 表带 `agent` 列（派给哪个会话），可按会话统计。`foreman pr open` / `foreman issue comment|close` 写完立刻 `sync` 落库，控制台不用等下一轮。没有 `service.http.enabled` 开关——HTTP 是唯一通道，服务起来就一定在听。
+
+## 历史（控制台页面）
+
+页面第二块是「历史」：按天分组的事件流水。**日期选择全部收在面板头部**，和 Tabs 同一行、同一套外观：左边 4 档 **今天 / 近 7 天 / 近 30 天 / 全部**，右边一个原生日期控件（点开就是日历），选某天就只看那天的记录；点任一档位即清掉已选日期、回到时间窗。只做网页端，没有对应 CLI 命令。
+
+- 事件表 `events` 在同一个 `console.db` 里，一条一行：`task_new`（接到）、`task_state`（状态 from→to）、`task_attempt`（重试）、`pr_new`、`pr_state`、`pr_open`（建 PR）、`pr_merge`（合并）、`issue_comment`、`issue_close`。
+- 写入点：`ConsoleStore.sync` 比对上一行状态自动记（反复同步同一状态不重复记）；`pr open` / `pr merge` / `issue comment` / `issue close` 由服务显式记。
+- 老库第一次升级（events 还空）会自动回填：现有每张单/PR 各补一条「接到」，有状态的再补一条「状态」，detail 标 `（回填）`。
+- 接口：`GET /api/history?days=7&repo=<owner/repo>&key=<owner/repo>#<N>`（`days=0` = 全部）；按单日查用 `&day=YYYY-MM-DD`，它优先于 `days`。返回体带 `day` 与 `availableDays: [{day, count}]`（最近 60 天里有记录的日期，供页面做快选）。
+
+## 控制台前端（Lit + Vite）
+
+- 组件源码在 `foreman/console/`（`index.html` / `app.js` / `style.css`，`app.js` 里裸 `import ... from "lit"`），**没有 CDN、没有运行时 vendor**。
+- 构建：`cd foreman && npm run build:console` → 产物落 `console/dist`（`assets/*` 带 hash，已被 `.gitignore` 忽略）。改完前端跑一次即可，**服务不用重启**（静态文件每次请求现读）。
+- 开发：`npm run dev:console`（Vite dev server，复用同一份源码）。
+- 服务只读 `console/dist`；还没构建时 `/` 返回 **503 构建提示页**而不是 404，照提示跑构建就行。
+- 资源路由：`GET /` 页面（不缓存）、`GET /assets/<name>`（`immutable` 长缓存）。
 
 ## PR 监听（默认 5 分钟一轮）
 
@@ -42,10 +79,10 @@ foreman watch poll               # 立刻跑一轮（checked / settled / notifie
 
 - 列表走 `opencli gitea pull-list --repo <owner/name> --state open`（只读适配器命令，带回 `author`）。
 - 作者在 `prWatch.ignoreAuthors`（自己的账号，由 `pickup.me` 补齐）里的单跳过，只记 `skipped: "self"`。
-- 其余 PR 先合并，结果合成一条消息，用 `dws notify` 发给 `prWatch.notifyTarget`：`earliest`（默认）= 账本 `sessions` 里最早登记、有 `convId` 的会话（第一个调用方）；也可写死会话 id/侧边栏标题。
+- 其余 PR 合成一条消息投递：`deliver.mode: "new"`（默认）**新建一条会话**（首句带固定提示词 + 监控项目，会话名 `foreman-PR待合并-<YYYYMMDD-HHmm>`）；`existing` 才用 `dws notify` 发给 `prWatch.notifyTarget`：`earliest`（默认）= 账本 `sessions` 里最早登记、有 `convId` 的会话（第一个调用方）；也可写死会话 id/侧边栏标题。
 - 先按 `pr-view` 的 `mergeNote`/`mergeable` 判冲突，**有冲突的默认过滤掉**（`prWatch.filterConflicts`，默认 `true`；这类单合不了，报了没用，冲突解掉下一轮会自动恢复），记 `skipped: "conflict"`。
 - **别人家的 PR 只通知、不在监听里合**：监听看不到关联工单，通知里带 `foreman pr merge <N> --repo R`，由编排 agent 核对工单后再合；合不了 `foreman pr merge` 直接回理由（`pr-merge` 报错 + `pr-view` 的 `mergeNote`）。
-- 去重记在 `state.json` 的 `prWatch` 键（`<repo>#<number>`），发成功才盖 `notifiedAt`；失败下一轮重试，重启不重发。账本里还没有调用方时不发也不记账，等有了补发。
+- 去重记在 `state.json` 的 `prWatch` 键（`<repo>#<number>`），发成功才盖 `notifiedAt`；失败下一轮重试，重启不重发。`existing` 模式下账本里还没有调用方时不发也不记账；`new` 模式每次新建会话，不受影响。
 - 起服务 1s 后先扫一遍，之后按间隔跑。
 
 ```bash
@@ -90,7 +127,9 @@ foreman tasks                         # 每条工单到哪一步、卡在哪
 foreman pr poll                       # 立刻扫一轮 PR（作者不是自己的（pickup.me）报给最早登记的调用方）
 foreman pr list                       # 看 PR 监听账本
 foreman pr open --repo R --head <分支> --title <标题> --body <自证> --issue <N>   # --base 省略时取配置 repos[].base
-foreman issue comment <N> --repo R --body <正文>
+foreman pr merge <N> --repo R         # 幂等合并 + 推进 done/关单
+foreman issue comment <N> --repo R --body <正文>   # 可选：顺手落库，非必须
+foreman issue close <N> --repo R                    # 可选：顺手落库，非必须
 foreman retry win-ai-harness 255      # 人工处理完，放回队列（attempts 清零）
 foreman doctor [--start]              # --start 才真的连豆包窗口读状态
 ```
@@ -101,9 +140,9 @@ foreman doctor [--start]              # --start 才真的连豆包窗口读状�
 
 1. `opencli gitea search --label <id>` 拉 open 工单，按 `pickup` 过滤（排除人工标签、已处理的、到重试上限的），**三档排序**：我的（作者是 `pickup.me`）→ 无人认领 → 他人，同档最老先接（`pickup.priority` 可改顺序）。
 2. `herdr worktree create --cwd <repo> --branch fix/issue-N --base origin/<base> --path ~/.foreman/worktrees/<仓库>/fix-issue-N --no-focus`。
-3. `dws open --name foreman-<仓库>-<N>` 发 kickoff：把工单正文、worktree、分支、边界（**只在这个 worktree 改；自测通过后自己 `git push -u origin <分支>`，再用 `foreman pr open --repo <仓库> --base <base> --head <分支> --title … --body … --issue <N>` 开 PR（**PR/工单写操作只走 foreman**，账本与控制台才记得到；工单评论/关单用 `foreman issue comment|close`），PR 号/链接写进 RESULT；不合并、不 force push**）、`<RESULT>` 协议一次写进去。
+3. `dws open --name foreman-<仓库>-<N>` 发 kickoff：把工单正文、worktree、分支、边界（**只在这个 worktree 改；自测通过后自己 `git push -u origin <分支>`，再用 `foreman pr open --repo <仓库> --base <base> --head <分支> --title … --body … --issue <N>` 开 PR——**建 PR 必须走 foreman**，绕过它这条 PR 就不进账本；工单侧评论/关单/改标签可以直连 `opencli gitea`，不强制经 foreman），PR 号/链接写进 RESULT；不合并、不 force push**）、`<RESULT>` 协议一次写进去。
 4. run 派活后就返回 `dispatched`：不等回复、不读 RESULT、不验收、不 push/PR。会话跑完由服务在后台轮询判定，用 `dws info` 读最后一条、从里面取最后一个 `<RESULT>` 块映射结论，再发通知；RESULT 里的 `pr` / `prUrl` 优先于账本，通知正文直接带 PR 链接。**验收以会话自交的 RESULT 与其自证为准（它跑了什么、输出是什么），调用方不要为了「再确认一遍」重跑单测**——重复验证只会把一轮拖成两轮；只有确实怀疑结果时才跑，并先说明为什么要跑。
-5. 收口是「会话交 PR、服务通知人」：会话 `done` 时必须已 push 且开了 PR，通知里带 PR 号与链接、`tests` 自证。`merge.enabled: true` 时由**编排自己**合并（`opencli gitea pr-merge` + `close`），执行会话只 push + 开 PR、不合并；同一 PR 只合一次（账本 `mergeAsk` 记 `<repo>#<pr>`，状态 `merged`/`failed`），`tests` 为空则不自动合，冲突只记录、不 force merge。foreman 侧不 push；PR 由会话发起、经 `foreman pr open` 落地，工单写操作同样走 foreman，否则控制台统计断档。`verify` / `publish` 代码还在但没接线。
+5. 收口是「会话交 PR、服务通知人」：会话 `done` 时必须已 push 且开了 PR，通知里带 PR 号与链接、`tests` 自证。`merge.enabled: true` 时由**编排自己**合并（`opencli gitea pr-merge` + `close`），执行会话只 push + 开 PR、不合并；同一 PR 只合一次（账本 `mergeAsk` 记 `<repo>#<pr>`，状态 `merged`/`failed`），`tests` 为空则不自动合，冲突只记录、不 force merge。foreman 侧不 push；PR 由会话发起、经 `foreman pr open` 落地——只有这一步非经 foreman 不可，因为账本要靠它把 PR 挂到单和会话上；工单侧别的写（评论/关单/改标签）直连 `opencli gitea` 即可，只是那些动作不会在控制台留痕。`verify` / `publish` 代码还在但没接线。
 6. `need_decision` / `blocked`：结论由服务通知到人，**worktree 留着**；人处理完 `foreman retry <仓库> <N>` 放回队列。
 
 RESULT 协议（只认最后一个块，差一点按失败处理）：
@@ -130,9 +169,11 @@ RESULT 协议（只认最后一个块，差一点按失败处理）：
 - `merge.enabled` 默认 **false**：只开 PR 不合并。设 `true` 即自动合并，**合并由编排执行**（`merge.by: foreman`，默认）；执行会话不碰合并，冲突/失败只通知不重试。
 - **续接调度**：`planner.enabled` 默认 **false**；开了就是一个跑完、槽位 `< maxRunning`、还有活就催编排继续接，不是 done 就催它去查（详见上面「续接调度」）。
 - **接单三档**：`pickup.priority` 默认 `["mine","unassigned","others"]`，`pickup.me` 从配置读（自己的 Gitea 账号）；「我的」按工单作者（`creator`）认定。`onlyUnassigned: true` 会把「他人」整档排除。
-- **通知默认开、且只有异步这一条**：会话跑完后由**服务**用 `dws send` 回给登记的通知目标（`notify.session: "auto"` 取 `MCP_VM_CONVERSATION_ID`，也可写会话 id/侧边栏标题），run 自己不发。`--no-notify` = 这一轮派出的会话**不登记给服务监听、因此不会有通知**（不是「换个方式同步发」）；`notify.enabled: false` 永久关；`--notify <会话id|标题>` 只改登记时的通知目标。不发的三种情况：目标为空、目标就是这条单自己的执行会话 `foreman-<仓库>-<N>`、结论不在 `notify.events` 白名单（显式盯的 `session-done` 例外）。
+- **投递默认每次新建会话**：`deliver.mode`（默认 `new`）、`deliver.promptFile`（固定提示词运行时副本，路径只从配置来）、`deliver.projectDir`（写进首句的监控项目）、`deliver.namePrefix`、`deliver.waitFirstReply`（默认 `false`：只确认首句送达）。新会话记账留痕但 `notify: false`，不进监听。要退回旧行为设 `mode: "existing"`。
+- **通知默认开、且只有异步这一条**：会话跑完后由**服务**按 `deliver.mode` 投递（`new` 新建会话 / `existing` 用 `dws send` 回给登记的通知目标，`notify.session: "auto"` 取 `MCP_VM_CONVERSATION_ID`）。run 自己不发。`--no-notify` = 这一轮派出的会话**不登记给服务监听、因此不会有通知**；`notify.enabled: false` 永久关；`--notify <会话id|标题>` 只改登记时的通知目标（`existing` 模式）。`existing` 下不发的三种情况：目标为空、目标就是这条单自己的执行会话 `foreman-<仓库>-<N>`、结论不在 `notify.events` 白名单（显式盯的 `session-done` 例外）。
 - **服务没在跑时通知会丢**（异步的代价，不是 bug）：补法是 `foreman watch list` 看登记还在不在 → `foreman watch poll` 立刻重放一轮 → `foreman status` 看 `lastPollAt` / `pollCount` / `dwsErrors`。
-- **PR 监听**：`prWatch.enabled`（默认 `true`）、`intervalSeconds`（默认 300）、`ignoreAuthors`（自己的 Gitea 用户名，由 `pickup.me` 补齐）、`notifyTarget`（`earliest` 取最早登记的调用方）。要停就 `enabled: false`。
+- **工作时间窗**：`workHours`（`enabled`、`days` 1=周一…7=周日、`start`/`end` 如 `08:30`–`18:30`、`offUntil` 临时闭嘴）。两套定时轮询（会话监听 + PR 扫描）只在窗口内跑；窗口外一律跳过，手动 `foreman watch poll` / `foreman pr poll` 不受限。`foreman status` 的 `workHours.active` 就是当前是否在跑。
+- **PR 监听**：`prWatch.enabled`（默认 `true`）、`intervalSeconds`（默认 300）、`ignoreAuthors`（自己的 Gitea 用户名，由 `pickup.me` 补齐）、`notifyTarget`（`earliest` 取最早登记的调用方；只在 `deliver.mode: existing` 下才用到）。要停就 `enabled: false`。
 - **`service.enabled: false`** 等价于一直带 `--no-service`：子命令不握手、不自动拉起；`pidFile` / `logFile` / `service.http.portFile` 可改路径（测试用临时目录）。
 - `verify` 是逐条 `bash -lc` 跑在 worktree 里的命令；`[]` 表示只查"干净 + 有提交"。
 - `herdr.enabled: false` 或 herdr 报错时退回 `git worktree add`，日志里有原因。

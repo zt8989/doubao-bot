@@ -1,8 +1,9 @@
 // 控制台 HTTP：由常驻服务直接对外提供页面与 API，不另起进程、不走 socket。
-//   GET  /                 控制台页面
-//   GET  /style.css /app.js 静态资源
+//   GET  /                 控制台页面（Vite 构建产物 console/dist）
+//   GET  /assets/<name>    带 hash 的 js/css，长缓存
 //   GET  /api/snapshot     当天任务 + PR + 统计（每次请求都先跟账本对齐）
 //   GET  /api/polls        最近几轮扫描记录
+//   GET  /api/history?days=7&day=YYYY-MM-DD&repo=R&key=<owner>/<repo>#<N>  历史事件（按天分组）
 //   POST /api/sync         立刻扫一轮 PR（opencli）+ 落库，返回最新快照
 import fs from "node:fs"
 import http from "node:http"
@@ -30,15 +31,31 @@ const sendJson = (res, code, body) => {
   res.end(text)
 }
 
-function serveStatic(res, dir, name) {
+function serveStatic(res, dir, name, { immutable = false } = {}) {
   const file = path.join(dir, name)
   if (!fs.existsSync(file)) {
     res.writeHead(404, { "content-type": "text/plain; charset=utf-8" })
     return res.end("not found")
   }
   const buf = fs.readFileSync(file)
-  res.writeHead(200, { "content-type": MIME[path.extname(name)] || "application/octet-stream", "cache-control": "no-cache" })
+  res.writeHead(200, {
+    "content-type": MIME[path.extname(name)] || "application/octet-stream",
+    "cache-control": immutable ? "public, max-age=31536000, immutable" : "no-cache",
+  })
   res.end(buf)
+}
+
+// 前端还没构建时的兜底页：说清楚该跑什么命令，别只回 404。
+function serveBuildHint(res) {
+  const text = `<!doctype html><meta charset="utf-8"><title>foreman 控制台未构建</title>
+<style>body{font:14px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:#0b0f14;color:#cbd5e1;padding:48px}
+pre{background:#111826;padding:12px 16px;border-radius:8px;color:#7dd3fc}</style>
+<h2>控制台前端还没有构建</h2>
+<p>在 foreman 目录跑一次构建，产物会落到 <code>console/dist</code>，服务直接从本地下发：</p>
+<pre>cd ~/Documents/workspace/doubao-bot/foreman &amp;&amp; npm run build:console</pre>
+<p>开发时可以用 <code>npm run dev:console</code>（Vite dev server，走 /api 代理到 7317）。</p>`
+  res.writeHead(503, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" })
+  res.end(text)
 }
 
 /**
@@ -118,15 +135,34 @@ export function startConsoleHttp({ store, ctx, dir, host = "127.0.0.1", port = 7
         return sendJson(res, 200, { ok: true, polls: store.polls(limit) })
       }
 
+      if (pathname === "/api/history") {
+        const days = Number(url.searchParams.get("days") ?? 7)
+        return sendJson(res, 200, {
+          ok: true,
+          ...store.history({
+            days: Number.isFinite(days) ? days : 7,
+            repo: (url.searchParams.get("repo") || "").trim(),
+            key: (url.searchParams.get("key") || "").trim(),
+            day: (url.searchParams.get("day") || "").trim(),
+          }),
+        })
+      }
+
       if (pathname === "/api/sync") {
         if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
         const r = await ctx.prPoll()
         return sendJson(res, r?.ok === false ? 500 : 200, { ok: r?.ok !== false, sync: r, snapshot: snapshotNow() })
       }
 
-      if (pathname === "/" || pathname === "/index.html") return serveStatic(res, dir, "index.html")
-      if (pathname === "/style.css") return serveStatic(res, dir, "style.css")
-      if (pathname === "/app.js") return serveStatic(res, dir, "app.js")
+      // 控制台前端：Vite 产物（console/dist，`npm run build:console`）。
+      // assets 文件名带 hash → 长缓存；页面本身不缓存。
+      if (pathname === "/" || pathname === "/index.html") {
+        if (!fs.existsSync(path.join(dir, "index.html"))) return serveBuildHint(res)
+        return serveStatic(res, dir, "index.html")
+      }
+      if (/^\/assets\/[A-Za-z0-9._-]+$/.test(pathname)) {
+        return serveStatic(res, dir, pathname.slice(1), { immutable: true })
+      }
 
       return sendJson(res, 404, { ok: false, error: "not_found", path: pathname })
     } catch (e) {

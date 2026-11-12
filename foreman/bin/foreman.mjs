@@ -31,6 +31,7 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman issue comment <N> --repo R --body <正文>
   foreman issue close <N> --repo R
   foreman run   [--once] [--dry-run] [--repo <名字|owner/name>] [--every <秒>] [--notify <会话id|标题>] [--no-notify] [-c <配置>]
+  foreman pickup [-c <配置>]        手动催一轮自动巡检（服务按 pickup 配置捞一轮单）
   foreman tasks [--json]
   foreman retry <仓库名|owner/name> <工单号> [-c <配置>]
   foreman doctor [-c <配置>] [--start]
@@ -42,10 +43,12 @@ const HELP = `foreman — 接单编排 + 常驻服务
   watch add   登记一条监听（target 是会话 id 或侧边栏标题）
   watch list/rm/poll   看登记 / 删一条 / 立刻跑一轮（取证排障用）
   pr list     看 PR 监听账本（哪些 PR 见过/已通知）
-  pr poll     立刻扫一轮 PR（作者不是自己的（pickup.me）报给最早登记的调用方）
+  pr poll     立刻扫一轮 PR（作者不是自己的（pickup.me）交编排处理）
+  deliver     通知投递：deliver.mode=new（默认）每次新建一条会话，首句=deliver.promptFile 固定提示词 +
+              监控项目（deliver.projectDir）+ 正文；existing 才塞回已有会话。路径与项目只从配置读。
   pr open     建 PR（唯一入口：agent 也走它，账本/控制台才记得到）
   pr merge <N> --repo R [--issue <单号>]   合并 PR（唯一入口：先核对关联工单再合；失败回理由）
-  issue comment|close   评论/关单（同上，走服务记账）
+  issue comment|close   评论/关单（可选：用它才会记账，直接 opencli gitea 也行）
   --no-service  跳过自动握手与拉起（逃生口）
 
 run 现在只派活：建 worktree → dws 开会话派活 → 记账 → 登记监听 → 返回 dispatched。
@@ -276,6 +279,14 @@ async function cmdIssue(pos, flags) {
   throw new Error(`未知 issue 子命令：${sub}（comment|close）`)
 }
 
+// 手动催一轮自动巡检：服务侧按 pickup 配置捞一轮（不影响命令行 run 的锁）。
+async function cmdPickup(pos, flags) {
+  const cfg = loadConfig(flags.config)
+  const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "pickup" }, 900000)
+  if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
+  return out({ ok: true, ...r })
+}
+
 async function cmdRun(pos, flags) {
   const cfg = loadConfig(flags.config)
   if (!cfg.repos.length) throw new Error("配置里没有 repos，先写一条：{\"repo\":\"owner/name\",\"dir\":\"~/Documents/workspace/<repo>\"}")
@@ -462,6 +473,8 @@ async function main() {
       return cmdIssue(pos, flags)
     case "run":
       return cmdRun(pos, flags)
+    case "pickup":
+      return cmdPickup(pos, flags)
     case "tasks":
       return cmdTasks(pos, flags)
     case "retry":

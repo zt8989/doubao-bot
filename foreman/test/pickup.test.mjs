@@ -1,6 +1,10 @@
 import test from "node:test"
 import assert from "node:assert/strict"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
 import { eligible, sortIssues, CLOSED_STATES } from "../src/orchestrator.mjs"
+import { pickupOnce } from "../src/service.mjs"
 
 const repoCfg = { name: "win-ai-harness", repo: "yyzl/win-ai-harness", dir: "/tmp/x", base: "dev" }
 
@@ -104,4 +108,97 @@ test("onlyUnassigned: false 时，别人的单也进候选（排最后一档）"
     issue(3, { author: "lisi", assignees: ["wangwu"] }),
   ], repoCfg, c, book()), c.pickup.order, { me: c.pickup.me, priority: c.pickup.priority })
   assert.deepEqual(pool.map((x) => x.number), [1, 2, 3])
+})
+
+// ---- 服务侧自动巡检（pickup.auto）：到点自己捞单，不用外部 cron ----
+
+function pickupCtx(cfgOver = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-pickup-auto-"))
+  const logs = []
+  return {
+    logs,
+    ctx: {
+      cfg: {
+        stateFile: path.join(dir, "state.json"),
+        pickup: { auto: true, intervalSeconds: 1800, maxPerRound: 1 },
+        workHours: { enabled: false },
+        repos: [],
+        ...cfgOver,
+      },
+      log: (m) => logs.push(m),
+      state: { pickup: { lastAt: null, count: 0, lastResult: null, running: false } },
+      dws: {},
+    },
+  }
+}
+
+test("自动巡检：没开 pickup.auto 就不动作", async () => {
+  const { ctx, logs } = pickupCtx({ pickup: { auto: false, intervalSeconds: 1800, maxPerRound: 1 } })
+  let called = 0
+  const r = await pickupOnce(ctx, { run: async () => { called++; return [] } })
+  assert.equal(r.skipped, "disabled")
+  assert.equal(called, 0)
+  assert.equal(logs.length, 0)
+})
+
+test("自动巡检：出了工作时间窗不捞单", async () => {
+  // 窗口钉在 00:00–00:01，正常时刻都在窗外（跨零点跑测试时最多命中那一分钟，跳过断言）。
+  const { ctx } = pickupCtx({ workHours: { enabled: true, days: [1, 2, 3, 4, 5, 6, 7], start: "00:00", end: "00:01" } })
+  let called = 0
+  const r = await pickupOnce(ctx, { run: async () => { called++; return [] } })
+  const now = new Date()
+  if (now.getHours() === 0 && now.getMinutes() === 0) return
+  assert.equal(r.skipped, "off-hours")
+  assert.equal(called, 0)
+})
+
+test("自动巡检：上一轮没跑完不重入", async () => {
+  const { ctx } = pickupCtx()
+  ctx.state.pickup.running = true
+  let called = 0
+  const r = await pickupOnce(ctx, { run: async () => { called++; return [] } })
+  assert.equal(r.skipped, "busy")
+  assert.equal(called, 0)
+})
+
+test("自动巡检：命令行那轮占着 run.lock 就跳过（同一条单不派两次）", async () => {
+  const { ctx } = pickupCtx()
+  const lockFile = path.join(path.dirname(ctx.cfg.stateFile), "run.lock")
+  fs.mkdirSync(path.dirname(lockFile), { recursive: true })
+  fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }))
+  let called = 0
+  const r = await pickupOnce(ctx, { run: async () => { called++; return [] } })
+  assert.equal(r.skipped, "locked")
+  assert.equal(called, 0)
+})
+
+test("自动巡检：派出一条就记账、写日志，结束后释放锁", async () => {
+  const { ctx, logs } = pickupCtx()
+  const runCalls = []
+  const r = await pickupOnce(ctx, {
+    run: async (runCtx) => {
+      runCalls.push(runCtx)
+      return [{ repo: "yyzl/win-ai-harness", number: 268, state: "dispatched", branch: "fix/issue-268", convId: "1" }]
+    },
+  })
+  assert.equal(r.ok, true)
+  assert.equal(r.dispatched, 1)
+  assert.equal(ctx.state.pickup.count, 1)
+  assert.ok(ctx.state.pickup.lastAt)
+  assert.deepEqual(ctx.state.pickup.lastResult.handled, ["yyzl/win-ai-harness#268:dispatched"])
+  assert.equal(logs.length, 1)
+  assert.match(logs[0], /自动巡检：/)
+  // 每轮最多 maxPerRound 条，靠 ctx.maxTotal 交给 runRound；不带 once（每个仓库都要看）。
+  assert.equal(runCalls[0].maxTotal, 1)
+  assert.equal(runCalls[0].once, undefined)
+  assert.equal(fs.existsSync(path.join(path.dirname(ctx.cfg.stateFile), "run.lock")), false)
+  assert.equal(ctx.state.pickup.running, false)
+})
+
+test("自动巡检：队列空了只写一句话，不记派单", async () => {
+  const { ctx, logs } = pickupCtx()
+  const r = await pickupOnce(ctx, { run: async () => [] })
+  assert.equal(r.dispatched, 0)
+  assert.equal(ctx.state.pickup.count, 1)
+  assert.match(logs[0], /没有可接的活/)
 })

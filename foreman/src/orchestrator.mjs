@@ -110,6 +110,8 @@ export async function runRound(ctx) {
     let count = 0
     for (const it of pool) {
       if (count >= cfg.perRepoPerRound) break
+      // 服务端自动巡检时限制整轮总数（豆包单实例，一轮只派一条），CLI 不传就没有这个上限。
+      if (ctx.maxTotal && handled.length >= ctx.maxTotal) break
       count++
       let out
       try {
@@ -197,7 +199,7 @@ export async function handleIssue(ctx, repoCfg, summary) {
   try {
     if (convId) {
       log(`${key}：续会话 ${name}（attempt ${attempt}）`)
-      await dws.send(name, resume({ issue, attempt, failure: prev.lastFailure ?? "" }))
+      await dws.send(name, resume({ issue, attempt, base: repoCfg.base, failure: prev.lastFailure ?? "" }))
     } else {
       log(`${key}：开新会话 ${name}（attempt ${attempt}）`)
       const opened = await dws.open({

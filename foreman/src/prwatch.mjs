@@ -73,9 +73,10 @@ export function isConflicting(view) {
   return false
 }
 
-// 跑一轮 PR 扫描：列 open PR → 过滤作者 → 账本去重 → 查冲突（冲突的过滤掉）→ 通知编排 agent 去合并。
+// 跑一轮 PR 扫描：列 open PR → 过滤作者 → 账本去重 → 查冲突（冲突的过滤掉）→ 交给编排 agent 去合并。
+// deliver 给了就每次新建一条会话投递（首句带固定提示词），否则塞回 target 那条已有会话。
 // 只有发成功才记账；发送失败下一轮重试。
-export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: overrideTarget }) {
+export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: overrideTarget, deliver = null }) {
   const pw = cfg?.prWatch ?? {}
   if (pw.enabled === false) return { ok: true, skipped: "disabled" }
 
@@ -135,19 +136,28 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
   }
 
   if (!fresh.length) return { ok: true, checked, notified: 0, conflicting, target }
-  if (!target) {
+  const useNew = typeof deliver === "function"
+  if (!useNew && !target) {
     log("PR 扫描：有候选但找不到通知目标（账本里没有调用方会话），这轮不发，等有了再报")
     return { ok: true, checked, notified: 0, target: "", pending: fresh.length }
   }
 
+  let sentTo = target
   try {
-    await dws.notify(target, prNotifyText(fresh))
+    if (useNew) {
+      // 一轮可能跨多个仓库：全部来自同一个仓库才按产品取提示词，否则回落全局 deliver。
+      const repo = fresh.every((pr) => pr.repo === fresh[0].repo) ? fresh[0].repo : ""
+      const out = await deliver({ text: prNotifyText(fresh), kind: "PR待合并", repo })
+      sentTo = out?.session || out?.convId || ""
+    } else {
+      await dws.notify(target, prNotifyText(fresh))
+    }
   } catch (e) {
-    log(`PR 扫描：通知 ${target} 失败，下轮补发：${e.message}`)
+    log(`PR 扫描：通知 ${sentTo || "新会话"} 失败，下轮补发：${e.message}`)
     return { ok: true, checked, notified: 0, conflicting, target, failedNotify: true, pending: fresh.length }
   }
   const book2 = new Book(cfg.stateFile)
-  for (const pr of fresh) book2.markPrSeen(pr.key, { ...pr, notifiedTo: target })
-  log(`PR 扫描：${fresh.length} 条新 PR 已交给 ${target} 合并（${fresh.map((p) => `${p.repo}#${p.number}`).join("、")}）`)
-  return { ok: true, checked, notified: fresh.length, conflicting, target, prs: fresh.map((p) => p.key), at: nowIso() }
+  for (const pr of fresh) book2.markPrSeen(pr.key, { ...pr, notifiedTo: sentTo, via: useNew ? "new-session" : "existing" })
+  log(`PR 扫描：${fresh.length} 条新 PR 已交给 ${sentTo || "新会话"} 合并（${fresh.map((p) => `${p.repo}#${p.number}`).join("、")}）`)
+  return { ok: true, checked, notified: fresh.length, conflicting, target, via: useNew ? "new-session" : "existing", prs: fresh.map((p) => p.key), at: nowIso() }
 }

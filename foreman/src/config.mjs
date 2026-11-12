@@ -25,6 +25,12 @@ export const DEFAULTS = {
     me: "",
     priority: ["mine", "unassigned", "others"],
     order: "oldest",
+    // 自动巡检接单：服务在工作时间窗（workHours）里每 intervalSeconds 自动跑一轮捞单，
+    // 不用人手敲 foreman run。默认关，显式 auto:true 才起。
+    auto: false,
+    intervalSeconds: 1800,
+    // 一轮最多派几条（豆包单实例，默认一次只派一条）。
+    maxPerRound: 1,
   },
   merge: { enabled: false, style: "merge", deleteBranch: true },
   // 收口通知：每条工单处理完，用 dws send 把结果回给「调用方会话」。
@@ -51,6 +57,26 @@ export const DEFAULTS = {
     // 默认过滤有冲突的 PR（合不了，报了没用）；设 false 则照报。
     filterConflicts: true,
   },
+  // 投递方式：结论/PR 不再塞回已有会话，默认每次新建一条豆包会话来接手。
+  // mode=new 用 dws open 新开一条会话，首句 = promptFile（固定提示词，运行时副本）+ 监控项目 + 通知正文；
+  // mode=existing 是旧行为（按 notify.session / prWatch.notifyTarget 找回已有会话塞消息）。
+  // promptFile 为空时启动不报错，投递时才报（便于先跑通再补提示词）；路径给了但文件不存在直接报错。
+  deliver: {
+    mode: "new",
+    promptFile: "",
+    // 监控项目根目录：写进新会话首句，不出现在代码里。
+    projectDir: "",
+    namePrefix: "foreman",
+    // 新建会话只确认首句送达，不等第一轮回复（等回复会把服务轮询拖死）。
+    waitFirstReply: false,
+  },
+  // 产品分组：一个产品一套仓库 + 自己的提示词 + 自己的监控项目根目录。
+  // 配了 products 就以它为准（顶层 repos 只在没配 products 时用，老配置不用改）。
+  // products[].promptFile / projectDir 留空时回落到顶层 deliver 的同名配置。
+  products: [],
+  // 定时检查的工作时间窗：只在工作日 8:30–18:30 跑轮询（enabled:false 或整段省略 = 全天跑）。
+  // offUntil 是临时闭嘴时间点，到点自动恢复。
+  workHours: { enabled: false, days: [1, 2, 3, 4, 5], start: "08:30", end: "18:30", offUntil: "" },
   // 常驻服务：只有 HTTP 一条通道（CLI 的 RPC + 控制台页面同端口），按 pollSeconds 轮询。
   // pidFile/logFile 的相对路径解析到配置文件同目录；~ 展开。
   service: {
@@ -172,8 +198,65 @@ export function loadConfig(explicit) {
     if (!Number.isFinite(n) || n <= 0) throw new Error(`配置项 prWatch.${key} 要是正数，现在是：${cfg.prWatch[key]}`)
     cfg.prWatch[key] = n
   }
+  // 自动接单巡检：开关只认 true，间隔与每轮条数要正数。
+  cfg.pickup.auto = cfg.pickup.auto === true
+  for (const key of ["intervalSeconds", "maxPerRound"]) {
+    const n = Number(cfg.pickup[key])
+    if (!Number.isFinite(n) || n <= 0) throw new Error(`配置项 pickup.${key} 要是正数，现在是：${cfg.pickup[key]}`)
+    cfg.pickup[key] = n
+  }
+
   const pwState = String(cfg.prWatch.state ?? "open")
   if (!["open", "closed", "all"].includes(pwState)) throw new Error(`配置项 prWatch.state 只能是 open/closed/all，现在是：${pwState}`)
   cfg.prWatch.state = pwState
+
+  // 投递：mode 只认 new/existing；promptFile / projectDir 按 stateFile 的规则展开（~ 与相对路径）。
+  cfg.deliver = cfg.deliver && typeof cfg.deliver === "object" ? cfg.deliver : {}
+  const dMode = String(cfg.deliver.mode ?? "new").trim().toLowerCase()
+  if (!["new", "existing"].includes(dMode)) {
+    throw new Error(`配置项 deliver.mode 只能是 new/existing，现在是：${cfg.deliver.mode}`)
+  }
+  cfg.deliver.mode = dMode
+  for (const key of ["promptFile", "projectDir"]) {
+    const raw = expandHome(String(cfg.deliver[key] ?? "").trim())
+    cfg.deliver[key] = raw ? (path.isAbsolute(raw) ? raw : path.resolve(baseDir, raw)) : ""
+  }
+  if (dMode === "new" && cfg.deliver.promptFile && !fs.existsSync(cfg.deliver.promptFile)) {
+    throw new Error(`配置项 deliver.promptFile 指向的固定提示词不存在：${cfg.deliver.promptFile}`)
+  }
+  cfg.deliver.namePrefix = String(cfg.deliver.namePrefix ?? "").trim() || "foreman"
+  cfg.deliver.waitFirstReply = cfg.deliver.waitFirstReply === true
+
+  // 产品分组：每个产品 = 一套 repos + 自己的 promptFile / projectDir（留空回落顶层 deliver）。
+  // cfg.repos 一律摊平成产品仓库的并集，后续捞单/PR 扫描不用区分来源。
+  cfg.products = normalizeProducts(cfg, baseDir)
+  if (cfg.products.length) {
+    cfg.repos = cfg.products.flatMap((p) => p.repos)
+  }
   return cfg
+}
+
+// normalizeProducts：把 products[] 归一成 {name, promptFile, projectDir, repos}。
+// 每条 repoCfg 额外带 product 名，投递时好按仓库找回属于哪个产品。
+function normalizeProducts(cfg, baseDir) {
+  const list = Array.isArray(cfg.products) ? cfg.products : []
+  return list.map((p, i) => {
+    if (!p || typeof p !== "object") throw new Error(`products[${i}] 要是对象：{"name":"…","repos":[…]}`)
+    const name = String(p.name ?? "").trim()
+    if (!name) throw new Error(`products[${i}].name 必填（产品名，用于分组与投递会话命名）`)
+    const promptFileRaw = expandHome(String(p.promptFile ?? "").trim())
+    const projectDirRaw = expandHome(String(p.projectDir ?? "").trim())
+    const promptFile = promptFileRaw
+      ? path.isAbsolute(promptFileRaw) ? promptFileRaw : path.resolve(baseDir, promptFileRaw)
+      : ""
+    const projectDir = projectDirRaw
+      ? path.isAbsolute(projectDirRaw) ? projectDirRaw : path.resolve(baseDir, projectDirRaw)
+      : ""
+    if (cfg.deliver.mode === "new" && promptFile && !fs.existsSync(promptFile)) {
+      throw new Error(`products[${i}]（${name}）的 promptFile 指向的固定提示词不存在：${promptFile}`)
+    }
+    const repos = normalizeRepos(p).map((r) => ({ ...r, product: name }))
+    if (!repos.length) throw new Error(`products[${i}]（${name}）至少要给一条 repos`)
+    return { name, promptFile, projectDir, repos }
+  })
 }

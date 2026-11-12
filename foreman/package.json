@@ -7,9 +7,17 @@
     "foreman": "bin/foreman.mjs"
   },
   "scripts": {
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "build:console": "vite build",
+    "dev:console": "vite"
   },
   "engines": {
     "node": ">=22"
+  },
+  "dependencies": {
+    "lit": "^3.3.3"
+  },
+  "devDependencies": {
+    "vite": "^7.3.8"
   }
 }

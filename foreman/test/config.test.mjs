@@ -65,3 +65,72 @@ test("身份从配置补齐：pickup.me ↔ prWatch.ignoreAuthors", () => {
   const c2 = loadConfig(f2)
   assert.equal(c2.pickup.me, "bob")
 })
+
+test("deliver：默认每次新建会话；提示词与监控项目只从配置读，相对路径落到配置文件同目录", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-cfg-"))
+  try {
+    fs.writeFileSync(path.join(dir, "fixed.md"), "# 固定提示词\n")
+    const file = path.join(dir, "foreman.json")
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        repos: [{ repo: "a/b", dir: "/tmp", base: "sit-test" }],
+        deliver: { promptFile: "fixed.md", projectDir: "/Users/x/Documents/workspace/win-ai-stack" },
+      })
+    )
+    const cfg = loadConfig(file)
+    assert.equal(cfg.deliver.mode, "new")
+    assert.equal(cfg.deliver.promptFile, path.join(dir, "fixed.md"))
+    assert.equal(cfg.deliver.projectDir, "/Users/x/Documents/workspace/win-ai-stack")
+    assert.equal(cfg.deliver.waitFirstReply, false)
+    assert.equal(cfg.deliver.namePrefix, "foreman")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("deliver.mode 写错、提示词文件不存在都直接报错", () => {
+  assert.throws(() => {
+    const { file } = tmpConfig({ repos: [{ repo: "a/b", dir: "/tmp", base: "sit-test" }], deliver: { mode: "whenever" } })
+    loadConfig(file)
+  }, /deliver\.mode/)
+  assert.throws(() => {
+    const { file } = tmpConfig({ repos: [{ repo: "a/b", dir: "/tmp", base: "sit-test" }], deliver: { promptFile: "/definitely/not/here.md" } })
+    loadConfig(file)
+  }, /deliver\.promptFile/)
+})
+
+test("deliver.mode=existing 时留空提示词也合法（老行为回退）", () => {
+  const { file } = tmpConfig({ repos: [{ repo: "a/b", dir: "/tmp", base: "sit-test" }], deliver: { mode: "existing" } })
+  const cfg = loadConfig(file)
+  assert.equal(cfg.deliver.mode, "existing")
+  assert.equal(cfg.deliver.promptFile, "")
+})
+
+test("pickup 自动巡检：默认关，开了才按 intervalSeconds 跑，间隔写错直接报错", () => {
+  const { file } = tmpConfig({ repos: [{ repo: "a/b", dir: "/tmp", base: "sit-test" }] })
+  const cfg = loadConfig(file)
+  assert.equal(cfg.pickup.auto, false)
+  assert.equal(cfg.pickup.intervalSeconds, 1800)
+  assert.equal(cfg.pickup.maxPerRound, 1)
+
+  const { file: f2 } = tmpConfig({
+    repos: [{ repo: "a/b", dir: "/tmp", base: "sit-test" }],
+    pickup: { auto: true, intervalSeconds: 900, maxPerRound: 1 },
+    workHours: { enabled: true, days: [1, 2, 3, 4, 5], start: "08:30", end: "17:30" },
+  })
+  const c2 = loadConfig(f2)
+  assert.equal(c2.pickup.auto, true)
+  assert.equal(c2.pickup.intervalSeconds, 900)
+  assert.equal(c2.workHours.end, "17:30")
+
+  assert.throws(() => {
+    const { file: f3 } = tmpConfig({ repos: [{ repo: "a/b", dir: "/tmp", base: "sit-test" }], pickup: { intervalSeconds: 0 } })
+    loadConfig(f3)
+  }, /pickup\.intervalSeconds/)
+})
+
+test("pickup.auto 只认布尔 true，字符串 \"true\" 不算开关", () => {
+  const { file } = tmpConfig({ repos: [{ repo: "a/b", dir: "/tmp", base: "sit-test" }], pickup: { auto: "true" } })
+  assert.equal(loadConfig(file).pickup.auto, false)
+})

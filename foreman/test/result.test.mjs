@@ -66,6 +66,6 @@ test("kickoff 里写死了边界（自测过了自己 push 开 PR、只在该 wo
   assert.match(p, /不要直接 opencli gitea pr/)
   assert.match(p, /填进 RESULT 的 pr \/ prUrl/)
   assert.match(p, /合并由 foreman 做/)
-  assert.match(p, /foreman issue comment\|close/)
+  assert.match(p, /opencli gitea issue-comment\|close\|issue-edit/)
   assert.match(p, /<RESULT>/)
 })

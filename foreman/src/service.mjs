@@ -4,10 +4,10 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import crypto from "node:crypto"
-import { nowIso, sleep } from "./util.mjs"
+import { nowIso, sleep, inWorkHours } from "./util.mjs"
 import { Book } from "./book.mjs"
-import { parseResult } from "./prompts.mjs"
-import { notifyTarget, shouldNotify, notifyText } from "./orchestrator.mjs"
+import { parseResult, deliverPrompt, noticeSessionName } from "./prompts.mjs"
+import { notifyTarget, shouldNotify, notifyText, runRound, acquireLock, releaseLock } from "./orchestrator.mjs"
 import { prWatchOnce, prWatchTarget, mergeFailureReason } from "./prwatch.mjs"
 import { plannerDecision, plannerTarget, plannerText, loadQueue } from "./planner.mjs"
 import { listPulls, mergePr, closeIssue, createPr, commentIssue } from "./gitea.mjs"
@@ -113,14 +113,81 @@ export function notifyMaxAttempts(cfg) {
   return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 2
 }
 
+// ---- 投递口径（每次新建会话）----
+
+// deliveryMode：new = 每次新建一条会话投递；existing = 塞回已有会话（旧行为）。
+// 缺省按 existing——手搓 cfg 的地方（测试、老调用）不改变行为；走 loadConfig 的配置默认 new。
+export function deliveryMode(cfg) {
+  const m = String(cfg?.deliver?.mode ?? "existing").trim().toLowerCase()
+  return m === "new" ? "new" : "existing"
+}
+
+// 按仓库找回它属于哪个产品（products[].repos 里的 repo 全名或短名都能对上）。
+export function productOf(cfg, repo = "") {
+  const r = String(repo ?? "").trim()
+  if (!r) return null
+  for (const p of cfg?.products ?? []) {
+    if ((p.repos ?? []).some((x) => x.repo === r || x.name === r)) return p
+  }
+  return null
+}
+
+// 投递上下文：产品配了自己的 promptFile / projectDir 就用产品的，否则回落顶层 deliver（老配置不变）。
+export function deliverContextFor(cfg, repo = "") {
+  const p = productOf(cfg, repo)
+  return {
+    product: p?.name ?? "",
+    promptFile: p?.promptFile || String(cfg?.deliver?.promptFile ?? ""),
+    projectDir: p?.projectDir || String(cfg?.deliver?.projectDir ?? ""),
+  }
+}
+
+// 固定提示词只从配置给的路径读；缺配置或文件读不到都直接报错，不做内置文案兜底。
+export function readFixedPrompt(cfg, repo = "") {
+  const dc = deliverContextFor(cfg, repo)
+  const file = String(dc.promptFile ?? "").trim()
+  if (!file) {
+    throw new Error(`没有给固定提示词路径（${dc.product ? `产品 ${dc.product} 的 products[].promptFile` : "配置 deliver.promptFile"}）`)
+  }
+  let text = ""
+  try {
+    text = fs.readFileSync(file, "utf8")
+  } catch (e) {
+    throw new Error(`读不到固定提示词 ${file}：${e.message}`)
+  }
+  if (!text.trim()) throw new Error(`固定提示词是空文件：${file}`)
+  return text
+}
+
+// deliverNewSession：把核对完的结论/PR 交给一条新会话。
+// 首句 = 固定提示词 + 产品 + 监控项目 + 正文，按工单所属产品取提示词与项目目录。
+// 记账留痕但 notify:false——它是编排者，不是被监听的执行会话，纳入监听会自己通知自己。
+export async function deliverNewSession(ctx, { text = "", kind = "", repo = "", watcher = null } = {}) {
+  const { cfg, dws, log = () => {} } = ctx
+  const dc = deliverContextFor(cfg, repo || watcher?.repo || "")
+  const fixed = readFixedPrompt(cfg, repo || watcher?.repo || "")
+  const prompt = deliverPrompt({ fixed, projectDir: dc.projectDir, product: dc.product, kind, text })
+  const name = noticeSessionName({ prefix: cfg?.deliver?.namePrefix ?? "foreman", kind })
+  const noWait = cfg?.deliver?.waitFirstReply !== true
+  const out = await dws.openNew({ name, prompt, noWait })
+  const convId = String(out?.convId ?? "").trim()
+  new Book(cfg.stateFile).record(name, { convId, kind: "deliver", notify: false, product: dc.product })
+  log(`已新建会话投递：${name}${convId ? `（${convId}）` : ""}`)
+  return { session: name, convId, product: dc.product }
+}
+
 // 服务侧判定该不该发。env 默认 process.env，便于测试注入。
 export function notifyDecision({ cfg, watcher, book, env = process.env, result }) {
   const notify = cfg?.notify ?? {}
   if (notify.enabled === false) return { send: false, reason: "disabled" }
+  // new 模式每次都新建会话，不需要「发给谁」：目标为空不算不发，也不存在「发给自己」。
+  const mode = deliveryMode(cfg)
   const target = String(watcher?.notifyTo ?? "").trim() || notifyTarget(notify, env)
-  if (!target) return { send: false, target, reason: "no-target" }
-  if (target === watcher?.target || target === watcher?.name) {
-    return { send: false, target, reason: "self" }
+  if (mode === "existing") {
+    if (!target) return { send: false, target, reason: "no-target" }
+    if (target === watcher?.target || target === watcher?.name) {
+      return { send: false, target, reason: "self" }
+    }
   }
 
   // event 映射：跑完时用 dws.info 读最后回复并 parseResult。
@@ -237,6 +304,46 @@ export function singleInstanceGuard(pidFile) {
   return null
 }
 
+// 自动接单巡检一轮：在工作时间窗内自己捞一轮单（等价 foreman run，但不带 once，每个仓库都看）。
+// 只派活、不等结果；结果仍由 pollOnce 轮询后投递。默认关（pickup.auto !== true 不动作）。
+export async function pickupOnce(ctx, { run = runRound } = {}) {
+  const { cfg, log, state } = ctx
+  if (cfg.pickup?.auto !== true) return { ok: true, skipped: "disabled" }
+  if (!inWorkHours(cfg)) return { ok: true, skipped: "off-hours" }
+  if (state.pickup?.running) return { ok: true, skipped: "busy" }
+  // 和 CLI 的 foreman run 抢同一把锁：两边同时捞会把同一条单派两次。
+  const lockFile = path.join(path.dirname(cfg.stateFile), "run.lock")
+  const lock = acquireLock(lockFile)
+  if (!lock) return { ok: true, skipped: "locked" }
+  state.pickup.running = true
+  try {
+    const book = new Book(cfg.stateFile)
+    const handled = await run({
+      cfg,
+      book,
+      dws: ctx.dws,
+      log,
+      maxTotal: Number(cfg.pickup.maxPerRound) || 1,
+    })
+    const dispatched = handled.filter((h) => h.state === "dispatched")
+    state.pickup.lastAt = nowIso()
+    state.pickup.count = (state.pickup.count ?? 0) + 1
+    state.pickup.lastResult = {
+      dispatched: dispatched.length,
+      handled: handled.map((h) => `${h.repo}#${h.number}:${h.state}`),
+    }
+    if (handled.length) {
+      log(`自动巡检：${handled.map((h) => `${h.repo}#${h.number} ${h.state}`).join("、")}（派出 ${dispatched.length} 条）`)
+    } else {
+      log("自动巡检：队列里没有可接的活")
+    }
+    return { ok: true, dispatched: dispatched.length, handled: state.pickup.lastResult.handled }
+  } finally {
+    state.pickup.running = false
+    releaseLock(lockFile)
+  }
+}
+
 // 起服务：HTTP 单通道（CLI 的 RPC + 控制台页面同一个端口），端口写到文件里给 CLI 读。
 // book 参数只用于初始加载，poll/write 时一律 new Book 重开。
 // gitea 只在 PR 监听里用，测试可直接注入假的 { listPulls }。
@@ -274,6 +381,9 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     // PR 监听运行时
     pr: { lastPollAt: null, pollCount: 0, notifiedCount: 0, polling: false, target: "", pending: 0 },
     prInterval: null,
+    // 自动接单巡检运行时
+    pickup: { lastAt: null, count: 0, lastResult: null, running: false },
+    pickupInterval: null,
   }
 
   // 初始把 book 里的监听灌进内存。
@@ -283,11 +393,14 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   }
 
   const ctx = { state, cfg, dws, gitea, log, close: null, prPoll: null, httpUrl: "", consoleStore: null }
+  // 投递通道：new 模式每次新建会话；这里只做一次绑定，调用侧不用关心实现。
+  ctx.deliver = (opts) => deliverNewSession(ctx, opts)
 
   const httpCfg = cfg.service?.http ?? {}
   const dbFile = path.resolve(String(httpCfg.db || "~/.foreman/console.db").replace(/^~/, os.homedir()))
   const consoleStore = new ConsoleStore(dbFile)
-  const consoleDir = path.join(path.dirname(path.dirname(fileURLToPath(import.meta.url))), "console")
+  // 前端走 Vite 构建产物（console/dist）；源码在 console/，改完跑 npm run build:console。
+  const consoleDir = path.join(path.dirname(path.dirname(fileURLToPath(import.meta.url))), "console", "dist")
 
   let consoleHttp
   try {
@@ -339,6 +452,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   // 轮询。
   const doPoll = async () => pollOnce(ctx)
   state.interval = setInterval(() => {
+    if (!inWorkHours(cfg)) return // 只在工作时间跑，下班/周末不打扰
     doPoll().catch((e) => log(`poll 异常：${e.message}`))
   }, cfg.pollSeconds * 1000)
   state.interval.unref?.()
@@ -349,13 +463,33 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   if (cfg.prWatch?.enabled === true) {
     const intervalMs = Number(cfg.prWatch.intervalSeconds ?? 300) * 1000
     state.prInterval = setInterval(() => {
+      if (!inWorkHours(cfg)) return
       doPrPoll().catch((e) => log(`PR 扫描异常：${e.message}`))
     }, intervalMs)
     state.prInterval.unref?.()
     state.prKick = setTimeout(() => {
+      if (!inWorkHours(cfg)) return
       doPrPoll().catch((e) => log(`PR 扫描异常：${e.message}`))
     }, 1000)
     state.prKick.unref?.()
+  }
+
+  // 自动接单巡检：pickup.auto===true 才起，每 pickup.intervalSeconds 一次，且只在 workHours 内跑。
+  const doPickup = async () => pickupOnce(ctx)
+  ctx.pickup = doPickup
+  if (cfg.pickup?.auto === true) {
+    const intervalMs = Number(cfg.pickup.intervalSeconds ?? 1800) * 1000
+    state.pickupInterval = setInterval(() => {
+      if (!inWorkHours(cfg)) return
+      doPickup().catch((e) => log(`自动巡检异常：${e.message}`))
+    }, intervalMs)
+    state.pickupInterval.unref?.()
+    // 起服务 1s 后先跑一轮：重启即开始巡检，不用等满一个间隔（同一条单靠账本去重，不会重复派）。
+    state.pickupKick = setTimeout(() => {
+      if (!inWorkHours(cfg)) return
+      doPickup().catch((e) => log(`自动巡检异常：${e.message}`))
+    }, 1000)
+    state.pickupKick.unref?.()
   }
 
   const close = async () => {
@@ -364,6 +498,8 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     if (state.interval) clearInterval(state.interval)
     if (state.prInterval) clearInterval(state.prInterval)
     if (state.prKick) clearTimeout(state.prKick)
+    if (state.pickupInterval) clearInterval(state.pickupInterval)
+    if (state.pickupKick) clearTimeout(state.pickupKick)
     await new Promise((r) => consoleHttp.server.close(r))
     consoleStore.close()
     // 只删自己的端口文件（端口号对得上才删）。
@@ -380,7 +516,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   ctx.close = close
   ctx.poll = doPoll
 
-  return { server: consoleHttp.server, close, poll: doPoll, prPoll: doPrPoll, port, portFile: paths.portFile, http: ctx.httpUrl }
+  return { server: consoleHttp.server, close, poll: doPoll, prPoll: doPrPoll, pickup: doPickup, port, portFile: paths.portFile, http: ctx.httpUrl }
 }
 
 // PR 扫描一轮：配置里每个仓库列 open PR → 过滤作者 → 去重 → 通知最早登记的调用方。
@@ -396,7 +532,9 @@ export async function prPollOnce(ctx) {
     state.pr.target = target
     let out
     try {
-      out = await prWatchOnce({ cfg, gitea, dws, log, target })
+      // new 模式：PR 待合并也交给一条新会话（首句带固定提示词）；existing 才回已有会话。
+      const deliver = deliveryMode(cfg) === "new" ? ctx.deliver : null
+      out = await prWatchOnce({ cfg, gitea, dws, log, target, deliver })
     } catch (e) {
       log(`PR 扫描失败：${e.message}`)
       return { ok: false, error: e.message }
@@ -537,9 +675,15 @@ export async function pollOnce(ctx) {
         log(`续接内容生成失败：${e.message}`)
       }
 
+      const mode = deliveryMode(cfg)
       const target = String(nd.send ? nd.target : "") || (planBlock ? plannerTarget(cfg, new Book(cfg.stateFile), process.env) : "")
       const text = [nd.send ? nd.text : "", planBlock].filter(Boolean).join("\n\n")
-      if (!target || target === String(w.target) || !text) {
+      if (!text) {
+        log(`通知跳过 ${w.target}：${nd.reason || "empty"}`)
+        continue
+      }
+      // existing 才需要「发给谁」；new 模式每次都新建会话，跟哪个会话在跑无关。
+      if (mode === "existing" && (!target || target === String(w.target))) {
         log(`通知跳过 ${w.target}：${nd.reason || "no-target"}`)
         continue
       }
@@ -548,17 +692,23 @@ export async function pollOnce(ctx) {
         phase: decision.phase,
         chars: status?.chars ?? 0,
       })
+      let sentTo = target
       try {
-        await dws.notify(target, text)
+        if (mode === "new") {
+          const out = await ctx.deliver({ text, kind: "工单结论", watcher: w })
+          sentTo = out?.session || out?.convId || "新会话"
+        } else {
+          await dws.notify(target, text)
+        }
         book2.markNotified(w.target, decision.fingerprint, {
           phase: decision.phase,
           chars: status?.chars ?? 0,
         })
-        if (planBlock) new Book(cfg.stateFile).markPlanner(planKey, { kind: planKind, target })
+        if (planBlock) new Book(cfg.stateFile).markPlanner(planKey, { kind: planKind, target: sentTo })
         state.notifiedCount++
         out.notified++
         rec.notifiedAt = nowIso()
-        log(`已通知 ${target}：${w.target} 跑完（${decision.phase}/${nd.event}）${planNote ? `，${planNote}` : ""}`)
+        log(`已通知 ${sentTo}：${w.target} 跑完（${decision.phase}/${nd.event}）${planNote ? `，${planNote}` : ""}`)
       } catch (e) {
         state.dwsErrors++
         const n = notifyMaxAttempts(cfg)
@@ -567,9 +717,9 @@ export async function pollOnce(ctx) {
           led.lastError = e.message
           book2.save()
         }
-        log(`通知 ${nd.target} 失败（第 ${led?.attempts ?? 1}/${n} 次）：${e.message}`)
+        log(`通知 ${sentTo || "新会话"} 失败（第 ${led?.attempts ?? 1}/${n} 次）：${e.message}`)
         if ((led?.attempts ?? 1) >= n) {
-          log(`通知 ${nd.target} 放弃重试：${w.target} 同指纹已试 ${n} 次`)
+          log(`通知 ${sentTo || "新会话"} 放弃重试：${w.target} 同指纹已试 ${n} 次`)
         }
       }
     }
@@ -600,6 +750,13 @@ export async function handleRequest(ctx, req) {
       pollSeconds: ctx.cfg.pollSeconds,
       watchers: ctx.state.watchers.size,
       planner: { enabled: ctx.cfg.planner?.enabled === true, maxRunning: Number(ctx.cfg.planner?.maxRunning) || 2 },
+      workHours: { config: ctx.cfg.workHours ?? null, active: inWorkHours(ctx.cfg), now: nowIso() },
+      deliver: {
+        mode: deliveryMode(ctx.cfg),
+        promptFile: ctx.cfg.deliver?.promptFile ?? "",
+        projectDir: ctx.cfg.deliver?.projectDir ?? "",
+        waitFirstReply: ctx.cfg.deliver?.waitFirstReply === true,
+      },
       http: ctx.httpUrl || "",
       port: ctx.state.port ?? null,
       portFile: ctx.cfg.service?.http?.portFile ?? "",
@@ -634,6 +791,11 @@ export async function handleRequest(ctx, req) {
     })
     const issueNo = Number(req.issue ?? 0)
     if (issueNo) b.setIssue(`${repo}#${issueNo}`, { state: "pr-open", title, pr: number, prUrl: pr.url ?? "", branch: head })
+    ctx.consoleStore?.event({
+      kind: "pr_open", key: `${repo}#${number}`, repo, number,
+      to: "open",
+      detail: `${base} ← ${head}${issueNo ? ` · 工单 #${issueNo}` : ""}`,
+    })
     // 立刻落库，控制台不用等下一轮同步。
     try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
     ctx.log?.(`PR 建好 ${repo}#${number} ${pr.url ?? ""}（走 foreman）`)
@@ -663,6 +825,10 @@ export async function handleRequest(ctx, req) {
       try { await ctx.gitea.closeIssue(repo, issueNo) } catch (e) { ctx.log?.(`关单 ${repo}#${issueNo} 失败：${e.message}`) }
       b.setIssue(`${repo}#${issueNo}`, { state: "done", pr: number })
     }
+    ctx.consoleStore?.event({
+      kind: "pr_merge", key: `${repo}#${number}`, repo, number,
+      to: "merged", detail: `${style}${issueNo ? ` · 关单 #${issueNo}` : ""}`,
+    })
     try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
     ctx.log?.(`已合并 ${repo}#${number}${issueNo ? `，关单 #${issueNo}` : ""}（走 foreman）`)
     return ok({ repo, number, merged: true, issue: issueNo || null })
@@ -679,6 +845,10 @@ export async function handleRequest(ctx, req) {
       return fail("gitea-error", e.message)
     }
     new Book(ctx.cfg.stateFile).setIssue(`${repo}#${number}`, { note: body.slice(0, 300) })
+    ctx.consoleStore?.event({
+      kind: "issue_comment", key: `${repo}#${number}`, repo, number,
+      detail: body.slice(0, 200),
+    })
     try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
     return ok({ repo, number, commented: true })
   }
@@ -693,6 +863,7 @@ export async function handleRequest(ctx, req) {
       return fail("gitea-error", e.message)
     }
     new Book(ctx.cfg.stateFile).setIssue(`${repo}#${number}`, { state: "done" })
+    ctx.consoleStore?.event({ kind: "issue_close", key: `${repo}#${number}`, repo, number, to: "done" })
     try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
     return ok({ repo, number, closed: true })
   }
@@ -713,6 +884,33 @@ export async function handleRequest(ctx, req) {
       http: ctx.httpUrl || "",
       port: ctx.state.port ?? null,
       portFile: ctx.cfg.service?.http?.portFile ?? "",
+      workHours: {
+        config: ctx.cfg.workHours ?? null,
+        active: inWorkHours(ctx.cfg),
+        now: nowIso(),
+      },
+      deliver: {
+        mode: deliveryMode(ctx.cfg),
+        promptFile: ctx.cfg.deliver?.promptFile ?? "",
+        projectDir: ctx.cfg.deliver?.projectDir ?? "",
+        waitFirstReply: ctx.cfg.deliver?.waitFirstReply === true,
+      },
+      pickup: {
+        auto: ctx.cfg.pickup?.auto === true,
+        intervalSeconds: ctx.cfg.pickup?.intervalSeconds,
+        maxPerRound: ctx.cfg.pickup?.maxPerRound,
+        lastAt: ctx.state.pickup?.lastAt ?? null,
+        count: ctx.state.pickup?.count ?? 0,
+        running: ctx.state.pickup?.running === true,
+        lastResult: ctx.state.pickup?.lastResult ?? null,
+      },
+      // 产品分组：每个产品一套仓库 + 自己的提示词/监控目录。
+      products: (ctx.cfg.products ?? []).map((p) => ({
+        name: p.name,
+        repos: p.repos.map((r) => r.repo),
+        promptFile: p.promptFile || ctx.cfg.deliver?.promptFile || "",
+        projectDir: p.projectDir || ctx.cfg.deliver?.projectDir || "",
+      })),
       prWatch: {
         enabled: ctx.cfg.prWatch?.enabled ?? false,
         intervalSeconds: ctx.cfg.prWatch?.intervalSeconds,
@@ -763,6 +961,12 @@ export async function handleRequest(ctx, req) {
 
   if (cmd === "pr poll") {
     const r = await ctx.prPoll()
+    return ok(r)
+  }
+
+  // 手动催一轮自动巡检（不用等下一个间隔）。
+  if (cmd === "pickup") {
+    const r = await ctx.pickup()
     return ok(r)
   }
 

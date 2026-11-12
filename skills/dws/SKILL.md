@@ -7,7 +7,7 @@ description: 驱动 dws（豆包会话 CLI，项目 doubao-bot）：给豆包桌
 
 `dws` 不碰豆包云端 API：它从独立 profile 拉起豆包桌面端、开 CDP 调端口，像人一样新建「工作任务」、填输入、读回复。代码在 `/Users/zhouteng/Documents/workspace/doubao-bot/dws`（`doubao-bot` 仓库里的 dws 子包），已 `npm link` 成全局命令。
 
-**边界**：dws 只负责驱动豆包（开会话 / 发指令 / 读状态 / 存档）。工单、标签、worktree、验收、push、PR、合并、关单都已从它身上删掉了，要那些流程得在外面自己组合 dws 与别的工具。
+**边界**：dws 只负责驱动豆包（开会话 / 发指令 / 读状态 / 存档）。工单、标签、worktree、验收、push、PR、合并、关单都已从它身上删掉了，要那些流程得在外面自己组合 dws 与别的工具。**dws 命令不需要经 foreman**——只有「建 PR」「合并 PR」这两步必须走 foreman，开会话、续说、读状态、通知都可以直接调。
 
 ## 动手前先确认这四条
 
@@ -27,7 +27,7 @@ description: 驱动 dws（豆包会话 CLI，项目 doubao-bot）：给豆包桌
 | 看某条会话跑到哪了 | `dws status [会话名\|任务id] [--json]` |
 | 取整段对话（含思考） | `dws info [会话名\|任务id] [--json] [--out <文件>]` |
 | 给已有会话续话 | `dws send <会话名\|任务id> "..."` 或 `--file <文件>` |
-| 新开一条会话并派活 | `dws open --name <会话名> [--repo <owner/name>] [--prompt ... \| --file ...]` |
+| 新开一条会话并派活 | `dws open --name <会话名> [--repo <owner/name>] [--prompt ... \| --file ...]`；只投递不等回复加 `--no-wait` |
 | 跑动中加指令 / 中断 | `dws steer <会话> "..."` / `dws stop <会话>` |
 | 把窗口切到某条任务 | `dws use <任务id\|会话名>` |
 | 归档一段对话 | `dws archive <任务id\|会话名>` |
@@ -35,6 +35,7 @@ description: 驱动 dws（豆包会话 CLI，项目 doubao-bot）：给豆包桌
 ```bash
 dws open --name scratch                    # 只建工作任务，不发第一句
 dws open --name review --prompt "先看一眼仓库现状"
+dws open --name notice --file /tmp/notice.md --no-wait   # 投递完就返回，不等第一轮回复
 dws status --json                          # 给脚本用
 dws info review --out /tmp/conv.md         # 整段对话很长，先落盘再读
 dws send review "接着改，先跑一下单测"

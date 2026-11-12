@@ -15,6 +15,24 @@ export function nowIso() {
   return new Date().toISOString()
 }
 
+// 工作时间窗：定时轮询只在配置的星期/时段内跑。
+// workHours 缺省 = 不限；offUntil 是临时闭嘴时间点（ISO，含时区最好），到点自动恢复。
+export function inWorkHours(cfg, at = new Date()) {
+  const w = cfg?.workHours
+  if (!w || w.enabled === false) return true
+  if (w.offUntil) {
+    const until = new Date(w.offUntil).getTime()
+    if (Number.isFinite(until) && until > at.getTime()) return false
+  }
+  const days = (w.days ?? [1, 2, 3, 4, 5]).map(Number)
+  const day = at.getDay() === 0 ? 7 : at.getDay() // 1=周一 … 7=周日
+  if (!days.includes(day)) return false
+  const [sh, sm] = String(w.start ?? "08:30").split(":").map(Number)
+  const [eh, em] = String(w.end ?? "18:30").split(":").map(Number)
+  const mins = at.getHours() * 60 + at.getMinutes()
+  return mins >= sh * 60 + sm && mins < eh * 60 + em
+}
+
 export function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
 }

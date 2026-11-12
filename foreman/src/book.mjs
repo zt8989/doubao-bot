@@ -47,6 +47,8 @@ export class Book {
       seenAt: prev.seenAt ?? nowIso(),
       notifiedTo: pr.notifiedTo ?? prev.notifiedTo ?? "",
       notifiedAt: pr.notifiedTo ? nowIso() : prev.notifiedAt ?? "",
+      // 投递通道：new-session（每次新建会话）或 existing（塞回已有会话），便于控制台复盘。
+      via: pr.via ?? prev.via ?? "",
       merged: pr.merged ?? prev.merged ?? false,
       mergeError: pr.mergeError ?? prev.mergeError ?? "",
     }

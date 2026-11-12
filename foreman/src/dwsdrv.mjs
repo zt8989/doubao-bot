@@ -70,6 +70,21 @@ export class DwsDriver {
     return r
   }
 
+  // openNew：新开一条会话，把内容作为首句投递进去。noWait（默认）只确认首句送达、
+  // 不等第一轮回复——投递完就返回，别把服务的轮询拖到超时。
+  async openNew({ name, prompt, noWait = true }) {
+    const tmp = writeTemp(prompt)
+    try {
+      this.log(`dws open ${name}（新建会话投递${noWait ? "，不等回复" : ""}）`)
+      return await this.json(
+        ["open", "--name", name, "--file", tmp, ...(noWait ? ["--no-wait"] : [])],
+        { timeout: noWait ? 300000 : 3600000 }
+      )
+    } finally {
+      fs.rmSync(tmp, { force: true })
+    }
+  }
+
   async send(name, text) {
     const tmp = writeTemp(text)
     const r = await this.json(["send", name, "--file", tmp], { timeout: 3600000 })

@@ -63,6 +63,24 @@ const SCHEMA = `
     pending     INTEGER NOT NULL DEFAULT 0
   );
 
+  -- 事件流水：每张单/PR 的每一次真实变化留一条，历史视图与单条时间线都靠它。
+  CREATE TABLE IF NOT EXISTS events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    at         TEXT NOT NULL,
+    day        TEXT NOT NULL,
+    kind       TEXT NOT NULL,                   -- task_new/task_state/task_attempt/pr_new/pr_state/pr_open/pr_merge/issue_comment/issue_close
+    key        TEXT NOT NULL DEFAULT '',        -- <owner>/<repo>#<number>
+    repo       TEXT NOT NULL DEFAULT '',
+    number     INTEGER NOT NULL DEFAULT 0,
+    from_state TEXT NOT NULL DEFAULT '',
+    to_state   TEXT NOT NULL DEFAULT '',
+    detail     TEXT NOT NULL DEFAULT '',
+    agent      TEXT NOT NULL DEFAULT ''
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_events_at  ON events(at);
+  CREATE INDEX IF NOT EXISTS idx_events_key ON events(key);
+
   CREATE INDEX IF NOT EXISTS idx_tasks_last ON tasks(last_seen_at);
   CREATE INDEX IF NOT EXISTS idx_prs_last   ON prs(last_seen_at);
 `
@@ -119,7 +137,49 @@ export class ConsoleStore {
       recentPolls: this.db.prepare(
         "SELECT id, at, tasks, prs, new_tasks, new_prs, pending FROM polls ORDER BY id DESC LIMIT 10"
       ),
+      getTask: this.db.prepare("SELECT * FROM tasks WHERE key = ?"),
+      getPr: this.db.prepare("SELECT * FROM prs WHERE key = ?"),
+      insertEvent: this.db.prepare(`
+        INSERT INTO events (at, day, kind, key, repo, number, from_state, to_state, detail, agent)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `),
+      eventsSince: this.db.prepare("SELECT * FROM events WHERE at >= ? ORDER BY at ASC, id ASC"),
+      eventsOnDay: this.db.prepare("SELECT * FROM events WHERE day = ? ORDER BY at ASC, id ASC"),
+      eventsForKey: this.db.prepare("SELECT * FROM events WHERE key = ? ORDER BY at ASC, id ASC"),
+      countEvents: this.db.prepare("SELECT COUNT(*) AS c FROM events"),
+      dayCounts: this.db.prepare(
+        "SELECT day, COUNT(*) AS c FROM events GROUP BY day ORDER BY day DESC LIMIT 60"
+      ),
     }
+
+    this.backfillEvents()
+  }
+
+  /**
+   * 老库第一次升级（事件表还空着）：拿已有的单/PR 补一条「接到」，
+   * 有状态的再补一条「状态」，历史不至于一片空白。只跑一次。
+   */
+  backfillEvents() {
+    try {
+      if (Number(this.q.countEvents.get().c) > 0) return
+      const nowIso = new Date().toISOString()
+      for (const t of this.q.allTasks.all()) {
+        const first = t.first_seen_at || nowIso
+        this.event({ at: first, kind: "task_new", key: t.key, repo: t.repo, number: t.number, detail: t.title || "", agent: t.agent || "" })
+        if (t.state) {
+          this.event({
+            at: t.last_update_at || first, kind: "task_state", key: t.key, repo: t.repo,
+            number: t.number, to: t.state, detail: "（回填）", agent: t.agent || "",
+          })
+        }
+      }
+      for (const p of this.q.allPrs.all()) {
+        this.event({
+          at: p.notified_at || p.first_seen_at || nowIso, kind: "pr_new", key: p.key, repo: p.repo,
+          number: p.number, to: p.state || "", detail: p.title || "",
+        })
+      }
+    } catch {}
   }
 
   /** 账本 → SQLite。只 upsert，不写 polls；返回本轮新增条数。 */
@@ -131,6 +191,31 @@ export class ConsoleStore {
     for (const [key, it] of Object.entries(book?.issues || {})) {
       const [repo, number] = key.split("#")
       if (!repo || !number) continue
+      const prev = this.q.getTask.get(key)
+      if (!prev) {
+        this.event({
+          at, kind: "task_new", key, repo,
+          number: Number(number) || Number(it.issue) || 0,
+          to: it.state || "", detail: it.title || "", agent: it.agent || "",
+        })
+      } else {
+        if (String(prev.state || "") !== String(it.state || "")) {
+          this.event({
+            at, kind: "task_state", key, repo,
+            number: Number(number) || Number(it.issue) || 0,
+            from: prev.state || "", to: it.state || "",
+            detail: it.note || "", agent: it.agent || "",
+          })
+        }
+        if (Number(it.attempts) > Number(prev.attempts || 0)) {
+          this.event({
+            at, kind: "task_attempt", key, repo,
+            number: Number(number) || Number(it.issue) || 0,
+            to: it.state || "",
+            detail: `第 ${Number(it.attempts)} 次尝试`, agent: it.agent || "",
+          })
+        }
+      }
       this.q.upsertTask.run(
         key,
         repo,
@@ -152,7 +237,22 @@ export class ConsoleStore {
     for (const [key, p] of Object.entries(book?.prSeen || {})) {
       const [repo, number] = key.split("#")
       if (!repo || !number) continue
-      const state = p.skipped ? "skipped" : p.notifiedAt ? "notified" : "pending"
+      const state = p.skipped ? "skipped" : p.notifiedAt || p.notifiedTo ? "notified" : "pending"
+      const prev = this.q.getPr.get(key)
+      if (!prev) {
+        this.event({
+          at, kind: "pr_new", key, repo,
+          number: Number(p.number) || Number(number) || 0,
+          to: state, detail: p.title || "",
+        })
+      } else if (String(prev.state || "") !== state) {
+        this.event({
+          at, kind: "pr_state", key, repo,
+          number: Number(p.number) || Number(number) || 0,
+          from: prev.state || "", to: state,
+          detail: p.skipped ? `跳过：${p.skipped}` : p.notifiedTo ? `已通知 ${p.notifiedTo}` : "",
+        })
+      }
       this.q.upsertPr.run(
         key,
         p.repo || repo,
@@ -177,6 +277,92 @@ export class ConsoleStore {
       newPrs: totalPrs - beforePrs,
       totalTasks,
       totalPrs,
+    }
+  }
+
+  /** 记一条事件（历史视图的原料）。at 缺省取当前时刻。 */
+  event({ at = new Date().toISOString(), kind, key = "", repo = "", number = 0, from = "", to = "", detail = "", agent = "" } = {}) {
+    if (!kind) return null
+    const day = localDay(at)
+    const row = {
+      at, day, kind, key, repo,
+      number: Number(number) || 0,
+      from: from || "", to: to || "", detail: detail || "", agent: agent || "",
+    }
+    try {
+      this.q.insertEvent.run(row.at, row.day, row.kind, row.key, row.repo, row.number, row.from, row.to, row.detail, row.agent)
+    } catch {}
+    return row
+  }
+
+  /**
+   * 历史：按天分组的事件时间线（新的在前）。
+   * days<=0 表示全部；day="YYYY-MM-DD" 只看那一天（优先于 days）；
+   * repo 过滤 <owner>/<repo>；key 过滤单条（<owner>/<repo>#<number>）。
+   */
+  history({ days = 7, repo = "", key = "", day = "" } = {}) {
+    const n = Number(days)
+    const span = Number.isFinite(n) && n > 0 ? n : 0
+    const since = span ? new Date(Date.now() - span * 86400000).toISOString() : ""
+    const dayPick = /^\d{4}-\d{2}-\d{2}$/.test(String(day || "")) ? String(day) : ""
+    let rows = dayPick
+      ? this.q.eventsOnDay.all(dayPick)
+      : key
+      ? this.q.eventsForKey.all(key)
+      : this.q.eventsSince.all(since || "0000")
+
+    // 标题从当前行反查，事件本身只存 key，不重复存标题。
+    const titles = new Map()
+    for (const t of this.q.allTasks.all()) titles.set(t.key, t.title)
+    for (const p of this.q.allPrs.all()) if (!titles.has(p.key)) titles.set(p.key, p.title)
+
+    if (repo) rows = rows.filter((r) => r.repo === repo)
+
+    const groups = new Map()
+    for (const r of rows) {
+      if (!groups.has(r.day)) groups.set(r.day, { day: r.day, count: 0, tasks: new Set(), prs: new Set(), items: [] })
+      const g = groups.get(r.day)
+      g.count += 1
+      if (String(r.kind).startsWith("pr")) g.prs.add(r.key)
+      else g.tasks.add(r.key)
+      g.items.push({
+        id: r.id,
+        at: r.at,
+        atClock: clockOf(r.at),
+        kind: r.kind,
+        key: r.key,
+        repo: r.repo,
+        number: r.number,
+        title: titles.get(r.key) || "",
+        from: r.from_state,
+        to: r.to_state,
+        detail: r.detail,
+        agent: r.agent,
+      })
+    }
+
+    const list = [...groups.values()]
+      .map((g) => ({
+        day: g.day,
+        count: g.count,
+        tasks: [...g.tasks].filter(Boolean),
+        prs: [...g.prs].filter(Boolean),
+        items: g.items.sort((a, b) => (a.at < b.at ? 1 : -1)),
+      }))
+      .sort((a, b) => (a.day < b.day ? 1 : -1))
+
+    return {
+      generatedAt: new Date().toISOString(),
+      days: span,
+      day: dayPick,
+      since,
+      repo: repo || "",
+      key: key || "",
+      total: rows.length,
+      eventsInDb: Number(this.q.countEvents.get().c),
+      // 有记录的日期（最近 60 天里出现过的），给页面做「按日期快选」。
+      availableDays: this.q.dayCounts.all().map((d) => ({ day: d.day, count: Number(d.c) })),
+      groups: list,
     }
   }
 

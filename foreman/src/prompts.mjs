@@ -21,7 +21,7 @@ export function kickoff({ repo, issue, worktree, branch, base, attempt = 1, last
     `只在这个工作区里改：${worktree}`,
     `分支已经开好：${branch}（基线 origin/${base}）。不要切分支、不要 rebase、不要动别的目录。`,
     `改完并在本工作区自测通过后：先 git push -u origin ${branch}，再用 foreman pr open --repo ${repo} --base ${base} --head ${branch} --title "fix(#${issue.number}): <一句话>" --body "<自证正文>" --issue ${issue.number} 开 PR。PR 必须走 foreman（它记账、同步控制台），不要直接 opencli gitea pr；输出里的 pr 与 url 填进 RESULT 的 pr / prUrl。`,
-    `自测没过就先别 push、别开 PR，按 status 交 RESULT 说明卡在哪。工单评论/关单也只能用 foreman issue comment|close，不要直接 opencli gitea 写；合并由 foreman 做，你不要合。不要 force push、不要手改基线。`,
+    `自测没过就先别 push、别开 PR，按 status 交 RESULT 说明卡在哪。工单侧（评论/关单/改标签）可以直接 opencli gitea issue-comment|close|issue-edit，不经 foreman；但 PR 只能经 foreman pr open 建（绕过它这条 PR 就不进账本），合并由 foreman 做、你不要合。不要 force push、不要手改基线。`,
     `提交信息用中文，首行写 “fix(#${issue.number}): <一句话>”，正文写清改法与验证方式。`,
     `先读仓库里的 AGENTS.md / docs/agents/ 约定（如果有），按仓库自己的规矩来。`,
     `改完必须自己跑相关测试；跑不了就在 tests 里写清原因，不要假装跑过。`,
@@ -46,11 +46,11 @@ export function kickoff({ repo, issue, worktree, branch, base, attempt = 1, last
   return lines.join("\n")
 }
 
-export function resume({ issue, attempt, failure = "" }) {
+export function resume({ issue, attempt, base = "", failure = "" }) {
   return [
     `继续工单 #${issue.number}（第 ${attempt} 次尝试）。`,
     failure ? `上一次的问题：${failure}` : "上一次没有跑完，接着当前工作区状态继续，不要重做已完成的部分。",
-    `还是那条边界：只在这个工作区改；自测通过后自己 git push + foreman pr open 开 PR（--base ${base} --issue ${issue.number}），把 PR 号/链接写进 RESULT；不合并、不直接调 opencli gitea 写、不 force push。`,
+    `还是那条边界：只在这个工作区改；自测通过后自己 git push + foreman pr open 开 PR（${base ? `--base ${base} ` : ""}--issue ${issue.number}），把 PR 号/链接写进 RESULT；建 PR 只走 foreman、不合并、不 force push。`,
     ``,
     RESULT_SPEC,
   ].join("\n")
@@ -66,6 +66,29 @@ export function handoff({ repo, issue, worktree, branch }) {
   ]
     .filter(Boolean)
     .join("\n")
+}
+
+// deliverPrompt：每次新建会话的首句 = 固定提示词（运行时副本，路径只从配置来）
+// + 产品 + 监控项目 + 这一次要处理的通知正文。固定提示词原文不动，只在其后追加本次上下文。
+export function deliverPrompt({ fixed = "", projectDir = "", product = "", kind = "", text = "" } = {}) {
+  const head = String(fixed ?? "").trim()
+  if (!head) throw new Error("固定提示词为空：检查 deliver.promptFile / products[].promptFile 指向的文件")
+  const body = String(text ?? "").trim()
+  const online = []
+  if (product) online.push(`产品：${String(product).trim()}`)
+  if (projectDir) online.push(`监控项目：${String(projectDir).trim()}`)
+  if (kind) online.push(`本次投递：${kind}`)
+  return [head, "", "---", "", ...(online.length ? [...online, ""] : []), "下面是本次要处理的内容：", "", body].join("\n")
+}
+
+// noticeSessionName：新建会话的名字（豆包侧边栏标题），带上投递类型与时间，便于复查。
+export function noticeSessionName({ prefix = "foreman", kind = "", at = new Date() } = {}) {
+  const d = at instanceof Date && !Number.isNaN(at.getTime()) ? at : new Date()
+  const p = (n) => String(n).padStart(2, "0")
+  const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`
+  const label = String(kind ?? "").trim()
+  const base = String(prefix ?? "foreman").trim() || "foreman"
+  return label ? `${base}-${label}-${stamp}` : `${base}-${stamp}`
 }
 
 export function prBody({ issue, summary, tests, commits, stat, base = "" }) {
