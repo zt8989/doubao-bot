@@ -131,7 +131,11 @@ export class Lifecycle {
       run = { workflow, key, stage: "", status: "running", startedAt: now, updatedAt: now, pr: null }
       this.runs.set(rk, run)
     }
-    if (stage) run.stage = stage
+    if (stage) {
+      run.stage = stage
+      // 本单在这个节点上的更新时间：控制台详情逐节点显示，便于看出卡在哪一步。
+      run.stageAt = { ...(run.stageAt ?? {}), [stage]: now }
+    }
     if (Number(pr)) run.pr = Number(pr)
     run.updatedAt = now
     if (status) run.status = status

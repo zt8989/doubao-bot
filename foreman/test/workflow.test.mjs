@@ -32,8 +32,11 @@ test("Lifecycle：流程实例跟着事件推进阶段，关单即收口；暂�
   const lc = new Lifecycle({ log: () => {} })
   lc.touchRun("own", "r#1", { stage: "pickup" })
   assert.equal(lc.active("own").length, 1)
+  // 每个节点记自己的更新时间，控制台详情逐节点显示
+  assert.ok(lc.runsList(20).find((r) => r.key === "r#1").stageAt.pickup, "节点要有更新时间")
   lc.touchRun("own", "r#1", { stage: "dispatch" })
   assert.equal(lc.active("own").length, 1, "同一张单只占一个名额")
+  assert.ok(lc.runsList(20).find((r) => r.key === "r#1").stageAt.dispatch)
   lc.touchRun("own", "r#2", { stage: "pickup" })
   assert.equal(lc.active("own").length, 2)
   // 关单 = 收口，退出「在跑」计数

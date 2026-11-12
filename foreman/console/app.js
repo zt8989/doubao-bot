@@ -26,6 +26,25 @@ const pad2 = (n) => String(n).padStart(2, "0")
 const emit = (host, name, detail) =>
   host.dispatchEvent(new CustomEvent(name, { detail, bubbles: true, composed: true }))
 const clockText = (d = new Date()) => `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`
+// 节点更新时间：ISO → 「MM-DD HH:MM」；已经是时钟串（HH:MM:SS）就原样用。
+const stampText = (v) => {
+  const raw = String(v ?? "").trim()
+  if (!raw) return ""
+  const d = new Date(raw)
+  if (Number.isNaN(d.getTime())) return raw
+  return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+}
+// 账本状态兜底：CLI 派单（foreman run）不进服务的 workflow 实例，靠这层把节点位置推出来。
+const STATE_STAGE = {
+  planned: "pickup",
+  working: "dispatch",
+  "pr-open": "pr-open",
+  done: "close",
+  "needs-human": "develop",
+  blocked: "develop",
+  escalated: "conclude",
+  failed: "develop",
+}
 
 /* ---------------- 主题切换 ---------------- */
 class FmThemeSwitch extends LitElement {
@@ -212,11 +231,19 @@ class FmTasks extends LitElement {
     // 同一张单可能同时有「自有工单」与「他人 PR」两条流程的实例（比如自己的 PR 被别人也扫过）：
     // 优先挑在跑的，其次挑自有工单那条，最后才退回别的，避免把自己的单显示成别人 PR 的流程。
     const matches = (this.runs || []).filter((r) => r.key === key)
-    const run =
+    const live =
       matches.find((r) => r.status === "running" && r.workflow === "own") ||
       matches.find((r) => r.workflow === "own") ||
       matches.find((r) => r.status === "running") ||
       matches[0]
+    // CLI 派单（foreman run）不进服务进程，没有 workflow 实例：按账本状态推一个，
+    // 否则详情会整排「待跑」，看着像这条单压根没开始。
+    const derived = live
+      ? null
+      : STATE_STAGE[t.state]
+        ? { workflow: "own", stage: STATE_STAGE[t.state], status: t.state === "done" ? "done" : "running", derived: true }
+        : null
+    const run = live ?? derived
     const flow = (this.workflows || []).find((w) => w.id === (run?.workflow ?? "own"))
     const stages = flow?.stages ?? []
     const nodes = this.nodes || []
@@ -227,7 +254,9 @@ class FmTasks extends LitElement {
           <div class="task-detail">
             <div class="task-detail-head">
               <span class="hint">${flow ? `${flow.name} · ${flow.description}` : "这条工单还没进 workflow"}</span>
-              <span class=${"badge " + (run?.status === "done" ? "done" : "working")}>${run ? (run.status === "done" ? "流程已完成" : `当前节点 ${run.stage || "—"}`) : "未开始"}</span>
+              <span class=${"badge " + (run?.status === "done" ? "done" : "working")}>${run
+                ? (run.status === "done" ? "流程已完成" : `当前节点 ${run.stage || "—"}${derived ? "（按账本状态推算）" : ""}`)
+                : "未开始"}</span>
             </div>
             ${stages.length
               ? html`<ol class="wf-nodes compact">
@@ -243,6 +272,17 @@ class FmTasks extends LitElement {
                           <span class="wf-stage">${st.stage}</span>
                           <span class=${"badge " + (state === "current" ? "working" : state === "passed" ? "done" : "planned")}>${label}</span>
                           <span class="chip"><span class="mono">${n.count ?? 0}</span> 次</span>
+                          ${(() => {
+                            const own = run?.stageAt?.[st.stage] ?? ""
+                            const time = own || n.lastAt || ""
+                            const kind = own
+                              ? "本单在这个节点的更新时间"
+                              : n.lastAt
+                                ? "这个节点最近一次执行时间（不一定是本单）"
+                                : "本单最近更新时间"
+                            const text = stampText(time) || t.updatedAtClock || "—"
+                            return html`<span class="wf-time" title=${kind}><span class="k">更新</span> ${text}</span>`
+                          })()}
                           ${n.paused ? html`<span class="badge failed">已暂停</span>` : ""}
                         </div>
                         <div class="wf-node-sub">${st.description}</div>
@@ -363,7 +403,7 @@ class FmWorkflows extends LitElement {
                         <span class="wf-stage">${st.stage}</span>
                         <span class=${"badge " + (n.paused ? "failed" : "done")}>${n.paused ? "已暂停" : "可运行"}</span>
                         <span class="chip"><span class="mono">${n.count ?? 0}</span> 次</span>
-                        <span class="pr-note">${n.lastAt ? `最近 ${String(n.lastAt).slice(11, 19)}` : "还没跑过"}</span>
+                        <span class="pr-note">${n.lastAt ? `更新 ${stampText(n.lastAt)}` : "还没跑过"}</span>
                       </div>
                       <div class="wf-node-sub">${st.description}</div>
                       <button class="ghost wf-btn" ?disabled=${this.busy === st.stage}
@@ -383,7 +423,7 @@ class FmWorkflows extends LitElement {
                 <li class="wf-run">
                   <span class=${"badge " + (r.status === "done" ? "done" : "working")}>${r.status === "done" ? "已完成" : "进行中"}</span>
                   <span class="mono">${r.key}</span>
-                  <span class="hint">${r.workflow === "own" ? "自有工单" : "他人 PR"} · 当前节点 ${r.stage || "—"}</span>
+                  <span class="hint">${r.workflow === "own" ? "自有工单" : "他人 PR"} · 当前节点 ${r.stage || "—"} · 更新 ${stampText(r.updatedAt) || "—"}</span>
                   <span class="pr-note">${r.startedAt ? `开始 ${String(r.startedAt).slice(11, 19)}` : ""}</span>
                 </li>`)}
             </ul>

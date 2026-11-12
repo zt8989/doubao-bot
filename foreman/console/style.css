@@ -802,3 +802,15 @@ footer {
 .wf-runs-head { font-size: 12px; color: var(--dim); margin-bottom: 6px; }
 .wf-run-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .wf-run { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+
+/* 节点更新时间：和「N 次」并排，弱化显示，避免抢节点名 */
+.wf-time {
+  font-size: 11px;
+  color: var(--muted, #8a8f98);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.wf-time .k {
+  opacity: .7;
+  margin-right: 2px;
+}

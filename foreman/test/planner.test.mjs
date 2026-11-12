@@ -173,7 +173,7 @@ test("poll：不是 done → 催编排去看，不去接单", async () => {
   }
 })
 
-test("runningIssues 只数 planned/working", () => {
+test("runningIssues 数 planned/working/pr-open（PR 开着还没关单也占名额）", () => {
   const book = { issues: { a: { state: "working" }, b: { state: "planned" }, c: { state: "pr-open" }, d: { state: "failed" } } }
-  assert.deepEqual(runningIssues(book).map((x) => x.key), ["a", "b"])
+  assert.deepEqual(runningIssues(book).map((x) => x.key), ["a", "b", "c"])
 })
