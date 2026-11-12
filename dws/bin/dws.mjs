@@ -16,7 +16,7 @@ const HELP = `dws ${VERSION} —— 豆包会话 CLI（开启会话 / 会话状�
 
 用法：
   dws open  --name <会话名> [--repo <owner/name>] [--project <项目名>] [--prompt <文字> | --file <文件>]
-            [--mode local|cloud] [--model auto|<模型 id>]
+            [--mode local|cloud] [--model auto|<模型 id>] [--no-wait]
   dws projects                      列出豆包侧边栏「项目」分组下的项目
   dws list                          列出豆包窗口里的全部工作任务 + 本地记录的会话
   dws use  <任务id|会话名>           把豆包窗口切到那条任务
@@ -53,8 +53,9 @@ const { pos, flags } = parseArgs(argv.slice(1))
 // （历史上子命令的 --help 曾被当成真实执行，所以这里独立于执行流程）。
 const HELP_BY_CMD = {
   open: [
-    "dws open --name <会话名> [--repo <owner/name>] [--project <项目名>] [--prompt <文字> | --file <文件>]\n            [--mode local|cloud] [--model auto|<模型 id>]",
+    "dws open --name <会话名> [--repo <owner/name>] [--project <项目名>] [--prompt <文字> | --file <文件>]\n            [--mode local|cloud] [--model auto|<模型 id>] [--no-wait]",
     "新建一条工作任务（会话）。带 --prompt/--file 会顺带把第一句发出去并等它跑完；不带就只建任务。豆包是单实例，先 ⌘Q 退出自己的豆包。",
+    "--no-wait 只确认首句送达并回读新会话 id，不等第一轮回复（每次新建会话的通知用）。",
   ],
   projects: ["dws projects", "列出豆包侧边栏「项目」分组下的项目。"],
   list: ["dws list", "列出豆包窗口里的全部工作任务 + 本地记录的会话。"],
@@ -195,14 +196,16 @@ async function cmdOpen() {
   const mode = flags.mode && flags.mode !== true ? String(flags.mode) : undefined
   const model = flags.model && flags.model !== true ? String(flags.model) : undefined
   const project = flags.project && flags.project !== true ? String(flags.project) : ""
+  const noWait = isTruthy(flags["no-wait"], false)
   log(`开会话 ${name}${repo ? `（${repo}）` : ""}${project ? `（项目 ${project}）` : ""}……（豆包窗口会被切到新任务）`)
-  const opened = await session.open(name, { prompt, repo, mode, model, project })
+  const opened = await session.open(name, { prompt, repo, mode, model, project, noWait })
   const out = {
     ok: true,
     session: opened.session?.name,
     convId: opened.session?.convId,
     mode: opened.session?.mode,
     model: opened.session?.model,
+    noWait: noWait || undefined,
     replied: !!opened.reply,
     reply: opened.reply
       ? {

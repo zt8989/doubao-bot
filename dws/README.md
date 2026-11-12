@@ -49,6 +49,7 @@ dws doctor                           # 自检；--start 会真的拉起豆包查
 dws open --name win-ai-harness --repo yyzl/win-ai-harness --prompt "先看一眼仓库现状"
 dws open --name scratch --file /tmp/brief.md             # 长提示词走文件
 dws open --name scratch                                  # 只开任务，不发消息
+dws open --name notice --file /tmp/notice.md --no-wait    # 发首句但不等回复（只确认送达 + 回读新会话 id）
 
 dws list                     # 豆包窗口里的全部工作任务 + 本地记录的会话
 dws projects                 # 侧边栏「项目」分组下的项目

@@ -105,8 +105,8 @@ export class SessionManager {
   }
 
   // open 新建一条工作任务；给 prompt 就顺带把第一句发出去并等回复。
-  // project 给了就开在豆包的那个项目下。
-  async open(name, { prompt = "", repo = "", mode, model, project = "", signal, onUpdate } = {}) {
+  // project 给了就开在豆包的那个项目下。noWait 只确认首句送达，不等第一轮回复。
+  async open(name, { prompt = "", repo = "", mode, model, project = "", noWait = false, signal, onUpdate } = {}) {
     mode = mode ?? this.mode
     model = model ?? this.model
     // 记账前先记下当前窗口所在的会话 id：新建任务后必须确认窗口已经离开它，
@@ -119,7 +119,7 @@ export class SessionManager {
     if (prompt) {
       // openTask 内部已经在 waitReply 回读处做过 isFreshTask 守卫，
       // 回读到旧会话 id 会抛 doubao_new_task，不会落到下面的记账。
-      reply = await this.client.openTask(prompt, { mode, model, project, signal, onUpdate })
+      reply = await this.client.openTask(prompt, { mode, model, project, noWait, signal, onUpdate })
     } else {
       const page = await this.client.connect(signal)
       for (const [expr, what] of [

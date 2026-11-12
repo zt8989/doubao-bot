@@ -391,7 +391,8 @@ export class Doubao {
   }
 
   // openTask 新建一个工作任务，按需切模式/选模型，发第一条消息，等回复跑完。
-  async openTask(prompt, { mode = "local", model = "auto", project = "", signal, onUpdate } = {}) {
+  // noWait=true 时只确认首句送达并拿到新会话 id，不等第一轮回复（通知类新会话用）。
+  async openTask(prompt, { mode = "local", model = "auto", project = "", noWait = false, signal, onUpdate } = {}) {
     const page = await this.connect(signal)
     const s = await page.eval(STATE)
     if (!s.signedIn) throw new DoubaoError("豆包没有登录，请先在豆包窗口里登录", "doubao_signed_out")
@@ -431,6 +432,23 @@ export class Doubao {
     // waitReply 判不出「发出去了」（长会话下尤其明显）。
     const baseline = await this.stableCounts(page, signal)
     await sendText(page, prompt, signal)
+    // noWait：只确认「首句发出去了」并回读到新会话 id，不等第一轮回复。
+    // 通知类新会话要的就是这个——等回复会把调用方的轮询拖到超时。
+    if (noWait) {
+      const sent = await this.confirmSent(page, baseline, { signal })
+      let convId = String(sent?.convId ?? "").trim()
+      if (!/^\d{8,}$/.test(convId) || convId === String(beforeConvId ?? "").trim()) {
+        convId = await this.waitNewConvId(beforeConvId, { timeoutMs: 20000, signal })
+      }
+      if (!isFreshTask(beforeConvId, convId, { requireNewId: true })) {
+        throw new DoubaoError(
+          `新建工作任务失败：首句发出去了，但回读到的会话 id 是 ${convId || "(空)"}，` +
+            `与新建前所在的 ${beforeConvId || "(空)"} 相同；窗口没有真正切到新会话。`,
+          "doubao_new_task"
+        )
+      }
+      return { convId, reply: null, sent: true }
+    }
     const reply = await this.waitReply({ baseline, signal, onUpdate })
     // 回读守卫：拿到的会话 id 必须与新建前不同，否则就是没切走。此时提示词很可能发进了
     // 旧会话，绝不允许把旧 id 当新会话登记。
@@ -652,6 +670,43 @@ export class Doubao {
       if (cur !== before) return { switched: true, convId: cur }
       last = cur
       if (Date.now() - start > timeoutMs) return { switched: false, convId: cur }
+      await sleep(this.poll, signal)
+    }
+  }
+
+  // confirmSent 只确认「这条消息真的进了会话」：末条 send 的 message_id 变了，或条数增加。
+  // 长会话是虚拟列表，条数可能一直是满的，所以两个判据都看。
+  async confirmSent(page, baseline, { timeoutMs = 20000, signal } = {}) {
+    const until = Date.now() + timeoutMs
+    while (Date.now() < until) {
+      await sleep(this.poll, signal)
+      let sig = null
+      try {
+        sig = await page.eval(SIGNATURE)
+      } catch (e) {
+        if (signal?.aborted) throw e
+        continue
+      }
+      const sentNow = String(sig?.lastSendId ?? "")
+      const sentBase = String(baseline?.lastSendId ?? "")
+      if ((sentNow && sentNow !== sentBase) || Number(sig?.sends) > Number(baseline?.sends)) return sig
+    }
+    throw new DoubaoError("豆包没有把这条消息发出去", "doubao_ui")
+  }
+
+  // waitNewConvId 等一个「具体的、与新建前不同」的会话 id：路由重建会晚一步才给 id。
+  async waitNewConvId(beforeConvId, { timeoutMs = 20000, signal } = {}) {
+    const before = String(beforeConvId ?? "").trim()
+    const start = Date.now()
+    for (;;) {
+      let cur = ""
+      try {
+        cur = String((await this.read(signal))?.convId ?? "").trim()
+      } catch (e) {
+        if (signal?.aborted) throw e
+      }
+      if (/^\d{8,}$/.test(cur) && cur !== before) return cur
+      if (Date.now() - start > timeoutMs) return ""
       await sleep(this.poll, signal)
     }
   }
