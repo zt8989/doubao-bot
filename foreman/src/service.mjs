@@ -763,19 +763,24 @@ export async function pollOnce(ctx) {
       const led = book.notified[key] ?? {}
       if (side?.running) {
         if (led.idle) book.clearIdle(key)
+        if (led.gone) book.clearGone(key)
         rec.lastPhase = "running"
         rec.lastPollAt = nowIso()
         continue
       }
-      if (side && led.idle) {
-        rec.lastPhase = "idle"
+      // 侧边栏里根本没有这条（已归档/已收起）：只记 gone，不读 status。
+      // status 切不过去，只会回「侧边栏里没有任务」，每轮刷一次日志、白拽一次窗口。
+      if (sidebar && !side) {
+        if (!led.gone) book.markGone(key)
+        rec.lastPhase = "gone"
         rec.lastPollAt = nowIso()
         continue
       }
-      // 侧边栏里根本没有这条（已归档/已收起）：处理过收工的老会话直接跳过，
-      // 否则这类会话每轮都要 goto 一次 status，白拽窗口。
-      if (sidebar && !side && led.fingerprint) {
-        rec.lastPhase = "gone"
+      // 又回到侧边栏里了：清 gone，这一轮重新判一次（中间可能又跑完过一轮）。
+      if (side && led.gone) {
+        book.clearGone(key)
+      } else if (side && led.idle) {
+        rec.lastPhase = "idle"
         rec.lastPollAt = nowIso()
         continue
       }

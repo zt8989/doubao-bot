@@ -133,3 +133,38 @@ test("侧边栏里没有这条、但上次已通知过：不再读 status", asyn
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("侧边栏里没有这条、也从没通知过：只记 gone，不读 status", async () => {
+  const { ctx, calls, dir } = mkCtx({
+    runningMap: async () => ({ "conv-b": { running: false, title: "别的会话" } }),
+    status: async () => { throw new Error("不在侧边栏的会话不该读 status") },
+  })
+  try {
+    await pollOnce(ctx)
+    assert.equal(calls.status, 0)
+    assert.equal(new Book(ctx.cfg.stateFile).notified["conv-a"].gone, true)
+    assert.equal(ctx.state.watchers.get("conv-a").lastPhase, "gone")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("gone 之后又出现在侧边栏：清 gone 并重新判一轮", async () => {
+  let present = false
+  const { ctx, calls, dir } = mkCtx({
+    runningMap: async () => (present ? { "conv-a": { running: false, title: "w" } } : { "conv-b": { running: false, title: "别的会话" } }),
+    status: async () => ({ streaming: false, finished: true, chars: 700, head: "H", tail: "T", status: "ok" }),
+  })
+  try {
+    await pollOnce(ctx)
+    assert.equal(calls.status, 0)
+    assert.equal(new Book(ctx.cfg.stateFile).notified["conv-a"].gone, true)
+    present = true
+    const r2 = await pollOnce(ctx)
+    assert.equal(calls.status, 1)
+    assert.equal(r2.notified, 1)
+    assert.ok(!new Book(ctx.cfg.stateFile).notified["conv-a"].gone)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

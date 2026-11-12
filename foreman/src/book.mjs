@@ -300,6 +300,29 @@ export class Book {
     return prev
   }
 
+  // 侧边栏里根本没有这条（已归档/已收起）：落 gone，之后不再为它读 status。
+  // dws status 切不过去只会报「侧边栏里没有任务」，每 20s 刷一次日志、白拽一次窗口。
+  markGone(target) {
+    this.reload()
+    const key = String(target)
+    const prev = this.notified[key] ?? {}
+    this.notified[key] = { ...prev, gone: true, goneAt: nowIso() }
+    this.save()
+    return this.notified[key]
+  }
+
+  // 它又出现在侧边栏里了：清掉 gone，这一轮重新判一次（中间可能又跑完过一轮）。
+  clearGone(target) {
+    this.reload()
+    const key = String(target)
+    const prev = this.notified[key]
+    if (!prev || !prev.gone) return prev ?? null
+    prev.gone = false
+    delete prev.goneAt
+    this.save()
+    return prev
+  }
+
   // reload 从盘上重读：服务里一次 notify 可能耗时几十秒，期间别的进程（run/CLI）
   // 也在写同一个 state.json，长时间持有快照再整文件覆盖会把它们的改动抹掉。
   reload() {
