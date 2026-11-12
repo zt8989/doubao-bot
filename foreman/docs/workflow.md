@@ -78,7 +78,8 @@ workflow 面板能看到两条流程的全部节点。
    - `mergeable=true` → 走 `runMergeTask`（与 CLI `foreman pr merge` 共用 `ctx.mergeChain`）合并 + 收尾流水线；
    - `need_decision` / `blocked` / merge 失败 → 记 `mergeJudge`，写控制台 `pr_judge` 事件，交给人；
    - 判过就不再读这条会话（读 `dws info` 要切用户窗口）；`merge.verdictAutoMerge: false` 时只判断不合。
-4. 合并结果照样回一条「合并完成」；这类回执会话不会被判断链路二次消费。
+4. 合并结果只落账本与控制台（`mergeAsk` / `mergeTask` / `pr_merge`），**不再新开一条会话发「合并完成」**：
+   合并助手交完 RESULT 就停手，合不合并、合没合上都由代码记账，回执会话没有可接的下一步。
 
 会话跑完仍会把「PR 已开好」记进账本并发通知，但真正落地合并的是 workflow，不是会话自己。
 

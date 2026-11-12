@@ -60,11 +60,11 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 - 派单侧仍靠 `run.lock`（含 CLI `foreman run`）；合并不在定时器里跑，所以「正在合 PR」不会挡「正在派单」。
 - 会话层也分开：**派单会话**（`foreman-派单-<时间戳>`，读派单提示词，只做续跑/接单）与**合并会话**
   （`foreman-合并-<时间戳>`，读合并提示词，判断可合性 + 解冲突，不自己合）。账本 `sessions.kind` 记 `deliver:dispatch` / `deliver:merge`，
-  `sessions.notice` 记触发类型（只有「PR待合并」会被合并判断链路消费，「合并完成」只是回执）。
+  `sessions.notice` 记触发类型（只有「PR待合并」会被合并判断链路消费）。
 - 派单判定完一条会话，**不再当场合并、也不再入队**：会话自己 push + 开 PR，工单置 `pr-open`，
   通知里写「合并：PR 已开好，核对工单/改动后自己跑 `foreman pr merge <N>`」，然后立刻返回。
-- 合并结果单独通知：`foreman-合并-*` 会话（`deliver.mode: new`）或 `dws notify`（`existing`，回给登记的通知目标，
-  **不回给已经收工的执行会话**）；CLI `foreman pr merge` 触发的合并不发通知。
+- 合并结果不另开会话：CLI `foreman pr merge` 与合并判断（`mergeable=true`）触发的合并都只落账本 + 控制台
+  （`mergeAsk` / `mergeTask` / `pr_merge`），不发「合并完成」回执会话；合并助手交完 RESULT 即收工。
 - `foreman status` 里能看：`pickup.maxRunning / inflight`、`lanes.dispatch.workflowActive`、`merge.queued`、
   `merge.judge`（合并助手判断账：pending / merged / held / failed）、`workflow.{workflows,stages,nodes,active,runs,recent}`。
 

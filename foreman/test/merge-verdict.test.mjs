@@ -130,11 +130,13 @@ test("judgeMergeVerdict：开关、没结论、不可合、可合、账本已合
 test("mergeVerdictOnce：读结论 → 走 workflow 合并 → 判断账收口", async () => {
   const dir = tmpDir()
   try {
-    const cfg = mkCfg(dir)
+    // deliver.mode: new 时最容易出新会话：这里盯死「合并由代码落地，不再回一条合并完成」。
+    const cfg = mkCfg(dir, { deliver: { mode: "new" } })
     const name = seedSession(cfg)
     const merged = []
     const closed = []
     const sends = []
+    const delivered = []
     let infoCalls = 0
     const gitea = {
       listPulls: async () => [],
@@ -146,6 +148,7 @@ test("mergeVerdictOnce：读结论 → 走 workflow 合并 → 判断账收口",
       cfg,
       log: () => {},
       gitea,
+      deliver: async (arg) => { delivered.push(arg) },
       dws: {
         info: async () => { infoCalls++; return { lastReply: `<RESULT>${JSON.stringify(verdict)}</RESULT>` } },
         notify: async (target, text) => sends.push({ target, text }),
@@ -155,6 +158,8 @@ test("mergeVerdictOnce：读结论 → 走 workflow 合并 → 判断账收口",
     const out = await mergeVerdictOnce(ctx, { sidebar: { "conv-m1": { running: false } } })
     assert.equal(out.merged, 1)
     assert.deepEqual(merged, [{ repo: "demo/demo", pr: 268, opts: { style: "merge", deleteBranch: true } }])
+    assert.equal(delivered.length, 0, "合并由代码落地，不再新开一条回执会话")
+    assert.equal(sends.length, 0, "也不给已有会话发合并回执")
     assert.equal(infoCalls, 1, "判过一次就不再读会话")
     const led = new Book(cfg.stateFile).mergeJudge[name]
     assert.equal(led.status, "merged")

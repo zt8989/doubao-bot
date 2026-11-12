@@ -987,8 +987,9 @@ export async function pollOnce(ctx) {
 
 // ---- 合并通道 ----
 
-// runMergeTask：合并一条 PR 并收尾（关单、摘监听、清工作区、归档执行会话），
-// 最后给合并会话发一条「合并完成」。合不了只记账不发脾气，也不 force merge。
+// runMergeTask：合并一条 PR 并收尾（关单、摘监听、清工作区、归档执行会话）。
+// 结果只落账本 + 控制台：CLI 与合并判断的调用点都带 notify:false，不再新开「合并完成」会话。
+// 合不了只记账不发脾气，也不 force merge。
 // 合并 / 关单是两条流程共用的阶段，必须落到对应那条流程上，否则控制台会张冠李戴
 // （自有工单的 PR 被记成「他人 PR」流程，run 停在 close，工单那条 own 永远卡在 pr-open）。
 function workflowForIssue({ book, repo, issueNo = 0, declared = "" } = {}) {
@@ -1253,7 +1254,9 @@ export function judgeMergeVerdict({ cfg, record = {}, result = {}, book } = {}) 
 }
 
 // runVerdictTasks：把可合的 PR 交给 workflow（runMergeTask）落地。
-// 与 CLI 共用一条串行链：同一时刻不会并着合两条；合并结果按 notifyMergeOutcome 回一条「合并完成」。
+// 与 CLI 共用一条串行链：同一时刻不会并着合两条。
+// 合并结果只落账本 + 控制台，不再回一条「合并完成」：合并助手交完 RESULT 就收工，
+// 为一句回执新开一条会话没有意义（2026-11-12 17:00 那条空会话就是这么冒出来的）。
 async function runVerdictTasks(ctx, { name = "", tasks = [], attempt = 1 } = {}) {
   const { cfg, log = () => {} } = ctx
   const ok = []
@@ -1262,8 +1265,9 @@ async function runVerdictTasks(ctx, { name = "", tasks = [], attempt = 1 } = {})
     new Book(cfg.stateFile).markMergeJudge(name, {
       status: "merging", tasks, attempts: attempt, key: t.key, repo: t.repo, pr: t.pr,
     })
+    // notify: false —— 合并是代码落的，结果落账本 + 控制台就够了。
     const run = () =>
-      runMergeTask(ctx, { key: t.key, repo: t.repo, pr: t.pr, url: t.url ?? "", source: "verdict" })
+      runMergeTask(ctx, { key: t.key, repo: t.repo, pr: t.pr, url: t.url ?? "", source: "verdict", notify: false })
     const prev = ctx.mergeChain ?? Promise.resolve()
     const mine = prev.then(run, run)
     ctx.mergeChain = mine.then(() => {}, () => {})
