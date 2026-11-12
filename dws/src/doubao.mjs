@@ -5,7 +5,7 @@ import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
 import { App, Page } from "./cdp.mjs"
-import { sleep, isFreshTask } from "./util.mjs"
+import { sleep, isFreshTask, pickNewTask } from "./util.mjs"
 
 export const APPS = [
   { name: "豆包工作", mac: "DoubaoWork.app/Contents/MacOS/DoubaoWork", sub: "doubaowork" },
@@ -390,6 +390,29 @@ export class Doubao {
     return page.eval(STATE)
   }
 
+  // readTasks 读侧边栏任务快照；读不到返回 null（区别于「确实一条任务都没有」的空数组）。
+  async readTasks(page, signal) {
+    try {
+      return (await page.eval(TASKS)) ?? []
+    } catch (e) {
+      if (signal?.aborted) throw e
+      return null
+    }
+  }
+
+  // locateNewTask 轮询侧边栏，等「点新建之后多出来的那条会话」出现；等不到返回 null。
+  // 这是新会话 id 的主证据：窗口 URL 在单实例共享下会被用户自己切走，不能当唯一判据。
+  async locateNewTask(page, beforeTasks, { timeoutMs = 30000, expectTitle = "", signal } = {}) {
+    if (!Array.isArray(beforeTasks)) return null
+    const start = Date.now()
+    for (;;) {
+      const hit = pickNewTask(beforeTasks, (await this.readTasks(page, signal)) ?? [], { expectTitle })
+      if (hit) return hit
+      if (Date.now() - start > timeoutMs) return null
+      await sleep(this.poll, signal)
+    }
+  }
+
   // openTask 新建一个工作任务，按需切模式/选模型，发第一条消息，等回复跑完。
   // noWait=true 时只确认首句送达并拿到新会话 id，不等第一轮回复（通知类新会话用）。
   async openTask(prompt, { mode = "local", model = "auto", project = "", noWait = false, signal, onUpdate } = {}) {
@@ -400,6 +423,18 @@ export class Doubao {
     // 否则 NEW_TASK 哪怕没切走，sendText 也会在旧会话里把提示词发出去，waitReply 还会把
     // 旧会话的回复当成新会话的回复带回来。
     const beforeConvId = s.convId
+    // 同时记下侧边栏的任务集合：新建后多出来的那条 id 才是本次新会话。窗口 id 只有一个，
+    // 用户点回自己的任务时读到的就是别人的 id——两条假结论（误判没建 / 记成别人的会话）
+    // 都来自这一个证据源。
+    const beforeTasksRead = await this.readTasks(page, signal)
+    // 快照为空、但窗口里明明停着一个会话：这是渲染没跟上，不是「侧边栏真的空」。
+    // 拿一份残缺快照做差集，会把用户已有的任务当成刚建出来的那条，宁可不认。
+    const beforeTasks =
+      Array.isArray(beforeTasksRead) &&
+      beforeTasksRead.length === 0 &&
+      /^\d{8,}$/.test(String(beforeConvId ?? "").trim())
+        ? null
+        : beforeTasksRead
 
     const step = async (expr, what) => {
       const why = await page.eval(expr)
@@ -436,22 +471,43 @@ export class Doubao {
     // 通知类新会话要的就是这个——等回复会把调用方的轮询拖到超时。
     if (noWait) {
       const sent = await this.confirmSent(page, baseline, { signal })
+      // 主证据：侧边栏里多出来的那条任务。命中就以它为准，不看窗口 id。
+      const located = await this.locateNewTask(page, beforeTasks, { signal })
+      if (located?.id) return { convId: located.id, reply: null, sent: true, locatedBy: "sidebar" }
       let convId = String(sent?.convId ?? "").trim()
       if (!/^\d{8,}$/.test(convId) || convId === String(beforeConvId ?? "").trim()) {
         convId = await this.waitNewConvId(beforeConvId, { timeoutMs: 20000, signal })
       }
       if (!isFreshTask(beforeConvId, convId, { requireNewId: true })) {
         throw new DoubaoError(
-          `新建工作任务失败：首句发出去了，但回读到的会话 id 是 ${convId || "(空)"}，` +
-            `与新建前所在的 ${beforeConvId || "(空)"} 相同；窗口没有真正切到新会话。`,
+          `新建工作任务失败：首句发出去了，但窗口回读的会话 id 是 ${convId || "(空)"}，` +
+            `与新建前所在的 ${beforeConvId || "(空)"} 相同，侧边栏里也没有多出新任务；` +
+            `无法确认本次新会话落点，请 dws list 核对。`,
           "doubao_new_task"
         )
       }
       return { convId, reply: null, sent: true }
     }
-    const reply = await this.waitReply({ baseline, signal, onUpdate })
-    // 回读守卫：拿到的会话 id 必须与新建前不同，否则就是没切走。此时提示词很可能发进了
-    // 旧会话，绝不允许把旧 id 当新会话登记。
+    let reply
+    try {
+      reply = await this.waitReply({ baseline, signal, onUpdate })
+    } catch (e) {
+      // 回复没等到不等于派活失败：侧边栏里确实多出一条新会话，就如实返回「已派出、
+      // 回复没取到」。报失败会让调用方重派，两条会话抢同一个工作区（#228 就是这么来的）。
+      const located = await this.locateNewTask(page, beforeTasks, { timeoutMs: 10000, signal })
+      if (located?.id && (e?.code === "doubao_timeout" || e?.code === "doubao_ui")) {
+        return { convId: located.id, reply: null, sent: true, locatedBy: "sidebar", replyUnconfirmed: true }
+      }
+      throw e
+    }
+    // 主证据：侧边栏差集。窗口里读到的 id 可能是用户自己切过去的会话，不能当新会话 id。
+    const located = await this.locateNewTask(page, beforeTasks, { signal })
+    if (located?.id) {
+      reply.convId = located.id
+      return { convId: located.id, reply, locatedBy: "sidebar" }
+    }
+    // 兜底：窗口回读（老路）。拿到的会话 id 必须与新建前不同，否则就是没切走。此时提示词
+    // 很可能发进了旧会话，绝不允许把旧 id 当新会话登记。
     if (!isFreshTask(beforeConvId, reply.convId, { requireNewId: true })) {
       // 会话 id 会随路由重建晚一步到位：回复已跑完时再补读一段，拿到具体新 id 就认。
       const late = await this.waitConvSwitch(beforeConvId, { timeoutMs: 20000, signal })

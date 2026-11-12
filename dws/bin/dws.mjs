@@ -206,6 +206,7 @@ async function cmdOpen() {
     mode: opened.session?.mode,
     model: opened.session?.model,
     noWait: noWait || undefined,
+    locatedBy: opened.locatedBy || undefined,
     replied: !!opened.reply,
     reply: opened.reply
       ? {
