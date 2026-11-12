@@ -9,6 +9,7 @@ import { Book } from "./book.mjs"
 import { parseResult, deliverPrompt, noticeSessionName } from "./prompts.mjs"
 import { notifyTarget, shouldNotify, notifyText, runRound, acquireLock, releaseLock } from "./orchestrator.mjs"
 import { WorkflowEngine } from "./workflow/engine.mjs"
+import { NODE_TEARDOWN, runNodeCleanup, resolveIssueKey } from "./workflow/cleaners.mjs"
 import { DoubaoSessionAdapter } from "./workflow/adapters/doubao.mjs"
 import { GiteaTrackerAdapter } from "./workflow/adapters/gitea.mjs"
 import { prWatchOnce, prWatchTarget, mergeFailureReason } from "./prwatch.mjs"
@@ -999,7 +1000,6 @@ export async function runMergeTask(ctx, task = {}) {
   // 这条 PR / 这张单属于哪条流程：显式指定就用它；没指定时按账本推断。
   // foreman 派过的单一定有 branch / worktree / agent（own）；查不到痕迹的 PR 才是别人开的（review）。
   const workflow = workflowForIssue({ book: new Book(cfg.stateFile), repo, issueNo, declared: task.workflow })
-  const issueKeyFor = issueNo ? `${repo}#${issueNo}` : `${repo}#${pr}`
 
   // 账本里已经是合并状态：不重复合，直接把队列条目收掉。
   const book0 = new Book(cfg.stateFile)
@@ -1037,41 +1037,43 @@ export async function runMergeTask(ctx, task = {}) {
     }
   }
 
-  // 收尾：关单、摘执行会话监听、记账（本地清理与归档统一交给 workflow 引擎，避免清两遍）。
-  const done = await finishMergedPr({
-    gitea: ctx.gitea,
-    cfg,
-    log,
-    stateFile: cfg.stateFile,
-    repo,
-    number: pr,
-    issueNo,
-    url: String(task.url ?? ""),
-    alreadyMerged,
-    cleanup: async () => ({ notes: [] }),
-  })
-  const book = new Book(cfg.stateFile)
+  // 合并成功：按 PR 反查它属于哪张工单。没传 --issue 时不再留空——留空的话 close 节点
+  // 接不上，工单就停在 pr-open（PR #122 合完 #121 还挂着就是这个原因）。
+  const book1 = new Book(cfg.stateFile)
+  const resolvedKey = issueNo
+    ? `${repo}#${issueNo}`
+    : (ctx.engine?.issueKeyForPr?.(book1, repo, pr) || resolveIssueKey({ runs: ctx.engine?.runs?.(200) ?? [], book: book1, repo, pr }))
+  const resolvedNo = Number(String(resolvedKey).split("#")[1] ?? 0) || 0
+  const finalWorkflow = workflowForIssue({ book: book1, repo, issueNo: resolvedNo, declared: task.workflow })
+
+  // 逐节点收尾：每个节点只清自己产生的东西。有 engine 时由它按节点跑
+  // （merge → pr-open → dispatch → close → cleanup → archive）；没有 engine 时用同口径的 finishMergedPr。
+  let done
   let cleanup = { notes: [] }
   if (ctx.engine) {
-    const issueKey = done.issueKey || (issueNo ? `${repo}#${issueNo}` : "")
-    cleanup = await ctx.engine.afterMerge({
-      watcher: { issueKey, target: task.target ?? "" },
-      merge: { key, repo, pr, prUrl: String(task.url ?? ""), issueNumber: issueNo },
-      book,
-      workflow,
+    const result = await ctx.engine.afterMerge({
+      watcher: { issueKey: resolvedKey, target: task.target ?? "" },
+      merge: { key, repo, pr, prUrl: String(task.url ?? ""), issueNumber: resolvedNo },
+      book: book1,
+      workflow: finalWorkflow,
+    })
+    done = { issueKey: resolvedKey, notes: result.notes ?? [] }
+    cleanup = { notes: [], nodes: result.nodes ?? [] }
+  } else {
+    done = await finishMergedPr({
+      gitea: ctx.gitea,
+      cfg,
+      log,
+      stateFile: cfg.stateFile,
+      repo,
+      number: pr,
+      issueNo: resolvedNo,
+      url: String(task.url ?? ""),
+      alreadyMerged,
+      cleanup: async () => ({ notes: [] }),
     })
   }
-  // 关单是两条流程共用的收尾阶段：合并完工单已关闭（finishMergedPr 里做的），在这里落痕。
-  if (ctx.engine && issueNo) {
-    await ctx.engine.emit("issue.closed", {
-      issueKey: done.issueKey || issueKeyFor,
-      key: done.issueKey || issueKeyFor,
-      pr,
-      issue: issueNo,
-      target: task.target ?? "",
-      workflow,
-    })
-  }
+
   // 通知会话收尾：它报的 PR 现在都合完了，自动归档，别把「PR待合并」会话留在侧边栏。
   // 合完当场扫一遍（不等下一轮 PR 扫描）；归档失败只记 notes，不推翻合并事实。
   let archivedNotes = []
@@ -1081,17 +1083,18 @@ export async function runMergeTask(ctx, task = {}) {
     log(`归档通知会话失败：${e.message}`)
   }
   const notes = [...(done.notes ?? []), ...(cleanup?.notes ?? []), ...archivedNotes]
+  const book = new Book(cfg.stateFile)
   book.markMergeTask(key, { status: "merged", mergedAt: nowIso(), notes })
   ctx.consoleStore?.event({
     kind: "pr_merge", key, repo, number: pr,
-    to: "merged", detail: `${style}${issueNo ? ` · 关单 #${issueNo}` : ""}${alreadyMerged ? " · 原本已合并" : ""}`,
+    to: "merged", detail: `${style}${resolvedNo ? ` · 关单 #${resolvedNo}` : ""}${alreadyMerged ? " · 原本已合并" : ""}`,
   })
   try { ctx.consoleStore?.sync(new Book(cfg.stateFile)) } catch {}
   finishOperation(ctx, op, "success", `${alreadyMerged ? "原本已合并" : "合并成功"}${notes.length ? ` · ${notes.join("；")}` : ""}`)
-  log(`合并通道：已合并 ${repo}#${pr}（${key}）${issueNo ? `，关单 #${issueNo}` : ""}`)
+  log(`合并通道：已合并 ${repo}#${pr}（${key}）${resolvedNo ? `，关单 #${resolvedNo}` : ""}`)
   await notifyMergeOutcome(
     ctx,
-    { ...task, key, repo, pr, issue: issueNo },
+    { ...task, key, repo, pr, issue: resolvedNo },
     { ok: true, alreadyMerged, cleanup: { notes }, prUrl: task.url ?? "" },
   )
   return { ok: true, alreadyMerged, notes }
@@ -1136,9 +1139,13 @@ async function notifyMergeOutcome(ctx, task, out = {}) {
 
 // ---- 请求分发 ----
 
-// finishMergedPr：PR 合并成功后唯一的一处收尾。
-// 老实现只写 mergeAsk=merged 就返回，别的都没做：PR 在账本里永远停在「已通知待合并」、
-// 工单的执行会话监听不摘、worktree 与分支不清理——控制台上就是「合完了还挂着」。
+// finishMergedPr：PR 合并成功后的收尾入口（没有 engine 的调用方也走这里）。
+// 老实现把「落账 + 关单 + 摘监听 + 清工作区」挤在一处，任何一步漏掉都会留下别人的产物：
+// PR 停在「已通知待合并」、执行会话监听还在听、worktree 与分支不清。现在按节点拆开，
+// 每个节点只清自己产生的东西，这里只负责按顺序把它们叫起来：
+//   merge（合并事实落账）→ close（关单 + 摘接单标签 + 工单 done）
+//   → pr-open（PR 记 merged）→ dispatch（摘会话监听）→ workspace（关 herdr / 删 worktree / 删分支）
+//   → cleanup（兜底清扫）
 // opencli 对已经合并的 PR 会回 EMPTY_RESULT + 提示「无需重复合并」，字面当失败的话台账
 // 还会卡成 merge-failed、再没人收尾，所以这里也接受 alreadyMerged=true。
 export async function finishMergedPr({
@@ -1154,49 +1161,32 @@ export async function finishMergedPr({
   cleanup = cleanupPrArtifacts,
 } = {}) {
   const key = `${repo}#${number}`
+  const book = new Book(stateFile)
   const issueKey = issueNo ? `${repo}#${issueNo}` : ""
+  const ctx = {
+    book,
+    cfg,
+    repo,
+    pr: number,
+    prUrl: url,
+    issueKey,
+    issueNo: Number(issueNo ?? 0),
+    key,
+    tracker: {
+      closeIssue: (r, n) => gitea.closeIssue(r, n),
+      editLabels: typeof gitea?.editLabels === "function" ? (r, n, o) => gitea.editLabels(r, n, o) : undefined,
+    },
+    session: null,
+    workspace: { cleanup },
+    log,
+  }
   const notes = []
-  const b = new Book(stateFile)
-
-  b.markMergeAsked(key, { pr: number, url, status: "merged" })
-  // 已合并就从「待合并」账本里摘出来：skipped=merged 记成终态，控制台不再挂成
-  // 「已通知待合并」；记录留着是给 prWatch 去重，删掉反而会被当成新 PR 再通知一遍。
-  b.markPrSeen(key, { repo, number, url, skipped: "merged", merged: true })
-
-  if (issueNo) {
-    try {
-      await gitea.closeIssue(repo, issueNo)
-    } catch (e) {
-      const msg = String(e?.message ?? e ?? "")
-      // 已经是关闭状态同样算收尾完成，不算失败。
-      if (/已经关闭|无需重复关闭/.test(msg)) notes.push(`工单 #${issueNo} 早已关闭`)
-      else notes.push(`关单 #${issueNo} 失败：${msg.slice(0, 160)}`)
-    }
-    b.setIssue(issueKey, { state: "done", pr: number, mergeError: "" })
-    // 合并完就摘掉这张单的执行会话监听：不摘的话每轮还会去读那条会话的回复，
-    // 会按指纹继续出通知（#228 就是合完还挂着、还发过一条 failed 通知）。
-    let removed = 0
-    while (b.delWatchIssue(issueKey)) removed++
-    if (removed) notes.push(`摘掉 ${removed} 条执行会话监听`)
+  for (const stage of ["merge", "close", "pr-open", "dispatch"]) {
+    notes.push(...(await runNodeCleanup(stage, ctx)).notes)
   }
-
-  // 本地收尾：关 herdr 工作区 → 删 worktree → 安全删分支。尽力而为，失败只记 notes。
-  const it = issueKey ? b.issue(issueKey) : null
-  if (it?.worktree || it?.branch) {
-    const repoDir = (cfg.repos ?? []).find((r) => r.repo === repo)?.dir ?? ""
-    try {
-      const out = await cleanup({
-        repoDir,
-        worktree: it.worktree ?? "",
-        branch: it.branch ?? "",
-        log,
-      })
-      notes.push(...(out?.notes ?? []))
-    } catch (e) {
-      notes.push(`本地清理失败：${String(e?.message ?? e).slice(0, 160)}`)
-    }
-  }
-
+  // workspace 节点处置账本里的 worktree/分支；没有关联工单时它只回一句跳过说明。
+  if (issueKey) notes.push(...(await runNodeCleanup("workspace", ctx)).notes)
+  notes.push(...(await runNodeCleanup("cleanup", ctx)).notes)
   return { key, issueKey, notes, alreadyMerged }
 }
 

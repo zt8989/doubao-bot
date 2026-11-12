@@ -392,8 +392,13 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
   按名字配会静默捞 0 条；`label-list` 能查名→id（`ready-for-agent` 当前是 5）。
 - 配了 `labelIds` 后不再拿名字做二次过滤（列表里本来就没有 labels）。
 - **合并通道已取消**：会话 `done` 只把 PR 记进账本并发通知，合不合由编排会话核对工单后
-  `foreman pr merge <N> --repo R` **当场执行**（`pr-merge` + `close` + 清工作区 + 归档执行会话）。
-  每张 PR 只合一次（账本 `mergeAsk` 记 `merged`/`failed`），冲突只记录并通知、不 force merge。
+  `foreman pr merge <N> --repo R` **当场执行**。每张 PR 只合一次（账本 `mergeAsk` 记 `merged`/`failed`），
+  冲突只记录并通知、不 force merge。
+- **收尾按节点自清**（`src/workflow/cleaners.mjs`）：每个 workflow 节点只清自己产生的东西，漏一步不连带别的节点——
+  `merge` 落合并事实（`mergeAsk` / 队列），`close` 关单 + 摘 `ready-for-agent` + 工单 `done`，
+  `pr-open` 把 PR 记成 merged（记录留着给 prWatch 去重），`dispatch` 摘执行会话监听并收掉 `sessions` 记录，
+  `workspace` 关 herdr 工作区 / 删 worktree / 删本地分支，`cleanup` 兜底（空目录、git 元数据、队列残留），
+  `archive` 归档执行会话。合并没带 `--issue` 时按 PR 反查工单（流程实例 → 账本 `pr` 字段），close 节点不会空转。
 - **`deliver` 管「通知往哪去」**：`mode: "new"`（默认）每次新建会话投递，`promptFile` 是**派单提示词**的运行时副本路径，
   `mergePromptFile` 是**合并提示词**的路径（留空回落 `promptFile`），
   （都在 `~/.foreman/prompts/` 下；路径只从配置来，代码里没有内置文案），`projectDir` 是写进首句的监控项目，

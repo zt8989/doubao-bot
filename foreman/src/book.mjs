@@ -161,6 +161,16 @@ export class Book {
     return Object.keys(this.sessions)
   }
 
+  // 收口时把执行会话的记录也收掉：只摘 watch 不删 sessions 的话，服务重启会按
+  // sessions 重新登记，每轮还要去读这条已完结会话的状态（单实例下会切用户窗口）。
+  delSession(name) {
+    const k = String(name ?? "")
+    if (!k || !this.sessions[k]) return false
+    delete this.sessions[k]
+    this.save()
+    return true
+  }
+
   // 按 target upsert 一条显式监听。
   setWatch(entry) {
     const list = this.watch

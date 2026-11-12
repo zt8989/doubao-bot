@@ -8,6 +8,7 @@ import { GiteaTrackerAdapter } from "./adapters/gitea.mjs"
 import { HerdrWorkspaceAdapter } from "./adapters/herdr.mjs"
 import { startOperation, finishOperation } from "../operations.mjs"
 import { isPaused, setNodePaused, bumpNode, nodeCounts } from "./nodes.mjs"
+import { runNodeCleanup, resolveIssueKey } from "./cleaners.mjs"
 
 export class WorkflowEngine {
   constructor({ cfg, session = null, tracker = null, workspace = null, hooks = null, log = () => {} } = {}) {
@@ -93,54 +94,97 @@ export class WorkflowEngine {
   // 合并后的通用收尾：清工作区 → workspace.cleaned → pr.merged（豆包 adapter 据此归档执行会话）。
   // 任何适配器组合都走这条：清理失败只记 notes，不影响 merged 的事实。
   // workflow：这条 PR 是哪条流程来的（own 自己的单 / review 别人的 PR）；共用阶段靠它落痕。
-  async afterMerge({ watcher, merge, book, workflow = "" }) {
-    const issueKey = watcher?.issueKey || (merge.issueNumber ? `${merge.repo}#${merge.issueNumber}` : "")
-    const issueRec = issueKey ? (book.issue(issueKey) ?? {}) : {}
-    const repoCfg = (this.cfg.repos ?? []).find((r) => r.repo === merge.repo)
-    let cleanup
-    // 清理节点被暂停：这一步先跳过（只写 notes），流程照走，后面的关单/归档不受影响。
-    if (this.paused("cleanup")) {
-      cleanup = { notes: ["清理节点已暂停，跳过本地清理"] }
-      this.log(`合并收尾 ${issueKey || merge.key}：清理节点已暂停，跳过本地清理`)
-      await this.emit(EVENTS.merge, {
-        issueKey,
-        key: merge.key,
-        workflow,
-        repo: merge.repo,
-        pr: merge.pr,
-        prUrl: merge.prUrl,
-        target: watcher?.target,
-        cleanup,
-      })
-      return cleanup
+  async afterMerge({ watcher, merge, book, workflow = "" } = {}) {
+    const repo = String(merge?.repo ?? "")
+    const pr = Number(merge?.pr ?? 0)
+    const key = String(merge?.key ?? `${repo}#${pr}`)
+    const wf = workflow || "own"
+    // 关联工单：调用方给的 → 合并任务里的工单号 → 按 PR 反查（run 或账本）。
+    // 没有这条，没传 --issue 的合并就没有 close 节点可用，工单会一直停在 pr-open。
+    const issueKey = String(watcher?.issueKey ?? "")
+      || (Number(merge?.issueNumber) ? `${repo}#${merge.issueNumber}` : "")
+      || this.issueKeyForPr(book, repo, pr)
+    const issueNo = Number(String(issueKey).split("#")[1] ?? 0) || 0
+    const ctx = {
+      book,
+      cfg: this.cfg,
+      repo,
+      pr,
+      prUrl: String(merge?.prUrl ?? ""),
+      issueKey,
+      issueNo,
+      key,
+      target: String(watcher?.target ?? ""),
+      tracker: this.tracker,
+      session: this.session,
+      workspace: this.workspace,
+      log: this.log,
     }
-    const op = startOperation(this, "cleanup", `清理工作区 ${issueKey || merge.key}`, {
-      key: issueKey || merge.key,
-      detail: issueRec.worktree || "检查 herdr 工作区与 git worktree",
-    })
-    try {
-      if (issueRec.worktree && repoCfg?.dir) {
-        cleanup = await this.workspace.cleanup({ repoDir: repoCfg.dir, worktree: issueRec.worktree, branch: issueRec.branch ?? "" })
-      } else {
-        cleanup = { notes: ["没有 worktree 或仓库目录记录，跳过本地清理"] }
+    const notes = []
+    const ran = []
+    const run = async (stage, op = null) => {
+      const out = await runNodeCleanup(stage, ctx, { paused: this.paused(stage) })
+      if (out.notes.length) notes.push(...out.notes)
+      ran.push(stage)
+      if (op) {
+        finishOperation(this, op, out.notes.some((n) => /失败/.test(n)) ? "failed" : "success", out.notes.join("；"))
       }
-    } catch (e) {
-      cleanup = { notes: [`本地清理失败：${e.message}`] }
+      return out
     }
-    finishOperation(this, op, cleanup.notes?.some((n) => /失败/.test(n)) ? "failed" : "success", (cleanup.notes ?? []).join("；"))
-    for (const n of cleanup.notes ?? []) this.log(`合并收尾 ${issueKey || merge.key}：${n}`)
 
-    await this.emit(EVENTS.cleanup, { issueKey, key: merge.key, workflow, cleanup })
+    // 先取「跑过哪些节点」再去发 pr.merged：这一发会把 run 的 stageAt 补成只有 merge，
+    // 之后的节点自清就认不出前置节点了。
+    const reached = this.lifecycle.stagesReached(wf, issueKey)
+
+    // merge 节点：合并事实落账（mergeAsk / 合并队列），然后落 pr.merged。
+    await run("merge")
     await this.emit(EVENTS.merge, {
       issueKey,
-      key: merge.key,
-      workflow,
-      repo: merge.repo,
-      pr: merge.pr,
-      prUrl: merge.prUrl,
+      key,
+      workflow: wf,
+      repo,
+      pr,
+      prUrl: ctx.prUrl,
       target: watcher?.target,
-      cleanup,
     })
-    return cleanup
+
+    // close 节点：关单 + 摘标签 + 工单 done（没有关联工单时自己会写一句跳过原因）。
+    // 放在回收工作区之前：先确认这张单真的收了，再去拆它留下的工作区。
+    await run("close")
+    await this.emit(EVENTS.close, { issueKey, key, pr, issue: issueNo, target: watcher?.target, workflow: wf })
+
+    // 合并前跑过的节点按逆序自清：pr-open（PR 记成 merged）→ dispatch（摘监听）→ workspace（删工作区）。
+    // 只清真的跑过的节点；流程实例丢了（服务重启）时按 own 的完整前置节点兜底。
+    const pre = wf === "review" ? [] : ["workspace", "dispatch", "pr-open"]
+    for (const stage of [...pre].reverse()) {
+      if (reached.length && !reached.includes(stage)) continue
+      const op = stage === "workspace"
+        ? startOperation(this, "cleanup", `清理工作区 ${issueKey || key}`, {
+          key: issueKey || key,
+          detail: (issueKey && book?.issue ? book.issue(issueKey) ?? {} : {}).worktree || "关 herdr 工作区、删 worktree 与本地分支",
+        })
+        : null
+      await run(stage, op)
+    }
+
+    // cleanup 节点：兜底清扫（空壳目录、git 元数据、队列残留）。
+    const op = startOperation(this, "cleanup", `兜底清扫 ${issueKey || key}`, { key: issueKey || key, detail: "空目录 / worktree 元数据 / 合并队列残留" })
+    await run("cleanup", op)
+    await this.emit(EVENTS.cleanup, { issueKey, key, workflow: wf, cleanup: { notes } })
+
+    // archive 节点：执行会话由它自己归档（不再挂在 pr.merged 上顺手做）。
+    const aop = startOperation(this, "archive", "归档执行会话", { key: issueKey || key, detail: String(watcher?.target ?? "") })
+    await run("archive", aop)
+    await this.emit(EVENTS.archive, { issueKey, key, workflow: wf, target: watcher?.target })
+
+    return { notes, nodes: ran, issueKey, issueNo }
+  }
+
+  // 按 PR 反查它属于哪张工单：先查流程实例，再查账本里 pr 对得上的记录。
+  issueKeyForPr(book, repo, pr) {
+    const fromRun = this.lifecycle.runWithPr(repo, pr)
+    if (fromRun) return String(fromRun.key)
+    return resolveIssueKey({ runs: [], book, repo, pr })
   }
 }
+

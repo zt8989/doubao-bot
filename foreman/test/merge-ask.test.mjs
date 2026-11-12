@@ -163,7 +163,8 @@ test("runMergeTask：没写 workflow 时按账本推断——自有工单落 own
     )
     assert.equal(out.ok, true)
     assert.equal(seen.includes("pr.reviewed:review"), false, "自有工单的 PR 不该被记成「他人 PR」流程")
-    assert.ok(seen.includes("issue.closed:own"), `关单事件应落在 own 流程，实际：${seen.join(",")}`)
+    // 关单事件由 close 节点在 engine.afterMerge 里发，service 不再重复发一遍。
+    assert.equal(seen.includes("issue.closed:own"), false, "service 不该再自己发一次关单事件")
     assert.ok(seen.includes("afterMerge:own"))
 
     // 别人的 PR：账本里没有这张单的派活痕迹 → review
@@ -181,6 +182,39 @@ test("runMergeTask：没写 workflow 时按账本推断——自有工单落 own
     assert.equal(out2.ok, true)
     assert.ok(seen2.includes("pr.reviewed:review"), "别人的 PR 合并前先记「核对完」")
     assert.ok(seen2.includes("afterMerge:review"))
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("runMergeTask：没传 --issue 时按 PR 反查工单，close 节点照样接到这张单", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = mkCfg(dir)
+    const book = new Book(cfg.stateFile)
+    // 账本里 PR #122 挂在工单 #121（合并命令没带 --issue 的唯一线索）
+    book.setIssue("demo/demo#121", { state: "pr-open", pr: 122, branch: "fix/issue-121" })
+    const calls = []
+    const engine = {
+      paused: () => false,
+      setPaused: () => {},
+      emit: async () => {},
+      issueKeyForPr: () => "demo/demo#121",
+      afterMerge: async ({ watcher, workflow }) => {
+        calls.push({ issueKey: watcher.issueKey, workflow })
+        return { nodes: ["merge", "pr-open", "dispatch", "close"], notes: ["工单 #121 已关闭"] }
+      },
+    }
+    const gitea = { mergePr: async () => {}, closeIssue: async () => {}, viewPr: async () => null }
+    const out = await runMergeTask(
+      { cfg, log: () => {}, gitea, dws: mkDws([], []), engine },
+      { key: "demo/demo#122", repo: "demo/demo", pr: 122, notify: false }
+    )
+    assert.equal(out.ok, true)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].issueKey, "demo/demo#121", "没带 --issue 也要接回这张单")
+    assert.equal(calls[0].workflow, "own", "账本里有派活痕迹，按自有工单收尾")
+    assert.ok(out.notes.some((n) => n.includes("#121")))
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

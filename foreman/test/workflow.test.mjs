@@ -5,6 +5,11 @@ import { Lifecycle, EVENTS, STAGES, WORKFLOWS, stagesOf, workflowsOf } from "../
 import { assertSessionAdapter } from "../src/workflow/adapters/session.mjs"
 import { DoubaoSessionAdapter } from "../src/workflow/adapters/doubao.mjs"
 import { WorkflowEngine } from "../src/workflow/engine.mjs"
+import { resolveIssueKey } from "../src/workflow/cleaners.mjs"
+import { Book } from "../src/book.mjs"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
 
 test("生命周期：两条流程（own 自有工单 / review 他人 PR），阶段与事件对得上", () => {
   const ids = Object.keys(WORKFLOWS)
@@ -110,27 +115,34 @@ test("豆包 adapter：旧调用面与新契约都转到 driver；单实例护�
   assertSessionAdapter(a)
 })
 
-test("豆包 adapter：pr.merged 时归档执行会话；workflow.archiveAfterMerge=false 可关", async () => {
+test("豆包 adapter：不再在 pr.merged 上顺手归档，归档归 archive 节点", async () => {
   const driver = fakeDriver()
   const a = new DoubaoSessionAdapter({ driver, cfg: {} })
+  // 适配器只保留 archive() 能力；pr.merged 不再触发归档，避免和 archive 节点重复归档。
   await a.on("pr.merged", { target: "conv-1" })
-  assert.deepEqual(driver.calls.archive, ["conv-1"])
-  await a.on("issue.concluded", { target: "conv-2" })
-  assert.deepEqual(driver.calls.archive, ["conv-1"], "别的事件不归档")
-
-  const off = new DoubaoSessionAdapter({ driver, cfg: { workflow: { archiveAfterMerge: false } } })
-  await off.on("pr.merged", { target: "conv-3" })
-  assert.deepEqual(driver.calls.archive, ["conv-1"])
+  assert.deepEqual(driver.calls.archive, [])
 })
 
-test("engine.afterMerge：先清工作区再发 pr.merged，豆包 adapter 随后归档会话", async () => {
+test("engine.afterMerge：每个节点只清自己的产物，事件按 merge→close→cleanup→archive 落", async () => {
   const seq = []
   const driver = fakeDriver()
   const session = new DoubaoSessionAdapter({ driver, cfg: {} })
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-nodes-"))
+  const file = path.join(dir, "state.json")
+  const book = new Book(file)
+  book.setIssue("yyzl/win-ai-harness#268", {
+    state: "pr-open", pr: 270, branch: "fix/issue-268", worktree: "/wt/fix-issue-268",
+  })
+  book.setWatch({ target: "conv-exec", name: "foreman-win-ai-harness-268", issueKey: "yyzl/win-ai-harness#268" })
+  const closed = []
   const engine = new WorkflowEngine({
-    cfg: { repos: [{ repo: "yyzl/win-ai-harness", dir: "/w/harness" }] },
+    cfg: { stateFile: file, repos: [{ repo: "yyzl/win-ai-harness", dir: "/w/harness" }] },
     session,
-    tracker: { on: async () => {} },
+    tracker: {
+      closeIssue: async (repo, n) => closed.push(`${repo}#${n}`),
+      editLabels: async () => ({ changed: true }),
+      on: async () => {},
+    },
     workspace: {
       cleanup: async ({ worktree }) => {
         seq.push(`cleanup:${worktree}`)
@@ -140,33 +152,74 @@ test("engine.afterMerge：先清工作区再发 pr.merged，豆包 adapter 随�
     },
     log: () => {},
   })
-  const book = { issue: () => ({ worktree: "/wt/fix-issue-268", branch: "fix/issue-268" }) }
-  const cleanup = await engine.afterMerge({
-    watcher: { target: "conv-exec", issueKey: "yyzl/win-ai-harness#268" },
-    merge: { key: "yyzl/win-ai-harness#270", repo: "yyzl/win-ai-harness", pr: 270, issueNumber: 268 },
-    book,
-  })
-  assert.deepEqual(cleanup.notes, ["worktree 已删除"])
-  assert.deepEqual(seq, ["cleanup:/wt/fix-issue-268"])
-  assert.deepEqual(driver.calls.archive, ["conv-exec"], "归档发生在清理之后")
-  const events = engine.lifecycle.history.map((h) => h.event)
-  assert.deepEqual(events, ["workspace.cleaned", "pr.merged"])
+  try {
+    const out = await engine.afterMerge({
+      watcher: { target: "conv-exec", issueKey: "yyzl/win-ai-harness#268" },
+      merge: { key: "yyzl/win-ai-harness#270", repo: "yyzl/win-ai-harness", pr: 270, issueNumber: 268 },
+      book,
+    })
+    // workspace 节点清工作区、dispatch 节点摘监听、close 节点关单、archive 节点归档
+    assert.deepEqual(seq, ["cleanup:/wt/fix-issue-268"])
+    assert.deepEqual(closed, ["yyzl/win-ai-harness#268"])
+    assert.ok(out.notes.some((n) => n.includes("worktree 已删除")))
+    assert.ok(out.notes.some((n) => n.includes("摘掉 1 条执行会话监听")))
+    assert.deepEqual(driver.calls.archive, ["conv-exec"])
+    const b = new Book(file)
+    assert.equal(b.issue("yyzl/win-ai-harness#268").state, "done")
+    assert.equal(b.mergeAsk["yyzl/win-ai-harness#270"].status, "merged")
+    assert.equal(b.prSeen["yyzl/win-ai-harness#270"].merged, true)
+    assert.deepEqual(b.watch.map((w) => w.issueKey), [], "这张单的监听摘干净")
+    assert.deepEqual(out.nodes, ["merge", "close", "pr-open", "dispatch", "workspace", "cleanup", "archive"])
+    const events = engine.lifecycle.history.map((h) => h.event)
+    assert.deepEqual(events, ["pr.merged", "issue.closed", "workspace.cleaned", "session.archived"])
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })
 
-test("engine.afterMerge：没有 worktree 记录时跳过清理，但事件与归档照常", async () => {
+test("engine.afterMerge：没有 worktree 记录时 workspace 节点跳过，其它节点照常", async () => {
   const driver = fakeDriver()
+  const closed = []
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-nodes-"))
+  const file = path.join(dir, "state.json")
+  const book = new Book(file)
+  book.setIssue("r#1", { state: "pr-open", pr: 2 })
   const engine = new WorkflowEngine({
-    cfg: { repos: [] },
+    cfg: { stateFile: file, repos: [] },
     session: new DoubaoSessionAdapter({ driver, cfg: {} }),
-    tracker: { on: async () => {} },
+    tracker: { closeIssue: async (repo, n) => closed.push(n), on: async () => {} },
     workspace: { cleanup: async () => { throw new Error("不该被调用") }, on: async () => {} },
     log: () => {},
   })
-  const cleanup = await engine.afterMerge({
-    watcher: { target: "conv-x", issueKey: "r#1" },
-    merge: { key: "r#2", repo: "r", pr: 2, issueNumber: 1 },
-    book: { issue: () => ({}) },
-  })
-  assert.match(cleanup.notes.join(""), /跳过本地清理/)
-  assert.deepEqual(driver.calls.archive, ["conv-x"])
+  try {
+    const out = await engine.afterMerge({
+      watcher: { target: "conv-x", issueKey: "r#1" },
+      merge: { key: "r#2", repo: "r", pr: 2, issueNumber: 1 },
+      book,
+    })
+    assert.match(out.notes.join(""), /跳过本地清理/)
+    assert.deepEqual(closed, [1])
+    assert.deepEqual(driver.calls.archive, ["conv-x"])
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("resolveIssueKey：没带 --issue 的合并按 PR 反查到工单", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-nodes-"))
+  const file = path.join(dir, "state.json")
+  try {
+    const book = new Book(file)
+    book.setIssue("demo/demo#121", { state: "pr-open", pr: 122 })
+    assert.equal(resolveIssueKey({ runs: [], book, repo: "demo/demo", pr: 122 }), "demo/demo#121")
+    // 流程实例优先（run 上记着 PR）
+    assert.equal(
+      resolveIssueKey({ runs: [{ workflow: "own", key: "demo/demo#121", pr: 122 }], book, repo: "demo/demo", pr: 122 }),
+      "demo/demo#121",
+    )
+    // 对不上就是空，不硬编
+    assert.equal(resolveIssueKey({ runs: [], book, repo: "demo/demo", pr: 999 }), "")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })

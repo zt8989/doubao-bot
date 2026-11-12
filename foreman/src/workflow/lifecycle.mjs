@@ -170,6 +170,25 @@ export class Lifecycle {
     return this.active("own")
   }
 
+  // 这条流程实例走到过哪些节点：节点自清只清「真的跑过的节点」留下的东西。
+  stagesReached(workflow, key) {
+    const run = this.runs.get(`${workflow}:${key}`)
+    return Object.keys(run?.stageAt ?? {})
+  }
+
+  // 按 PR 找流程实例：合并命令没带工单号时，靠它把 PR 接回自己的工单
+  // （own 流程的 run key 就是工单键，pr 记录在 run 上）。
+  runWithPr(repo, pr) {
+    const number = Number(pr ?? 0)
+    if (!number) return null
+    for (const r of this.runs.values()) {
+      if (r.workflow !== "own" || Number(r.pr) !== number) continue
+      if (repo && !String(r.key ?? "").startsWith(`${repo}#`)) continue
+      return r
+    }
+    return null
+  }
+
   // 在跑的流程实例（默认只看 own；review 一般不占接单名额）。
   active(workflow = "") {
     return [...this.runs.values()]
