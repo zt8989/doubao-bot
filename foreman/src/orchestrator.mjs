@@ -48,8 +48,8 @@ export function notifyText(issue = {}, out = {}) {
   if (out.branch) lines.push(`分支：${out.branch}`)
   if (out.pr) lines.push(`PR：#${out.pr}${out.prUrl ? ` ${out.prUrl}` : ""}`)
   if (out.merged) lines.push(`合并：已合并 PR #${out.pr}`)
-  else if (out.mergeQueued) lines.push(`合并：已排入合并通道（1 并发），合完单独通知`)
   else if (out.mergeError) lines.push(`合并失败：${String(out.mergeError).slice(0, 200)}`)
+  else if (out.pr) lines.push(`合并：PR 已开好，核对工单/改动后自己跑 foreman pr merge ${out.pr}（不再有合并通道）`)
   if (out.cleanup?.notes?.length) lines.push(`清理：${out.cleanup.notes.join("；")}`)
   if (out.reason) lines.push(`原因：${String(out.reason).slice(0, 200)}`)
   // 合并也交一个 RESULT 块：编排会话读完就能收尾、这条通知会话随后可归档（dws archive）。

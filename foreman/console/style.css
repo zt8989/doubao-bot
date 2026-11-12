@@ -777,3 +777,28 @@ footer {
   .sidebar .side-link, .sidebar .side-collapse { justify-content: center; padding-left: 0; padding-right: 0; }
   main { padding: 14px 10px 8px; }
 }
+
+/* ---------------- workflow 节点 / 任务详情 ---------------- */
+.col-detail { width: 64px; }
+.detail-cell { text-align: right; }
+.detail-row > td { padding: 0; background: var(--panel-2, rgba(255,255,255,.03)); }
+.task-detail { padding: 12px 14px; border-left: 3px solid var(--accent, #38bdf8); }
+.task-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.wf-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; padding: 12px 14px; }
+.wf-card { border: 1px solid var(--line-soft, rgba(255,255,255,.08)); border-radius: 10px; padding: 12px; }
+.wf-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+.wf-name { font-weight: 600; }
+.wf-nodes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.wf-node { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border: 1px solid var(--line-soft, rgba(255,255,255,.08)); border-radius: 8px; }
+.wf-node.is-paused { opacity: .72; border-color: var(--amber, #f59e0b); }
+.wf-node.is-current { border-color: var(--accent, #38bdf8); }
+.wf-node.is-passed { opacity: .82; }
+.wf-node-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.wf-stage { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--text); }
+.wf-node-sub { font-size: 12px; color: var(--dim); }
+.wf-btn { align-self: flex-start; font-size: 12px; padding: 2px 10px; }
+.wf-nodes.compact { gap: 6px; }
+.wf-runs { padding: 0 14px 14px; }
+.wf-runs-head { font-size: 12px; color: var(--dim); margin-bottom: 6px; }
+.wf-run-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.wf-run { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }

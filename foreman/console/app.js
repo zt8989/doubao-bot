@@ -190,11 +190,63 @@ class FmStats extends LitElement {
   }
 }
 
-/* ---------------- 今日任务 ---------------- */
+/* ---------------- 今日任务（可展开看每个节点的详情） ---------------- */
 class FmTasks extends LitElement {
-  static properties = { tasks: { attribute: false }, scope: { type: String } }
+  static properties = {
+    tasks: { attribute: false },
+    nodes: { attribute: false },
+    runs: { attribute: false },
+    workflows: { attribute: false },
+    scope: { type: String },
+  }
   createRenderRoot() {
     return this
+  }
+  toggle(key) {
+    this.openKey = this.openKey === key ? "" : key
+    this.requestUpdate()
+  }
+  // 一张单的节点时间线：run 当前停在哪，前序节点算走过、后序算待跑。
+  detail(t) {
+    const key = `${t.repo}#${t.number}`
+    const run = (this.runs || []).find((r) => r.key === key)
+    const flow = (this.workflows || []).find((w) => w.id === (run?.workflow ?? "own"))
+    const stages = flow?.stages ?? []
+    const nodes = this.nodes || []
+    const at = stages.findIndex((s) => s.stage === (run?.stage ?? ""))
+    return html`
+      <tr class="detail-row">
+        <td colspan="7">
+          <div class="task-detail">
+            <div class="task-detail-head">
+              <span class="hint">${flow ? `${flow.name} · ${flow.description}` : "这条工单还没进 workflow"}</span>
+              <span class=${"badge " + (run?.status === "done" ? "done" : "working")}>${run ? (run.status === "done" ? "流程已完成" : `当前节点 ${run.stage || "—"}`) : "未开始"}</span>
+            </div>
+            ${stages.length
+              ? html`<ol class="wf-nodes compact">
+                  ${stages.map((st, i) => {
+                    const n = nodes.find((x) => x.stage === st.stage) || {}
+                    const state = at < 0 ? "pending" : i < at ? "passed" : i === at ? "current" : "pending"
+                    const label = state === "passed" ? "已走过" : state === "current" ? "当前" : "待跑"
+                    return html`
+                      <li class=${"wf-node is-" + state}>
+                        <div class="wf-node-main">
+                          <span class="wf-stage">${st.stage}</span>
+                          <span class=${"badge " + (state === "current" ? "working" : state === "passed" ? "done" : "planned")}>${label}</span>
+                          <span class="chip"><span class="mono">${n.count ?? 0}</span> 次</span>
+                          ${n.paused ? html`<span class="badge failed">已暂停</span>` : ""}
+                        </div>
+                        <div class="wf-node-sub">${st.description}</div>
+                        <button class="ghost wf-btn" @click=${() => emit(this, "node-toggle", { stage: st.stage, paused: !n.paused })}>
+                          ${n.paused ? "继续" : "暂停"}
+                        </button>
+                      </li>`
+                  })}
+                </ol>`
+              : html`<div class="hint">还没有节点记录：这条单还没被分配到 workflow。</div>`}
+          </div>
+        </td>
+      </tr>`
   }
   render() {
     const rows = this.tasks || []
@@ -204,7 +256,7 @@ class FmTasks extends LitElement {
         <div class="panel-head">
           <h2>${scope} 分配任务</h2>
           <div class="panel-side">
-            <span class="hint">${rows.length ? `${rows.length} 条 · 当天有更新` : "暂无"}</span>
+            <span class="hint">${rows.length ? `${rows.length} 条 · 点「详情」看每个节点` : "暂无"}</span>
           </div>
         </div>
         ${rows.length
@@ -219,11 +271,13 @@ class FmTasks extends LitElement {
                       <th class="col-branch">分支</th>
                       <th class="col-try">尝试</th>
                       <th class="col-time">更新</th>
+                      <th class="col-detail">详情</th>
                     </tr>
                   </thead>
                   <tbody>
-                    ${rows.map(
-                      (t) => html`
+                    ${rows.map((t) => {
+                      const key = `${t.repo}#${t.number}`
+                      return html`
                         <tr>
                           <td class="id-cell">
                             ${t.url
@@ -236,8 +290,12 @@ class FmTasks extends LitElement {
                           <td class="branch-cell" title=${t.branch || ""}>${t.branch || "—"}</td>
                           <td class="try-cell">${t.attempts ? `#${t.attempts}` : "—"}</td>
                           <td class="time-cell">${t.updatedAtClock || "—"}</td>
-                        </tr>`
-                    )}
+                          <td class="detail-cell">
+                            <button class="ghost" @click=${() => this.toggle(key)}>${this.openKey === key ? "收起" : "详情"}</button>
+                          </td>
+                        </tr>
+                        ${this.openKey === key ? this.detail(t) : ""}`
+                    })}
                   </tbody>
                 </table>
               </div>`
@@ -246,6 +304,79 @@ class FmTasks extends LitElement {
                 <div class="empty-title">今天还没有分配到任务</div>
                 <div class="empty-sub">foreman run 派活后会出现在这里</div>
               </div>`}
+      </section>`
+  }
+}
+
+/* ---------------- 两条 workflow 与节点 ---------------- */
+class FmWorkflows extends LitElement {
+  static properties = { workflow: { attribute: false }, busy: { type: String } }
+  createRenderRoot() {
+    return this
+  }
+  render() {
+    const wf = this.workflow || {}
+    const nodes = wf.nodes || []
+    const runs = (wf.runs || []).slice(0, 8)
+    const active = wf.active || {}
+    const flows = wf.workflows || []
+    if (!flows.length) {
+      return html`<section class="panel"><div class="empty">
+        <div class="empty-title">还没拿到 workflow</div>
+        <div class="empty-sub">服务没在跑时看不到节点状态</div>
+      </div></section>`
+    }
+    const nodeOf = (stage) => nodes.find((n) => n.stage === stage) || {}
+    return html`
+      <section class="panel">
+        <div class="panel-head">
+          <h2>workflow 节点</h2>
+          <div class="panel-side">
+            <span class="hint">在跑：自有工单 ${active.own ?? 0}/${active.maxOwn ?? 2} · 他人 PR ${active.review ?? 0}</span>
+            <span class="hint">暂停只停这个节点自己的自动动作，不会停止整条 workflow</span>
+          </div>
+        </div>
+        <div class="wf-grid">
+          ${flows.map((f) => html`
+            <div class="wf-card">
+              <div class="wf-head">
+                <span class="wf-name">${f.name}</span>
+                <span class="hint">${f.description}</span>
+              </div>
+              <ol class="wf-nodes">
+                ${(f.stages || []).map((st) => {
+                  const n = nodeOf(st.stage)
+                  return html`
+                    <li class=${"wf-node" + (n.paused ? " is-paused" : "")}>
+                      <div class="wf-node-main">
+                        <span class="wf-stage">${st.stage}</span>
+                        <span class=${"badge " + (n.paused ? "failed" : "done")}>${n.paused ? "已暂停" : "可运行"}</span>
+                        <span class="chip"><span class="mono">${n.count ?? 0}</span> 次</span>
+                        <span class="pr-note">${n.lastAt ? `最近 ${String(n.lastAt).slice(11, 19)}` : "还没跑过"}</span>
+                      </div>
+                      <div class="wf-node-sub">${st.description}</div>
+                      <button class="ghost wf-btn" ?disabled=${this.busy === st.stage}
+                        @click=${() => emit(this, "node-toggle", { stage: st.stage, paused: !n.paused })}>
+                        ${n.paused ? "继续" : "暂停"}
+                      </button>
+                    </li>`
+                })}
+              </ol>
+            </div>`)}
+        </div>
+        ${runs.length ? html`
+          <div class="wf-runs">
+            <div class="wf-runs-head">在跑 / 最近的流程实例</div>
+            <ul class="wf-run-list">
+              ${runs.map((r) => html`
+                <li class="wf-run">
+                  <span class=${"badge " + (r.status === "done" ? "done" : "working")}>${r.status === "done" ? "已完成" : "进行中"}</span>
+                  <span class="mono">${r.key}</span>
+                  <span class="hint">${r.workflow === "own" ? "自有工单" : "他人 PR"} · 当前节点 ${r.stage || "—"}</span>
+                  <span class="pr-note">${r.startedAt ? `开始 ${String(r.startedAt).slice(11, 19)}` : ""}</span>
+                </li>`)}
+            </ul>
+          </div>` : ""}
       </section>`
   }
 }
@@ -525,6 +656,8 @@ class FmConsole extends LitElement {
     sidebarCollapsed: { type: Boolean },
     schedules: { attribute: false },
     operations: { attribute: false },
+    workflow: { attribute: false },
+    nodeBusy: { type: String },
     opFilter: { type: String },
     schedBusy: { type: String },
     schedError: { type: String },
@@ -546,6 +679,8 @@ class FmConsole extends LitElement {
     }
     this.schedules = []
     this.operations = []
+    this.workflow = null
+    this.nodeBusy = ""
     this.opFilter = "all"
     this.schedBusy = ""
     this.schedError = ""
@@ -612,20 +747,25 @@ class FmConsole extends LitElement {
     this.addEventListener("schedule-toggle", this._onSchedToggle)
     this.addEventListener("schedule-save", this._onSchedSave)
     this.addEventListener("pickup-now", this._onPickupNow)
+    this._onNodeToggle = (e) => this.toggleNode(e.detail)
+    this.addEventListener("node-toggle", this._onNodeToggle)
     this.addEventListener("operation-filter", this._onOpFilter)
 
     this._onFocus = () => {
       this.load()
+      this.loadWorkflow()
       if (this.view === "schedules") this.loadSchedules()
       if (this.view === "operations") this.loadOperations()
     }
     window.addEventListener("focus", this._onFocus)
 
     this.load()
+    this.loadWorkflow()
     this.loadSchedules()
     this.loadOperations()
     this._loadTimer = setInterval(() => {
       this.load()
+      this.loadWorkflow()
       if (this.view === "schedules") this.loadSchedules()
       if (this.view === "operations") this.loadOperations()
     }, 15000)
@@ -644,6 +784,7 @@ class FmConsole extends LitElement {
     this.removeEventListener("schedule-toggle", this._onSchedToggle)
     this.removeEventListener("schedule-save", this._onSchedSave)
     this.removeEventListener("pickup-now", this._onPickupNow)
+    this.removeEventListener("node-toggle", this._onNodeToggle)
     this.removeEventListener("operation-filter", this._onOpFilter)
     super.disconnectedCallback()
   }
@@ -697,6 +838,38 @@ class FmConsole extends LitElement {
       setTimeout(() => {
         this.busy = ""
       }, 1600)
+    }
+  }
+
+  async loadWorkflow() {
+    try {
+      const res = await fetch("/api/workflow", { cache: "no-store" })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const body = await res.json()
+      this.workflow = body.ok === false ? null : body
+    } catch (e) {
+      this.error = `服务 · 拿不到 workflow（${e.message}）`
+    }
+  }
+
+  // 暂停/继续一个节点：只动这个节点自己的自动动作，整条 workflow 照走。
+  async toggleNode({ stage, paused } = {}) {
+    if (!stage || this.nodeBusy) return
+    this.nodeBusy = stage
+    try {
+      const res = await fetch("/api/workflow", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: paused ? "pause" : "resume", stage }),
+      })
+      const body = await res.json()
+      if (!res.ok || body.ok === false) throw new Error(body.message || `HTTP ${res.status}`)
+      this.workflow = { ...(this.workflow || {}), nodes: body.nodes || [] }
+      await this.loadWorkflow()
+    } catch (e) {
+      this.error = `节点开关失败：${e.message}`
+    } finally {
+      this.nodeBusy = ""
     }
   }
 
@@ -787,7 +960,14 @@ class FmConsole extends LitElement {
           : this.data
           ? html`
               <fm-stats .stats=${this.data.stats} .scope=${this.data.isToday === false ? this.data.day : "今日"}></fm-stats>
-              <fm-tasks .tasks=${this.data.tasks} .scope=${this.data.isToday === false ? this.data.day : "今日"}></fm-tasks>
+              <fm-tasks
+                .tasks=${this.data.tasks}
+                .nodes=${this.workflow?.nodes || []}
+                .runs=${this.workflow?.runs || []}
+                .workflows=${this.workflow?.workflows || []}
+                .scope=${this.data.isToday === false ? this.data.day : "今日"}
+              ></fm-tasks>
+              <fm-workflows .workflow=${this.workflow} .busy=${this.nodeBusy}></fm-workflows>
               <fm-prs .data=${this.data} .filter=${this.filter}></fm-prs>`
           : html`
               <section class="panel">
@@ -807,6 +987,7 @@ customElements.define("fm-sidebar", FmSidebar)
 customElements.define("fm-head", FmHead)
 customElements.define("fm-stats", FmStats)
 customElements.define("fm-tasks", FmTasks)
+customElements.define("fm-workflows", FmWorkflows)
 customElements.define("fm-prs", FmPrs)
 customElements.define("fm-schedules", FmSchedules)
 customElements.define("fm-operations", FmOperations)

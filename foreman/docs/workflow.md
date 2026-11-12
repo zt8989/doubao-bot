@@ -1,35 +1,77 @@
-# 通用 workflow：生命周期 + 适配器
+# 通用 workflow：两条生命周期 + 节点 + 适配器
 
-foreman 的流程不再写死「豆包 + Gitea + herdr」。代码分三层：
+foreman 的流程不再写死「豆包 + Gitea + herdr」，也不再是一条大链路。现在分**两条生命周期**：
+
+| 流程 | id | 谁的单 | 阶段 |
+|---|---|---|---|
+| 自有工单 | `own` | 作者是自己（或无人认领） | 接单 → 建工作区 → 派活 → 开发 → 出 PR → 合并 → 关单 → 清理 → 归档 → 通知 |
+| 他人 PR | `review` | PR 是别人开的 | 扫到 → 核对 → 合并 → 关单 → 清理 → 归档 → 通知 |
+
+两条流程**后半段共用**（merge / close / cleanup / archive / notify），前半段完全不同：`own` 从一张工单开始，
+`review` 从一条 PR 开始，不接单、不建 worktree。共用阶段靠 `payload.workflow` 标明属于哪条流程。
+
+代码分四层：
 
 ```
-service.mjs                 常驻服务、定时器、RPC；只在关键节点发事件
-  └─ workflow/engine.mjs    流程级动作（目前：afterMerge 收尾流水线）
-      └─ workflow/lifecycle.mjs   阶段表 + 事件总线 + 钩子 + 历史
-          └─ workflow/adapters/   每个外部工具一个适配器
-              ├─ doubao.mjs       会话（豆包 / dws）
-              ├─ gitea.mjs        工单与 PR（Gitea / opencli）
-              ├─ herdr.mjs        工作区（herdr + git worktree）
-              └─ session.mjs      SessionAdapter 契约（ assertSessionAdapter ）
+service.mjs                  常驻服务、定时器、RPC；只在关键节点发事件
+  └─ workflow/engine.mjs     流程级动作（afterMerge 收尾流水线、节点表、在跑实例）
+      ├─ workflow/lifecycle.mjs   两条流程的阶段表 + 事件总线 + 流程实例 + 钩子 + 历史
+      ├─ workflow/nodes.mjs       节点暂停/继续 + 累计执行次数（落 state.json）
+      └─ workflow/adapters/       每个外部工具一个适配器
+          ├─ doubao.mjs           会话（豆包 / dws）
+          ├─ gitea.mjs            工单与 PR（Gitea / opencli）
+          ├─ herdr.mjs            工作区（herdr + git worktree）
+          └─ session.mjs          SessionAdapter 契约（ assertSessionAdapter ）
 ```
 
-## 生命周期
+## 阶段与事件
 
-| 阶段 | 事件 | 含义 |
-|---|---|---|
-| pickup | `issue.picked` | 捞到一张可接的工单 |
-| workspace | `workspace.ready` | worktree 就绪 |
-| dispatch | `session.dispatched` | 执行会话派出 |
-| watch | `session.finished` | 执行会话跑完 |
-| conclude | `issue.concluded` | 工单结论落账 |
-| merge | `pr.merged` | PR 已合并 |
-| cleanup | `workspace.cleaned` | herdr 工作区与 worktree 已清理 |
-| archive | `session.archived` | 会话已归档 |
-| notify | `notice.delivered` | 结论已投递给编排会话 |
+| 阶段 | 事件 | 自动节点 | 含义 |
+|---|---|---|---|
+| pickup | `issue.picked` | 是 | 捞到一张可接的工单（作者是自己，或无人认领） |
+| workspace | `workspace.ready` | 是 | worktree / 工作区就绪 |
+| dispatch | `session.dispatched` | 是 | 执行会话已派出（首句送达） |
+| develop | `session.finished` | 否 | 开发会话跑完，拿到结论 |
+| conclude | `issue.concluded` | 是 | 工单结论落账（done/failed/…） |
+| pr-open | `pr.opened` | 否 | 会话自测通过并 push，PR 已开 |
+| scan | `pr.scanned` | 是 | 扫到一条别人的 open PR |
+| review | `pr.reviewed` | 否 | 核对过关联工单与改动，定下合不合 |
+| merge | `pr.merged` | 是 | PR 已合并 |
+| close | `issue.closed` | 是 | 关联工单已关闭（关单） |
+| cleanup | `workspace.cleaned` | 是 | herdr 工作区与 worktree 已清理 |
+| archive | `session.archived` | 是 | 会话已归档收起 |
+| notify | `notice.delivered` | 是 | 结论已投递给编排会话 |
 
 `Lifecycle.emit(event, payload)` 的顺序：**先跑 `hooks[event]`，再按注册顺序跑每个适配器的 `on(event, payload)`**。
 适配器善后失败只写日志，不打断主流程（合并成功不会因为归档失败被推翻）。
 最近 200 条事件留在 `lifecycle.history`，`foreman status` 的 `workflow.recent` 能看到最后 12 条。
+
+## 流程实例（在跑几条）
+
+`Lifecycle.runs` 记每条流程的实例：`workflow + 工单号/PR 号` 唯一，跟着事件推进阶段，
+走到 `close` 就算收口（退出「在跑」计数，后面的清理/归档不再占名额）。
+
+- `engine.active("own")` → 在跑的自有工单流程；**自动接单的容量就按它算：同时最多 2 条**（`pickup.maxRunning`）。
+- 服务重启后 `engine.restore(book)` 用账本里 `planned / working / pr-open` 的工单把实例补回来，
+  否则容量会被算成 0，又去重复派同一张单。
+
+## 节点：暂停 / 继续 / 统计
+
+节点就是上面表里的一个阶段。首页「分配任务」里每条工单展开能看到自己那条流程的节点，
+workflow 面板能看到两条流程的全部节点。
+
+- **暂停是节点级的**：只停这个节点自己的自动动作，**不停止整条 workflow**——在跑的单照常推进，
+  后面的节点也照跑。`pickup` 暂停就不自动接单；`scan` 暂停就不扫别人的 PR；`notify` 暂停就不发结论通知；
+  `cleanup` 暂停就跳过本地清理（只写 notes）。
+- **统计是累计的**：自动节点每执行一次 +1，只增不减（暂停、重启、换天都不归零）。
+- 状态落在 `state.json` 的 `workflow` 键：`{ paused: ["pickup"], counts: { pickup: { count, lastAt, firstAt, detail } } }`。
+- 接口：`foreman workflow view|pause|resume <节点>`（RPC），控制台走 `GET/POST /api/workflow`。
+
+## 合并通道已取消
+
+合并不再有独立通道、独立定时任务、独立并发槽。PR 合不合由编排会话核对后
+`foreman pr merge <N> --repo R` **当场执行**（进程内一条串行链兜住并发，账本照样写）。
+会话跑完只把 `PR 已开好` 记进账本并发通知，通知里给合并入口。
 
 ## 适配器契约
 
@@ -61,10 +103,12 @@ tracker / workspace 同理。
 
 ```json
 {
+  "pickup": { "maxRunning": 2 },
   "workflow": {
     "archiveAfterMerge": true
   }
 }
 ```
 
+`maxRunning` 现在按「在跑的自有工单流程」算，不再数零散的 watcher。
 `archiveAfterMerge` 默认 `true`：PR 合并并清理后，执行会话自动 `dws archive`（留 markdown 存档，不是删除）。

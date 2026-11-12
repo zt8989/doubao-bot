@@ -1,18 +1,49 @@
 // 通用 workflow：生命周期事件、适配器契约、合并收尾流水线。
 import test from "node:test"
 import assert from "node:assert/strict"
-import { Lifecycle, EVENTS, STAGES } from "../src/workflow/lifecycle.mjs"
+import { Lifecycle, EVENTS, STAGES, WORKFLOWS, stagesOf, workflowsOf } from "../src/workflow/lifecycle.mjs"
 import { assertSessionAdapter } from "../src/workflow/adapters/session.mjs"
 import { DoubaoSessionAdapter } from "../src/workflow/adapters/doubao.mjs"
 import { WorkflowEngine } from "../src/workflow/engine.mjs"
 
-test("生命周期：阶段表覆盖完整链路，事件能映射回阶段", () => {
-  const names = STAGES.map((s) => s.stage)
-  for (const s of ["pickup", "workspace", "dispatch", "watch", "conclude", "merge", "cleanup", "archive", "notify"]) {
-    assert.ok(names.includes(s), `缺阶段 ${s}`)
+test("生命周期：两条流程（own 自有工单 / review 他人 PR），阶段与事件对得上", () => {
+  const ids = Object.keys(WORKFLOWS)
+  assert.deepEqual(ids, ["own", "review"])
+  const own = stagesOf("own").map((s) => s.stage)
+  for (const s of ["pickup", "workspace", "dispatch", "develop", "conclude", "pr-open", "merge", "close", "cleanup", "archive", "notify"]) {
+    assert.ok(own.includes(s), `自有工单缺阶段 ${s}`)
   }
+  const review = stagesOf("review").map((s) => s.stage)
+  for (const s of ["scan", "review", "merge", "close", "cleanup", "archive", "notify"]) {
+    assert.ok(review.includes(s), `他人 PR 缺阶段 ${s}`)
+  }
+  // review 不接单：他人的 PR 不该走 pickup / workspace / dispatch。
+  assert.equal(review.includes("pickup"), false)
   assert.equal(EVENTS.merge, "pr.merged")
   assert.equal(EVENTS.archive, "session.archived")
+  assert.equal(EVENTS["pr-open"], "pr.opened")
+  // 共用阶段标明属于两条流程，专属阶段只属于一条。
+  assert.deepEqual(workflowsOf("pr.merged"), ["own", "review"])
+  assert.deepEqual(workflowsOf("issue.picked"), ["own"])
+  assert.deepEqual(workflowsOf("pr.scanned"), ["review"])
+})
+
+test("Lifecycle：流程实例跟着事件推进阶段，关单即收口；暂停/计数只增不减", () => {
+  const lc = new Lifecycle({ log: () => {} })
+  lc.touchRun("own", "r#1", { stage: "pickup" })
+  assert.equal(lc.active("own").length, 1)
+  lc.touchRun("own", "r#1", { stage: "dispatch" })
+  assert.equal(lc.active("own").length, 1, "同一张单只占一个名额")
+  lc.touchRun("own", "r#2", { stage: "pickup" })
+  assert.equal(lc.active("own").length, 2)
+  // 关单 = 收口，退出「在跑」计数
+  lc.touchRun("own", "r#1", { stage: "close" })
+  assert.equal(lc.active("own").length, 1)
+  assert.equal(lc.active("own")[0].key, "r#2")
+  // 恢复：账本里 working 的单补成流程实例
+  const restored = lc.restore({ "r#3": { state: "working" }, "r#4": { state: "done" } })
+  assert.equal(restored.length, 2)
+  assert.equal(restored.some((r) => r.key === "r#4"), false, "已完成的不占用名额")
 })
 
 test("Lifecycle：hooks 先跑、适配器按注册顺序跑，历史留痕；适配器报错不打断主流程", async () => {

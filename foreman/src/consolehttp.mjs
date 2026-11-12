@@ -162,6 +162,24 @@ export function startConsoleHttp({ store, ctx, dir, host = "127.0.0.1", port = 7
         })
       }
 
+      if (pathname === "/api/workflow") {
+        // 首页「分配任务」用：两条 workflow 的定义、节点（含暂停状态与累计执行次数）、在跑实例。
+        if (!onRpc) return sendJson(res, 501, { ok: false, error: "rpc_not_enabled" })
+        if (req.method === "GET") {
+          const r = await onRpc({ id: "workflow", cmd: "workflow", action: "view" })
+          return sendJson(res, 200, r)
+        }
+        if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
+        let body
+        try {
+          body = await readBody(req)
+        } catch (e) {
+          return sendJson(res, 400, { ok: false, error: e.code || "bad_request", message: e.message })
+        }
+        const r = await onRpc({ id: "workflow", cmd: "workflow", action: body.action, stage: body.stage })
+        return sendJson(res, r?.ok === false ? 400 : 200, r)
+      }
+
       if (pathname === "/api/schedules") {
         if (req.method === "GET") return sendJson(res, 200, { ok: true, schedules: ctx.schedules?.() ?? [] })
         if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })

@@ -8,7 +8,6 @@ import { nowIso, sleep, inWorkHours } from "./util.mjs"
 import { Book } from "./book.mjs"
 import { parseResult, deliverPrompt, noticeSessionName } from "./prompts.mjs"
 import { notifyTarget, shouldNotify, notifyText, runRound, acquireLock, releaseLock } from "./orchestrator.mjs"
-import { Lane } from "./lanes.mjs"
 import { WorkflowEngine } from "./workflow/engine.mjs"
 import { DoubaoSessionAdapter } from "./workflow/adapters/doubao.mjs"
 import { GiteaTrackerAdapter } from "./workflow/adapters/gitea.mjs"
@@ -347,9 +346,13 @@ export async function pickupOnce(ctx, { run = runRound } = {}) {
   if (cfg.pickup?.auto !== true) return { ok: true, skipped: "disabled" }
   if (!inWorkHours(cfg)) return { ok: true, skipped: "off-hours" }
   if (state.pickup?.running) return { ok: true, skipped: "busy" }
-  // 派单通道容量：在跑（planned/working 且不是派单失败）到上限就不再捞，等有单出结论。
+  // 接单节点被暂停：只停自动接单这一步，整条 workflow 不会停（在跑的单照常推进）。
+  if (ctx.engine?.paused?.("pickup")) return { ok: true, skipped: "node-paused" }
+  // 容量按「workflow 状态」算：在跑的『自有工单』流程实例最多 maxRunning（默认 2）条。
+  // 账本里 planned/working 的单数只作兜底（服务重启后 engine 会从账本恢复实例，两边基本一致）。
   const maxRunning = Number(cfg.pickup?.maxRunning) || 2
-  const inflight = inflightIssues(new Book(cfg.stateFile)).length
+  const runningOwn = ctx.engine?.active?.("own")?.length ?? 0
+  const inflight = Math.max(inflightIssues(new Book(cfg.stateFile)).length, runningOwn)
   if (inflight >= maxRunning) {
     return { ok: true, skipped: "slots-full", running: inflight, maxRunning }
   }
@@ -390,8 +393,8 @@ export async function pickupOnce(ctx, { run = runRound } = {}) {
     const engine = ctx.engine ?? new WorkflowEngine({ cfg, session: ctx.dws, log })
     for (const h of dispatched) {
       const issueKey = `${h.repo}#${h.number}`
-      await engine.emit("issue.picked", { issueKey })
-      await engine.emit("session.dispatched", { issueKey, target: h.convId ?? h.agent ?? "" })
+      await engine.emit("issue.picked", { issueKey, workflow: "own" })
+      await engine.emit("session.dispatched", { issueKey, target: h.convId ?? h.agent ?? "", workflow: "own" })
     }
     state.pickup.lastAt = nowIso()
     state.pickup.count = (state.pickup.count ?? 0) + 1
@@ -477,14 +480,17 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     log,
   })
   const ctx = { state, cfg, dws: engine.session, gitea: engine.tracker, engine, log, close: null, prPoll: null, httpUrl: "", consoleStore: null }
-  // 两条通道：派单与合并互不占槽。派单的并发由「在跑单数上限」体现（动作本身串行），
-  // 合并按 merge.concurrency 取任务，默认 1 —— 合并要写账本，不能并发。
-  ctx.lanes = {
-    merge: new Lane({ name: "merge", limit: cfg.merge?.concurrency ?? 1, log }),
-  }
-  ctx.mergeLane = ctx.lanes.merge
+  // 合并通道已取消：合并不再排独立的 lane/定时任务，`foreman pr merge` 直接执行，
+  // 用一条进程内的串行链（ctx.mergeChain）兜住并发，账本照样写。
   // 投递通道：new 模式每次新建会话；这里只做一次绑定，调用侧不用关心实现。
   ctx.deliver = (opts) => deliverNewSession(ctx, opts)
+
+  // 服务重启后把账本里在跑的工单补成流程实例：容量按实例算，不补就会当成 0 又重复派单。
+  try {
+    engine.restore(new Book(cfg.stateFile))
+  } catch (e) {
+    log(`恢复流程实例失败：${e.message}`)
+  }
 
   const httpCfg = cfg.service?.http ?? {}
   const dbFile = path.resolve(String(httpCfg.db || "~/.foreman/console.db").replace(/^~/, os.homedir()))
@@ -555,26 +561,19 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   ctx.prPoll = doPrPoll
   const doPickup = async () => pickupOnce(ctx)
   ctx.pickup = doPickup
-  // 合并通道一轮：取队列 → 交给通道 → 等这一轮跑完再返回（定时器/测试都按「跑完的样子」看）。
-  const doMerge = async () => {
-    const r = await mergeOnce(ctx)
-    await ctx.mergeLane?.idle?.()
-    return r
-  }
-  ctx.mergeSweep = doMerge
+  // 合并不再有定时任务（合并通道已取消）：`foreman pr merge` 当场执行，合完直接返回。
 
-  // PR 扫描、自动接单、合并通道都由 cron 驱动：页面上改表达式立刻重排，不用重启服务。
-  // 老的 intervalSeconds 仍会读，但没配 cron 时折成分钟级 cron（见 cronOf）。
+  // PR 扫描（现在是「他人 PR 扫描」）、自动接单都由 cron 驱动：页面上改表达式立刻重排，不用重启服务。
+  // 老的 intervalSeconds 仍会读，但没配 cron 时折成分钟级 cron（见 cronOf）。合并通道已取消。
   const armSchedules = () => {
-    for (const k of ["prInterval", "prKick", "pickupInterval", "pickupKick", "mergeInterval", "mergeKick"]) {
+    for (const k of ["prInterval", "prKick", "pickupInterval", "pickupKick"]) {
       if (state[k]) clearTimeout(state[k])
       state[k] = null
     }
     state.pr.nextAt = ""
     state.pickup.nextAt = ""
-    if (state.merge) state.merge.nextAt = ""
 
-    const TIMERS = { pr: ["prInterval", "PR 扫描"], pickup: ["pickupInterval", "自动巡检"], merge: ["mergeInterval", "合并通道"] }
+    const TIMERS = { pr: ["prInterval", "他人 PR 扫描"], pickup: ["pickupInterval", "自动巡检"] }
     const armOne = (kind, expr, run) => {
       const [timerKey, label] = TIMERS[kind]
       let next
@@ -618,15 +617,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
       state.pickupKick.unref?.()
     }
 
-    // 合并通道：merge.enabled===true 才起。队列里没东西时这一轮就是空转，成本极低。
-    if (cfg.merge?.enabled === true) {
-      armOne("merge", cronOf(cfg, "merge"), doMerge)
-      state.mergeKick = setTimeout(() => {
-        if (!inWorkHours(cfg)) return
-        doMerge().catch((e) => log(`合并通道异常：${e.message}`))
-      }, 1000)
-      state.mergeKick.unref?.()
-    }
+    // 合并通道已取消：这里不再挂「合并」定时任务（合并由 pr merge 当场执行）。
   }
   armSchedules()
 
@@ -654,8 +645,8 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     if (state.prKick) clearTimeout(state.prKick)
     if (state.pickupInterval) clearTimeout(state.pickupInterval)
     if (state.pickupKick) clearTimeout(state.pickupKick)
-    if (state.merge?.interval) clearTimeout(state.merge.interval)
-    if (state.merge?.kick) clearTimeout(state.merge.kick)
+    if (state.mergeInterval) clearTimeout(state.mergeInterval)
+    if (state.mergeKick) clearTimeout(state.mergeKick)
     await new Promise((r) => consoleHttp.server.close(r))
     consoleStore.close()
     // 只删自己的端口文件（端口号对得上才删）。
@@ -672,7 +663,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   ctx.close = close
   ctx.poll = doPoll
 
-  return { server: consoleHttp.server, close, poll: doPoll, prPoll: doPrPoll, pickup: doPickup, merge: doMerge, port, portFile: paths.portFile, http: ctx.httpUrl }
+  return { server: consoleHttp.server, close, poll: doPoll, prPoll: doPrPoll, pickup: doPickup, port, portFile: paths.portFile, http: ctx.httpUrl }
 }
 
 // PR 扫描一轮：配置里每个仓库列 open PR → 过滤作者 → 去重 → 通知最早登记的调用方。
@@ -680,6 +671,8 @@ export async function prPollOnce(ctx) {
   const { state, cfg, dws, gitea, log } = ctx
   if (cfg.prWatch?.enabled === false) return { ok: true, skipped: "disabled" }
   if (state.pr.polling) return { ok: true, skipped: "busy" }
+  // 「他人 PR 扫描」节点被暂停：这一轮不扫，已经扫到的 PR 照常由编排核对合并。
+  if (ctx.engine?.paused?.("scan")) return { ok: true, skipped: "node-paused" }
   state.pr.polling = true
   try {
     const book = new Book(cfg.stateFile)
@@ -694,6 +687,10 @@ export async function prPollOnce(ctx) {
     } catch (e) {
       log(`PR 扫描失败：${e.message}`)
       return { ok: false, error: e.message }
+    }
+    // 扫到别人的 PR 就进「他人 PR」流程：每条都推一次 scan 阶段，交给编排核对后合。
+    for (const key of out?.prs ?? []) {
+      await ctx.engine?.emit("pr.scanned", { key, workflow: "review" })
     }
     // 通知会话收尾：它报过的 PR 都合完了就归档，别把「PR待合并」会话一直留在侧边栏。
     // 放在每轮扫描后统一扫一遍，自动合并、手动合并、已经合过（skipped=merged）都能收干净。
@@ -830,40 +827,33 @@ export async function pollOnce(ctx) {
           const patch = { state: st }
           if (Number(result.pr)) { patch.pr = Number(result.pr); patch.prUrl = result.prUrl ?? "" }
           new Book(cfg.stateFile).setIssue(w.issueKey, patch)
-          await engine.emit("issue.concluded", { issueKey: w.issueKey, target: w.target, status: result.status, pr: result.pr ?? null })
+          await engine.emit("issue.concluded", { issueKey: w.issueKey, target: w.target, status: result.status, pr: result.pr ?? null, workflow: "own" })
+          // 结论里带 PR 说明会话已经 push 并开好了 PR：推进到「出 PR」这一阶段。
+          if (Number(result.pr)) {
+            await engine.emit("pr.opened", {
+              issueKey: w.issueKey,
+              pr: Number(result.pr),
+              prUrl: result.prUrl ?? "",
+              target: w.target,
+              workflow: "own",
+            })
+          }
         }
       }
 
-      // 会话自己 push + 开 PR；合并交给合并通道（默认 1 并发）。
-      // poll 只入队，不在这一轮里做 20–40s 的合并，所以一条 PR 不会拖住别的会话的通知。
+      // 合并通道已取消：会话自己 push + 开 PR 之后就停在这里。
+      // PR 合不合由编排会话核对工单后用 `foreman pr merge` 直接合，poll 不再入队、也不在这轮里合。
       const bookM = new Book(cfg.stateFile)
-      const md = mergeDecision({ cfg, watcher: w, book: bookM, result })
       let mergeQueued = false
-      if (md.send) {
-        bookM.enqueueMerge(md.key, {
-          repo: md.repo,
-          pr: md.pr,
-          issue: md.issueNumber ?? 0,
-          url: md.prUrl ?? "",
-          style: md.style,
-          deleteBranch: md.deleteBranch,
-          target: w.target,
-          notifyTo: w.notifyTo ?? "",
-          session: w.name ?? "",
-          via: "poll",
-        })
-        if (w.issueKey) bookM.setIssue(w.issueKey, { state: "pr-open", pr: md.pr, prUrl: md.prUrl ?? "" })
-        mergeQueued = true
-        out.queued = (out.queued ?? 0) + 1
-        log(`PR ${md.repo}#${md.pr} 已排入合并通道（${md.key}）`)
-        // 立刻催一轮合并通道；不 await，poll 继续往下走。
-        Promise.resolve().then(() => ctx.mergeSweep?.()).catch((e) => log(`催合并通道失败：${e.message}`))
-      } else if (md.reason && !["disabled", "already-asked"].includes(md.reason)) {
-        log(`跳过自动合并 ${w.target}：${md.reason}`)
+      if (Number(result?.pr)) {
+        const pr = Number(result.pr)
+        const repo = w.repo || String(w.issueKey ?? "").split("#")[0]
+        if (w.issueKey) bookM.setIssue(w.issueKey, { state: "pr-open", pr, prUrl: result.prUrl ?? "" })
+        log(`PR ${repo}#${pr} 已开好，等编排核对后 foreman pr merge（不再排合并通道）`)
       }
       const resultOut = result ? { ...result, merged: false, mergeError: "", mergeQueued } : result
 
-      // 合并与收尾都不在这一轮做：合并通道合完自己会清工作区、归档执行会话并发“合并完成”。
+      // 合并与收尾都不在这一轮做：等编排会话核对后调 foreman pr merge；合完再清工作区、归档执行会话。
       const book2 = new Book(cfg.stateFile)
       const nd = notifyDecision({ cfg, watcher: w, book: book2, env: process.env, result: resultOut })
 
@@ -901,6 +891,11 @@ export async function pollOnce(ctx) {
       if (!text) {
         log(`通知跳过 ${w.target}：${nd.reason || "empty"}`)
         park()
+        continue
+      }
+      // 通知节点被暂停：这一轮不发，也不记指纹，等继续后自然补发（不影响别的节点）。
+      if (ctx.engine?.paused?.("notify")) {
+        log(`通知跳过 ${w.target}：通知节点已暂停`)
         continue
       }
       // existing 才需要「发给谁」；new 模式每次都新建会话，跟哪个会话在跑无关。
@@ -959,46 +954,6 @@ export async function pollOnce(ctx) {
 
 // ---- 合并通道 ----
 
-// withTimeout：等通道里的任务出结果，超时不取消任务（合并已经发出去了，硬掐会留下半个状态）。
-function withTimeout(promise, ms) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      const e = new Error(`等待超时（${ms}ms）`)
-      e.code = "timeout"
-      reject(e)
-    }, ms)
-    timer.unref?.()
-    promise.then(
-      (v) => { clearTimeout(timer); resolve(v) },
-      (e) => { clearTimeout(timer); reject(e) }
-    )
-  })
-}
-
-// mergeOnce：从账本队列取待合并任务，交给合并通道（默认 1 并发）。
-// 派单与合并不共用锁也不共用队列：合并卡在 opencli 的 20–40s 里时，派单照常跑。
-export async function mergeOnce(ctx) {
-  const { cfg, state, log } = ctx
-  if (cfg.merge?.enabled !== true) return { ok: true, skipped: "disabled" }
-  if (!inWorkHours(cfg)) return { ok: true, skipped: "off-hours" }
-  const lane = ctx.mergeLane ?? ctx.lanes?.merge
-  if (!lane) return { ok: true, skipped: "no-lane" }
-  const book = new Book(cfg.stateFile)
-  const queued = Object.values(book.mergeQueue ?? {}).filter((t) => String(t.status ?? "queued") === "queued")
-  const started = []
-  for (const t of queued) {
-    if (lane.has(t.key)) continue
-    started.push(t.key)
-    // 失败已在 runMergeTask 里落账并发通知，这里只兜住不变成 unhandled rejection。
-    lane.submit(t.key, () => runMergeTask(ctx, t)).catch((e) => log(`合并通道 ${t.key} 失败：${e.message}`))
-  }
-  state.merge.lastSweepAt = nowIso()
-  state.merge.sweeps = (state.merge.sweeps ?? 0) + 1
-  state.merge.lastResult = { queued: queued.length, started, running: lane.size }
-  if (queued.length) log(`合并通道：队列 ${queued.length} 条，本轮起 ${started.length} 条（并发 ${lane.limit}）`)
-  return { ok: true, queued: queued.length, started, running: lane.size, pending: lane.pending }
-}
-
 // runMergeTask：合并一条 PR 并收尾（关单、摘监听、清工作区、归档执行会话），
 // 最后给合并会话发一条「合并完成」。合不了只记账不发脾气，也不 force merge。
 export async function runMergeTask(ctx, task = {}) {
@@ -1010,6 +965,10 @@ export async function runMergeTask(ctx, task = {}) {
   if (!repo || !pr) return { ok: false, reason: "bad-task" }
   const style = String(task.style ?? cfg.merge?.style ?? "merge")
   const deleteBranch = task.deleteBranch !== false
+  // 这条 PR 属于哪条流程：own（自有工单的 PR）/ review（别人开的 PR）。
+  // 合并是两条流程共用的阶段，不带 workflow 就落不到对应那条流程上。
+  const workflow = String(task.workflow ?? "review")
+  const issueKeyFor = issueNo ? `${repo}#${issueNo}` : `${repo}#${pr}`
 
   // 账本里已经是合并状态：不重复合，直接把队列条目收掉。
   const book0 = new Book(cfg.stateFile)
@@ -1023,6 +982,10 @@ export async function runMergeTask(ctx, task = {}) {
     detail: `${style} · 并发 ${cfg.merge?.concurrency ?? 1} · 不 force merge`,
   })
   let alreadyMerged = false
+  // 「他人 PR」流程：动手合之前先记一笔「核对完、决定合」。
+  if (workflow === "review") {
+    await ctx.engine?.emit("pr.reviewed", { key, pr, repo, target: task.target ?? "", workflow })
+  }
   try {
     await ctx.gitea.mergePr(repo, pr, { style, deleteBranch })
   } catch (e) {
@@ -1064,6 +1027,18 @@ export async function runMergeTask(ctx, task = {}) {
       watcher: { issueKey, target: task.target ?? "" },
       merge: { key, repo, pr, prUrl: String(task.url ?? ""), issueNumber: issueNo },
       book,
+      workflow,
+    })
+  }
+  // 关单是两条流程共用的收尾阶段：合并完工单已关闭（finishMergedPr 里做的），在这里落痕。
+  if (ctx.engine && issueNo) {
+    await ctx.engine.emit("issue.closed", {
+      issueKey: done.issueKey || issueKeyFor,
+      key: done.issueKey || issueKeyFor,
+      pr,
+      issue: issueNo,
+      target: task.target ?? "",
+      workflow,
     })
   }
   // 通知会话收尾：它报的 PR 现在都合完了，自动归档，别把「PR待合并」会话留在侧边栏。
@@ -1338,23 +1313,26 @@ export async function handleRequest(ctx, req) {
     const deleteBranch = req.deleteBranch !== undefined ? req.deleteBranch !== false : ctx.cfg.merge?.deleteBranch !== false
     const issueNo = Number(req.issue ?? 0)
     const key = `${repo}#${number}`
-    // 手动合并也走合并通道：同一时刻只合一条（并发 merge.concurrency），不跟自动合并抢。
-    // notify:false —— 发起人就是合并会话自己，不用再通知它一遍。
+    // 合并通道已取消：合并直接执行，不排队、不再有独立并发槽。
+    // 只用一条进程内的串行链兜住：两条同时进来也不会并着合（合并要写账本，不能并发）。
+    // workflow 默认按「他人 PR」记：手动/编排会话调的合并，基本都是在核对别人的 PR。
+    const workflow = String(req.workflow ?? "review")
     const run = () =>
       runMergeTask(ctx, {
         key, repo, pr: number, issue: issueNo, url: String(req.url ?? ""),
-        style, deleteBranch, source: "cli", notify: false,
+        style, deleteBranch, source: "cli", notify: false, workflow,
       })
     let result
     try {
-      // 没有通道（手工构造 ctx 的测试/脚本）时直接跑，语义与走通道一致。
-      result = ctx.mergeLane ? await withTimeout(ctx.mergeLane.submit(key, run), 300000) : await run()
+      const prev = ctx.mergeChain ?? Promise.resolve()
+      const mine = prev.then(run, run)
+      ctx.mergeChain = mine.then(() => {}, () => {})
+      result = await mine
     } catch (e) {
-      if (e?.code === "timeout") return fail("merge-timeout", `合并通道 300s 内没跑完 ${key}，稍后 foreman status 看 lanes.merge`)
       return fail("merge-failed", String(e?.message ?? e))
     }
     if (!result?.ok) return fail("merge-failed", result?.reason ?? "未知原因")
-    // 合并成功后把队列里的同一条摘掉，避免合并通道再合一遍。
+    // 合并成功后把账本里的待合并条目收掉，避免再合一遍。
     try { new Book(ctx.cfg.stateFile).dropMerge(key) } catch {}
     // 通知会话收尾：它报的 PR 现在都合完了，自动归档，别把会话留在侧边栏。
     const notes = [...(result.notes ?? [])]
@@ -1392,9 +1370,46 @@ export async function handleRequest(ctx, req) {
       return fail("gitea-error", e.message)
     }
     new Book(ctx.cfg.stateFile).setIssue(`${repo}#${number}`, { state: "done" })
+    await ctx.engine?.emit("issue.closed", {
+      issueKey: `${repo}#${number}`,
+      key: `${repo}#${number}`,
+      issue: number,
+      workflow: String(req.workflow ?? "review"),
+    })
     ctx.consoleStore?.event({ kind: "issue_close", key: `${repo}#${number}`, repo, number, to: "done" })
     try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
     return ok({ repo, number, closed: true })
+  }
+
+  // workflow 节点：查看 / 暂停 / 继续。节点级开关——只停这一个节点自己的自动动作，
+  // 不停止整条 workflow（在跑的单、后面的节点照常走）。
+  if (cmd === "workflow") {
+    const action = String(req.action ?? "view").trim()
+    if (action === "view") {
+      return ok({
+        workflows: ctx.engine?.workflows() ?? [],
+        nodes: ctx.engine?.nodes() ?? [],
+        active: {
+          own: ctx.engine?.active?.("own")?.length ?? 0,
+          review: ctx.engine?.active?.("review")?.length ?? 0,
+          maxOwn: Number(ctx.cfg.pickup?.maxRunning) || 2,
+        },
+        runs: ctx.engine?.runs?.(20) ?? [],
+      })
+    }
+    const stage = String(req.stage ?? "").trim()
+    if (!stage) return fail("bad-request", "workflow 节点操作需要 stage")
+    const known = (ctx.engine?.nodes() ?? []).find((n) => n.stage === stage)
+    if (!known) return fail("bad-request", `没有这个节点：${stage}`)
+    const paused = action === "pause" ? true : action === "resume" ? false : undefined
+    if (paused === undefined) return fail("bad-request", `action 只能是 view / pause / resume，收到 ${action}`)
+    try {
+      const saved = ctx.engine.setPaused(stage, paused)
+      ctx.log?.(`workflow 节点 ${stage} 已${saved.paused ? "暂停" : "继续"}`)
+      return ok({ stage, paused: saved.paused, nodes: ctx.engine?.nodes() ?? [] })
+    } catch (e) {
+      return fail("workflow-error", e.message)
+    }
   }
 
   if (cmd === "status") {
@@ -1435,20 +1450,16 @@ export async function handleRequest(ctx, req) {
         running: ctx.state.pickup?.running === true,
         lastResult: ctx.state.pickup?.lastResult ?? null,
       },
-      // 两条通道各报各的：派单看「在跑/上限」，合并看队列与并发。
+      // 派单与合并都不再有独立通道：接单容量按 workflow 实例数，合并由 `foreman pr merge` 当场执行。
       lanes: {
-        merge: ctx.mergeLane?.snapshot() ?? null,
         dispatch: {
           maxRunning: ctx.cfg.pickup?.maxRunning ?? null,
           inflight: inflightIssues(new Book(ctx.cfg.stateFile)).length,
+          workflowActive: ctx.engine?.active?.("own")?.length ?? 0,
         },
       },
       merge: {
-        enabled: ctx.cfg.merge?.enabled === true,
-        concurrency: ctx.cfg.merge?.concurrency ?? 1,
-        lastSweepAt: ctx.state.merge?.lastSweepAt ?? null,
-        sweeps: ctx.state.merge?.sweeps ?? 0,
-        lastResult: ctx.state.merge?.lastResult ?? null,
+        // 合并通道已取消：只剩「还有几条待合并的 PR」，合不合由编排调 pr merge 决定。
         queued: Object.values(new Book(ctx.cfg.stateFile).mergeQueue ?? {}).filter((t) => String(t.status ?? "queued") === "queued").length,
       },
       // 产品分组：每个产品一套仓库 + 自己的提示词/监控目录。
@@ -1469,7 +1480,16 @@ export async function handleRequest(ctx, req) {
         pending: ctx.state.pr?.pending ?? 0,
       },
       workflow: {
+        // 两条流程（own 自有工单 / review 他人 PR）+ 节点（含暂停状态与累计执行次数）+ 在跑实例。
+        workflows: ctx.engine?.workflows() ?? [],
         stages: ctx.engine?.stages() ?? [],
+        nodes: ctx.engine?.nodes() ?? [],
+        active: {
+          own: ctx.engine?.active?.("own")?.length ?? 0,
+          review: ctx.engine?.active?.("review")?.length ?? 0,
+          maxOwn: Number(ctx.cfg.pickup?.maxRunning) || 2,
+        },
+        runs: ctx.engine?.runs?.(20) ?? [],
         recent: (ctx.engine?.lifecycle.history ?? []).slice(-12),
         archiveAfterMerge: ctx.cfg.workflow?.archiveAfterMerge !== false,
       },

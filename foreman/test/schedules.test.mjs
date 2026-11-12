@@ -16,19 +16,17 @@ const baseCfg = () => ({
   workHours: { enabled: true, days: [1, 2, 3, 4, 5], start: "08:30", end: "17:30", offUntil: "" },
 })
 
-test("listSchedules：五个开关都在（派单 / PR 扫描 / 续接 / 合并通道 / 工作时间窗）", () => {
+test("listSchedules：四个开关（派单 / 他人 PR 扫描 / 续接 / 工作时间窗），合并通道已取消", () => {
   const cfg = baseCfg()
   const rows = listSchedules(cfg)
-  assert.deepEqual(rows.map((r) => r.id), ["pickup", "prWatch", "planner", "merge", "workHours"])
+  assert.deepEqual(rows.map((r) => r.id), ["pickup", "prWatch", "planner", "workHours"])
   assert.equal(rows[0].enabled, false)
   assert.equal(rows[1].enabled, true)
+  assert.equal(rows[1].label, "他人 PR 扫描")
   assert.match(rows[0].detail, /在跑上限 2/)
   assert.equal(rows[0].cron, "*/30 * * * *")
   assert.equal(rows[1].cron, "*/5 * * * *")
-  // 合并通道与派单通道分开报：默认关、并发 1、按分钟扫队列。
-  assert.equal(rows[3].enabled, false)
-  assert.match(rows[3].detail, /并发 1/)
-  assert.equal(rows[3].cron, "* * * * *")
+  assert.equal(rows.some((r) => r.id === "merge"), false, "合并通道不再是一项定时任务")
   // 用工作日中午的时间点判断，避免跑测试时正好在窗口外
   const noon = new Date()
   const inside = applySchedules(cfg, {})

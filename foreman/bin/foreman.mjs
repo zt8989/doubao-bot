@@ -48,6 +48,8 @@ const HELP = `foreman — 接单编排 + 常驻服务
               监控项目（deliver.projectDir）+ 正文；existing 才塞回已有会话。路径与项目只从配置读。
   pr open     建 PR（唯一入口：agent 也走它，账本/控制台才记得到）
   pr merge <N> --repo R [--issue <单号>]   合并 PR（唯一入口：先核对关联工单再合；失败回理由）
+  workflow view                            看两条流程（自有工单 / 他人 PR）的节点与累计次数
+  workflow pause|resume <节点>             暂停/继续某个节点（只停这个节点，不停止整条流程）
   issue comment|close   评论/关单（可选：用它才会记账，直接 opencli gitea 也行）
   --no-service  跳过自动握手与拉起（逃生口）
 
@@ -253,6 +255,22 @@ async function cmdPr(pos, flags) {
     return out({ ok: true, ...r })
   }
   throw new Error(`未知 pr 子命令：${sub}（list|poll|open|merge）`)
+}
+
+// workflow：看两条流程的节点、暂停/继续某个节点（节点级开关，不停止整条流程）。
+async function cmdWorkflow(pos, flags) {
+  const cfg = loadConfig(flags.config)
+  const sub = pos.shift() || "view"
+  if (!["view", "pause", "resume"].includes(sub)) throw new Error("用法：foreman workflow view | pause <节点> | resume <节点>")
+  const req = { id: "cli", cmd: "workflow", action: sub === "view" ? "view" : sub }
+  if (sub !== "view") {
+    const stage = String(pos.shift() ?? "").trim()
+    if (!stage) throw new Error(`用法：foreman workflow ${sub} <节点>`)
+    req.stage = stage
+  }
+  const r = await callRaw(resolvePort(cfg), req, 60000)
+  if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
+  return out({ ok: true, ...r })
 }
 
 // ---- 原有命令 ----
@@ -467,6 +485,8 @@ async function main() {
       return cmdStatus(pos, flags)
     case "watch":
       return cmdWatch(pos, flags)
+    case "workflow":
+      return cmdWorkflow(pos, flags)
     case "pr":
       return cmdPr(pos, flags)
     case "issue":

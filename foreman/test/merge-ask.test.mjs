@@ -4,7 +4,7 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { mergeDecision, startServer } from "../src/service.mjs"
+import { mergeDecision, startServer, runMergeTask } from "../src/service.mjs"
 import { Book } from "../src/book.mjs"
 
 function tmpDir() {
@@ -72,7 +72,7 @@ test("mergeDecision：开关、执行方、状态、PR、自证、去重", () =>
   }
 })
 
-test("poll：done+PR 只入合并队列，合并通道合一次、关单，结果通知调用方", async () => {
+test("poll：done+PR 只把 PR 记下来、不再自动入队合并；通知让编排自己 foreman pr merge", async () => {
   const dir = tmpDir()
   let server
   try {
@@ -90,45 +90,37 @@ test("poll：done+PR 只入合并队列，合并通道合一次、关单，结�
     }
     server = await startServer({ cfg, book, dws: mkDws([JSON.stringify(doneResult)], sends), gitea, log: () => {} })
 
-    // poll 不再自己合并：只入队，通知里就说「已排入合并通道」。
+    // 合并通道已取消：poll 不入队、也不合并，只把「PR 已开好」记进账本并通知编排。
     const r1 = await server.poll()
-    assert.equal(r1.queued, 1)
-    assert.equal(r1.merged, undefined, "poll 不做 20–40s 的合并，先返回")
-    const queuedNote = sends.find((s) => s.target === "boss")
-    assert.match(queuedNote.text, /合并：已排入合并通道/)
+    assert.equal(r1.queued, undefined, "不再有合并队列")
+    const note = sends.find((s) => s.target === "boss")
+    assert.match(note.text, /合并：PR 已开好/)
+    assert.match(note.text, /foreman pr merge 12/)
+    assert.equal(merged.length, 0, "poll 不合并")
+    const rec = new Book(cfg.stateFile).issue("demo/demo#9")
+    assert.equal(rec.state, "pr-open")
+    assert.equal(rec.pr, 12)
 
-    // 合并通道（1 并发）取队列合掉。
-    await server.merge()
-    assert.equal(merged.length, 1)
+    // 编排核对后手动合：runMergeTask 直接执行，合完关单并回一条「合并完成」。
+    const out = await runMergeTask(
+      { cfg, log: () => {}, gitea, dws: mkDws([], sends) },
+      { key: "demo/demo#12", repo: "demo/demo", pr: 12, issue: 9, notifyTo: "boss", workflow: "own" }
+    )
+    assert.equal(out.ok, true)
     assert.deepEqual(merged[0], { repo: "demo/demo", pr: 12, opts: { style: "merge", deleteBranch: true } })
     assert.deepEqual(closed, [{ repo: "demo/demo", n: 9 }])
-
     const mergeNote = sends.filter((s) => s.target === "boss").find((s) => /合并：已合并 PR #12/.test(s.text))
     assert.ok(mergeNote, "合并结果单独通知调用方")
-
-    // 同一 PR 换指纹再来一轮：不再合。
-    await server.close()
-    server = null
-    const book2 = new Book(cfg.stateFile)
-    book2.markNotified("conv-work", "other-fingerprint", {})
-    server = await startServer({ cfg, book: book2, dws: mkDws([JSON.stringify({ ...doneResult, summary: "又补一句" })], sends), gitea, log: () => {} })
-    await server.poll()
-    await server.merge()
-    assert.equal(merged.length, 1, "同一 PR 只合一次")
   } finally {
     if (server) await server.close()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test("poll：合并冲突 → 不 force merge、只记失败、调用方收到“合并失败”", async () => {
+test("runMergeTask：冲突 → 不 force merge、只记失败、调用方收到「合并失败」", async () => {
   const dir = tmpDir()
-  let server
   try {
     const cfg = mkCfg(dir)
-    const book = new Book(cfg.stateFile)
-    book.setWatch({ target: "conv-work", name: "foreman-demo-9", issueKey: "demo/demo#9", repo: "demo/demo", number: 9, notifyTo: "boss" })
-
     const sends = []
     let attempts = 0
     const gitea = {
@@ -136,18 +128,16 @@ test("poll：合并冲突 → 不 force merge、只记失败、调用方收到�
       mergePr: async () => { attempts++; throw new Error("此分支存在冲突，无法自动合并") },
       closeIssue: async () => {},
     }
-    server = await startServer({ cfg, book, dws: mkDws([JSON.stringify(doneResult)], sends), gitea, log: () => {} })
-
-    const r = await server.poll()
-    assert.equal(r.queued, 1)
-    await server.merge()
-    assert.equal(attempts, 1, "合并通道只试一次，不 force merge、不重试")
+    const out = await runMergeTask(
+      { cfg, log: () => {}, gitea, dws: mkDws([], sends) },
+      { key: "demo/demo#12", repo: "demo/demo", pr: 12, issue: 9, notifyTo: "boss", workflow: "review" }
+    )
+    assert.equal(out.ok, false)
+    assert.equal(attempts, 1, "只试一次，不 force merge、不重试")
     const note = sends.filter((s) => s.target === "boss").find((s) => /合并失败：此分支存在冲突/.test(s.text))
     assert.ok(note, "合并失败要单独告诉调用方")
     assert.equal(new Book(cfg.stateFile).mergeAsk["demo/demo#12"].status, "failed")
-    assert.equal(new Book(cfg.stateFile).mergeTask("demo/demo#12").status, "failed")
   } finally {
-    if (server) await server.close()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })

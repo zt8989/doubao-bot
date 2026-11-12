@@ -6,7 +6,7 @@ import { validateCron } from "./cron.mjs"
 
 const pad = (n) => String(n).padStart(2, "0")
 
-export const SCHEDULE_IDS = ["pickup", "prWatch", "planner", "merge", "workHours"]
+export const SCHEDULE_IDS = ["pickup", "prWatch", "planner", "workHours"]
 
 // 临时闭嘴恢复的时刻：今天还没到开始时间且今天是工作日就今天，否则下一个工作日。
 export function nextWorkdayStart(cfg, at = new Date()) {
@@ -34,7 +34,7 @@ const localIso = (d) =>
 export function cronOf(cfg, id) {
   const section = cfg?.[id] ?? {}
   if (String(section.cron ?? "").trim()) return String(section.cron).trim()
-  const seconds = Number(section.intervalSeconds ?? (id === "pickup" ? 1800 : id === "merge" ? 60 : 300))
+  const seconds = Number(section.intervalSeconds ?? (id === "pickup" ? 1800 : 300))
   const minutes = Math.max(1, Math.round(seconds / 60))
   return minutes === 1 ? "* * * * *" : `*/${minutes} * * * *`
 }
@@ -46,7 +46,6 @@ export function listSchedules(cfg, state = {}) {
   const pickup = cfg?.pickup ?? {}
   const prw = cfg?.prWatch ?? {}
   const pl = cfg?.planner ?? {}
-  const mg = cfg?.merge ?? {}
   return [
     {
       id: "pickup",
@@ -62,12 +61,12 @@ export function listSchedules(cfg, state = {}) {
     },
     {
       id: "prWatch",
-      label: "PR 扫描",
+      label: "他人 PR 扫描",
       enabled: prw.enabled === true,
       cron: cronOf(cfg, "prWatch"),
       nextAt: state.pr?.nextAt || "",
       intervalSeconds: Number(prw.intervalSeconds ?? 300),
-      detail: "扫配置里各仓库的 open PR",
+      detail: "扫各仓库里别人开的 open PR（作者不是自己），通知编排核对后合并",
       lastAt: state.pr?.lastPollAt || "",
       count: Number(state.pr?.pollCount ?? 0),
       lastResult: Number(state.pr?.notifiedCount ?? 0) ? `累计通知 ${Number(state.pr.notifiedCount)} 次` : "",
@@ -81,18 +80,6 @@ export function listSchedules(cfg, state = {}) {
       lastAt: "",
       count: 0,
       lastResult: pl.enabled === true ? "" : "关闭后跑完不再催编排接单",
-    },
-    {
-      id: "merge",
-      label: "合并通道",
-      enabled: mg.enabled === true,
-      cron: cronOf(cfg, "merge"),
-      nextAt: state.merge?.nextAt || "",
-      intervalSeconds: Number(mg.intervalSeconds ?? 60),
-      detail: `并发 ${Number(mg.concurrency ?? 1)}，与派单通道分开排队`,
-      lastAt: state.merge?.lastSweepAt || "",
-      count: Number(state.merge?.sweeps ?? 0),
-      lastResult: state.merge?.lastResult ? `队列 ${state.merge.lastResult.queued ?? 0} 条 · 本轮起 ${(state.merge.lastResult.started ?? []).length} 条` : "",
     },
     {
       id: "workHours",
@@ -121,7 +108,7 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
     if (!(id in patch)) continue
     const raw = patch[id]
     const obj = raw && typeof raw === "object" ? raw : { enabled: raw === true || raw === "true" }
-    if ("cron" in obj && !["pickup", "prWatch", "merge"].includes(id)) throw new Error(`${id} 不是独立定时任务，没有 cron 可改`)
+    if ("cron" in obj && !["pickup", "prWatch"].includes(id)) throw new Error(`${id} 不是独立定时任务，没有 cron 可改`)
     const next = {}
     if ("enabled" in obj) next.enabled = obj.enabled === true || obj.enabled === "true"
     if ("cron" in obj) {
@@ -137,10 +124,6 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
       cfg.prWatch = { ...(cfg.prWatch ?? {}) }
       if ("enabled" in next) cfg.prWatch.enabled = next.enabled
       if ("cron" in next) cfg.prWatch.cron = next.cron
-    } else if (id === "merge") {
-      cfg.merge = { ...(cfg.merge ?? {}) }
-      if ("enabled" in next) cfg.merge.enabled = next.enabled
-      if ("cron" in next) cfg.merge.cron = next.cron
     } else if (id === "planner") {
       if ("enabled" in next) cfg.planner = { ...(cfg.planner ?? {}), enabled: next.enabled }
     } else if (id === "workHours" && "enabled" in next) {
@@ -151,7 +134,7 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
 }
 
 /** 开关对应的配置键名（pickup.auto，其余是 enabled）。 */
-const FLAG_KEY = { pickup: "auto", prWatch: "enabled", planner: "enabled", merge: "enabled" }
+const FLAG_KEY = { pickup: "auto", prWatch: "enabled", planner: "enabled" }
 
 /**
  * 写回配置文件：只改上面这四个开关，其余字段（含用户手写的格式/注释式排版）原样保留。
