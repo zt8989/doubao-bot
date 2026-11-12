@@ -271,7 +271,6 @@ class FmTasks extends LitElement {
                         <div class="wf-node-main">
                           <span class="wf-stage">${st.stage}</span>
                           <span class=${"badge " + (state === "current" ? "working" : state === "passed" ? "done" : "planned")}>${label}</span>
-                          <span class="chip"><span class="mono">${n.count ?? 0}</span> 次</span>
                           ${state === "pending"
                             ? "" // 还没跑到的节点没有更新时间：不占位、不显示
                             : (() => {
