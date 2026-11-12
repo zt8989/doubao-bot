@@ -85,7 +85,7 @@ class FmSidebar extends LitElement {
   }
   render() {
     const views = [
-      { id: "overview", label: "工单与 PR" },
+      { id: "overview", label: "工单" },
       { id: "schedules", label: "定时任务" },
       { id: "operations", label: "操作日志" },
     ]
@@ -192,8 +192,6 @@ class FmStats extends LitElement {
       { label: `${scope} 分配任务`, value: s.tasks, sub: `历史累计 ${s.historyTasks ?? 0} 单`, accent: "accent-cyan" },
       { label: "进行中", value: s.working, sub: `已出 PR ${s.prOpen ?? 0}`, accent: "accent-green" },
       { label: `${scope} PR`, value: s.prs, sub: `历史 ${s.historyPrs ?? 0} 条 · 新增 ${s.newPrs ?? 0}`, accent: "accent-cyan" },
-      { label: "待通知", value: s.pending, sub: "非本人作者、未发出", accent: "accent-amber" },
-      { label: "已跳过", value: s.skipped, sub: "作者是自己", accent: "accent-red" },
     ]
     return html`
       <section class="stats">
@@ -355,192 +353,6 @@ class FmTasks extends LitElement {
               <div class="empty">
                 <div class="empty-title">今天还没有分配到任务</div>
                 <div class="empty-sub">foreman run 派活后会出现在这里</div>
-              </div>`}
-      </section>`
-  }
-}
-
-/* ---------------- 两条 workflow 与节点 ---------------- */
-class FmWorkflows extends LitElement {
-  static properties = { workflow: { attribute: false }, busy: { type: String } }
-  createRenderRoot() {
-    return this
-  }
-  render() {
-    const wf = this.workflow || {}
-    const nodes = wf.nodes || []
-    const runs = (wf.runs || []).slice(0, 8)
-    const active = wf.active || {}
-    const flows = wf.workflows || []
-    if (!flows.length) {
-      return html`<section class="panel"><div class="empty">
-        <div class="empty-title">还没拿到 workflow</div>
-        <div class="empty-sub">服务没在跑时看不到节点状态</div>
-      </div></section>`
-    }
-    const nodeOf = (stage) => nodes.find((n) => n.stage === stage) || {}
-    // 只有「正在某个实例的当前节点上」或「已经跑过至少一次」的节点才能暂停；
-    // 完全没跑过的节点没有暂停的意义（暂停只会让将来第一次执行时被跳过）。
-    const currentStages = new Set(runs.filter((r) => r.status === "running").map((r) => r.stage))
-    return html`
-      <section class="panel">
-        <div class="panel-head">
-          <h2>workflow 节点</h2>
-          <div class="panel-side">
-            <span class="hint">在跑：自有工单 ${active.own ?? 0}/${active.maxOwn ?? 2} · 他人 PR ${active.review ?? 0}</span>
-            <span class="hint">暂停只停这个节点自己的自动动作，不会停止整条 workflow</span>
-          </div>
-        </div>
-        <div class="wf-grid">
-          ${flows.map((f) => html`
-            <div class="wf-card">
-              <div class="wf-head">
-                <span class="wf-name">${f.name}</span>
-                <span class="hint">${f.description}</span>
-              </div>
-              <ol class="wf-nodes">
-                ${(f.stages || []).map((st) => {
-                  const n = nodeOf(st.stage)
-                  const canPause = n.paused || currentStages.has(st.stage) || Number(n.count ?? 0) > 0
-                  const badge = n.paused ? "已暂停" : currentStages.has(st.stage) ? "当前节点" : Number(n.count ?? 0) > 0 ? "已跑过" : "未运行"
-                  return html`
-                    <li class=${"wf-node" + (n.paused ? " is-paused" : "")}>
-                      <div class="wf-node-main">
-                        <span class="wf-stage">${st.stage}</span>
-                        <span class=${"badge " + (n.paused ? "failed" : currentStages.has(st.stage) ? "working" : Number(n.count ?? 0) > 0 ? "done" : "planned")}>${badge}</span>
-                        <span class="chip"><span class="mono">${n.count ?? 0}</span> 次</span>
-                        <span class="pr-note">${n.lastAt ? `更新 ${stampText(n.lastAt)}` : "还没跑过"}</span>
-                      </div>
-                      <div class="wf-node-sub">${st.description}</div>
-                      ${canPause
-                        ? html`<button class="ghost wf-btn" ?disabled=${this.busy === st.stage}
-                            @click=${() => emit(this, "node-toggle", { stage: st.stage, paused: !n.paused })}>
-                            ${n.paused ? "继续" : "暂停"}
-                          </button>`
-                        : html`<span class="hint">未运行，不可暂停</span>`}
-                    </li>`
-                })}
-              </ol>
-            </div>`)}
-        </div>
-        ${runs.length ? html`
-          <div class="wf-runs">
-            <div class="wf-runs-head">在跑 / 最近的流程实例</div>
-            <ul class="wf-run-list">
-              ${runs.map((r) => html`
-                <li class="wf-run">
-                  <span class=${"badge " + (r.status === "done" ? "done" : "working")}>${r.status === "done" ? "已完成" : "进行中"}</span>
-                  <span class="mono">${r.key}</span>
-                  <span class="hint">${r.workflow === "own" ? "自有工单" : "他人 PR"} · 当前节点 ${r.stage || "—"} · 更新 ${stampText(r.updatedAt) || "—"}</span>
-                  <span class="pr-note">${r.startedAt ? `开始 ${String(r.startedAt).slice(11, 19)}` : ""}</span>
-                </li>`)}
-            </ul>
-          </div>` : ""}
-      </section>`
-  }
-}
-
-/* ---------------- PR 通知 ---------------- */
-class FmPrs extends LitElement {
-  static properties = { data: { attribute: false }, filter: { type: String } }
-  createRenderRoot() {
-    return this
-  }
-  render() {
-    const d = this.data || {}
-    const all = d.prs || []
-    const prw = d.prWatch || {}
-    const counts = {
-      all: all.length,
-      pending: all.filter((p) => p.pending).length,
-      notified: all.filter((p) => p.state === "notified").length,
-      skipped: all.filter((p) => p.state === "skipped").length,
-    }
-    const label = { all: "全部", pending: "待通知", notified: "已通知", skipped: "已跳过" }
-    const rows =
-      this.filter === "pending"
-        ? all.filter((p) => p.pending)
-        : this.filter === "notified"
-        ? all.filter((p) => p.state === "notified")
-        : this.filter === "skipped"
-        ? all.filter((p) => p.state === "skipped")
-        : all
-    const polls = (d.recentPolls || []).slice(0, 5)
-
-    return html`
-      <section class="panel">
-        <div class="panel-head">
-          <h2>PR 通知</h2>
-          <div class="panel-side">
-            <span class="hint">
-              ${prw.enabled
-                ? `扫 ${(d.repos || []).length} 个仓库 · 每 ${prw.intervalSeconds || "?"}s`
-                : "监听未开启"}
-            </span>
-            <div class="tabs">
-              ${["all", "pending", "notified", "skipped"].map(
-                (k) => html`
-                  <button
-                    class=${"tab " + (this.filter === k ? "is-active" : "")}
-                    @click=${() => emit(this, "filter-set", { filter: k })}
-                  >${label[k]} ${counts[k] ?? 0}</button>`
-              )}
-            </div>
-          </div>
-        </div>
-
-        ${polls.length
-          ? html`
-              <div class="poll-strip">
-                <span class="poll-label">最近扫描</span>
-                ${polls.map(
-                  (p) => html`
-                    <span class="p-chip" title=${`第 ${p.id} 次快照`}>
-                      <span class="p-time">${p.atClock || "—"}</span>
-                      <span class="p-nums">${p.tasks}单/${p.prs}PR +${p.newTasks}/+${p.newPrs}</span>
-                      ${p.pending ? html`<span class="p-flag">${p.pending} 待通知</span>` : ""}
-                    </span>`
-                )}
-              </div>`
-          : ""}
-
-        ${rows.length
-          ? html`
-              <ul class="pr-list">
-                ${rows.map(
-                  (p) => html`
-                    <li class="pr">
-                      <div class="pr-main">
-                        <span class="pr-num">
-                          ${p.url
-                            ? html`<a class="id-link" href=${p.url} target="_blank" rel="noopener"
-                                ><span class="repo">${p.repo}#</span><span>${p.number}</span></a>`
-                            : html`<span class="repo">${p.repo}#</span><span>${p.number}</span>`}
-                        </span>
-                        <span class="pr-title">${p.title || "（无标题）"}</span>
-                        ${p.url
-                          ? html`<a class="pr-link" href=${p.url} target="_blank" rel="noreferrer">打开</a>`
-                          : ""}
-                      </div>
-                      <div class="pr-meta">
-                        <span class="chip">作者 <span class="mono">${p.author || "未知"}</span></span>
-                        ${p.state === "skipped"
-                          ? html`<span class="badge self">跳过 · 自己的</span>`
-                          : p.state === "notified"
-                          ? html`<span class="badge notified">已通知 ${p.notifiedAtClock || ""}</span>`
-                          : html`<span class="badge pending">待通知</span>`}
-                        <span class="pr-note">发现 ${p.seenAtClock || "—"}</span>
-                        ${p.notifiedTo ? html`<span class="pr-note">→ ${p.notifiedTo}</span>` : ""}
-                      </div>
-                    </li>`
-                )}
-              </ul>`
-          : html`
-              <div class="empty">
-                <div class="empty-title">
-                  ${this.filter === "all" ? "今天还没有扫到 PR" : "这个分类下暂时没有 PR"}
-                </div>
-                <div class="empty-sub">服务每 5 分钟扫一遍配置里的仓库</div>
               </div>`}
       </section>`
   }
@@ -709,7 +521,6 @@ class FmConsole extends LitElement {
   static properties = {
     data: { attribute: false },
     mode: { type: String },
-    filter: { type: String },
     day: { type: String },
     view: { type: String },
     sidebarCollapsed: { type: Boolean },
@@ -728,8 +539,7 @@ class FmConsole extends LitElement {
     super()
     this.data = null
     this.mode = "system"
-    this.filter = "all"
-    // view：overview（工单/PR）/ schedules（定时任务）/ operations（操作日志）
+    // view：overview（工单）/ schedules（定时任务）/ operations（操作日志）
     this.view = "overview"
     try {
       this.sidebarCollapsed = localStorage.getItem(SIDEBAR_KEY) === "1"
@@ -771,9 +581,6 @@ class FmConsole extends LitElement {
     this._mq.addEventListener?.("change", this._onSystemTheme)
 
     this._onTheme = (e) => this.setTheme(e.detail.mode)
-    this._onFilter = (e) => {
-      this.filter = e.detail.filter
-    }
     this._onDay = (e) => {
       this.day = e.detail.day || ""
       this.applyDayToUrl()
@@ -798,7 +605,6 @@ class FmConsole extends LitElement {
       this.opFilter = e.detail.filter
     }
     this.addEventListener("theme-set", this._onTheme)
-    this.addEventListener("filter-set", this._onFilter)
     this.addEventListener("day-set", this._onDay)
     this.addEventListener("refresh", this._onRefresh)
     this.addEventListener("view-set", this._onView)
@@ -835,7 +641,6 @@ class FmConsole extends LitElement {
     window.removeEventListener("focus", this._onFocus)
     this._mq?.removeEventListener?.("change", this._onSystemTheme)
     this.removeEventListener("theme-set", this._onTheme)
-    this.removeEventListener("filter-set", this._onFilter)
     this.removeEventListener("day-set", this._onDay)
     this.removeEventListener("refresh", this._onRefresh)
     this.removeEventListener("view-set", this._onView)
@@ -1025,9 +830,7 @@ class FmConsole extends LitElement {
                 .runs=${this.workflow?.runs || []}
                 .workflows=${this.workflow?.workflows || []}
                 .scope=${this.data.isToday === false ? this.data.day : "今日"}
-              ></fm-tasks>
-              <fm-workflows .workflow=${this.workflow} .busy=${this.nodeBusy}></fm-workflows>
-              <fm-prs .data=${this.data} .filter=${this.filter}></fm-prs>`
+              ></fm-tasks>`
           : html`
               <section class="panel">
                 <div class="empty">
@@ -1046,8 +849,6 @@ customElements.define("fm-sidebar", FmSidebar)
 customElements.define("fm-head", FmHead)
 customElements.define("fm-stats", FmStats)
 customElements.define("fm-tasks", FmTasks)
-customElements.define("fm-workflows", FmWorkflows)
-customElements.define("fm-prs", FmPrs)
 customElements.define("fm-schedules", FmSchedules)
 customElements.define("fm-operations", FmOperations)
 customElements.define("fm-foot", FmFoot)
