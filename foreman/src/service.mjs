@@ -7,6 +7,7 @@ import crypto from "node:crypto"
 import { nowIso, sleep, inWorkHours } from "./util.mjs"
 import { Book } from "./book.mjs"
 import { parseResult, deliverPrompt, noticeSessionName } from "./prompts.mjs"
+import { builtinPrompt } from "./builtin-prompts.mjs"
 import { notifyTarget, shouldNotify, notifyText, runRound, acquireLock, releaseLock } from "./orchestrator.mjs"
 import { WorkflowEngine } from "./workflow/engine.mjs"
 import { NODE_TEARDOWN, runNodeCleanup, resolveIssueKey } from "./workflow/cleaners.mjs"
@@ -153,17 +154,13 @@ export function deliverContextFor(cfg, repo = "") {
   }
 }
 
-// 固定提示词只从配置给的路径读；缺配置或文件读不到都直接报错，不做内置文案兜底。
+// 编排提示词：配置给了路径就读那份（运行时副本、人工可改）；没给就用代码内置的。
+// 给了路径但读不到 / 是空文件，仍然直接报错，不悄悄退回内置（那样人改了却不知道没生效）。
 // lane=merge 读合并会话提示词，其余读派单会话提示词。
 export function readFixedPrompt(cfg, repo = "", { lane = "dispatch" } = {}) {
   const dc = deliverContextFor(cfg, repo)
   const file = String((lane === "merge" ? dc.mergePromptFile : dc.promptFile) ?? "").trim()
-  if (!file) {
-    const where = dc.product
-      ? `产品 ${dc.product} 的 products[].${lane === "merge" ? "mergePromptFile" : "promptFile"}`
-      : `配置 deliver.${lane === "merge" ? "mergePromptFile / promptFile" : "promptFile"}`
-    throw new Error(`没有给固定提示词路径（${where}）`)
-  }
+  if (!file) return builtinPrompt(lane)
   let text = ""
   try {
     text = fs.readFileSync(file, "utf8")

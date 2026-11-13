@@ -45,7 +45,7 @@ description: 端到端接单工作流：派活、建工作区、开会话、监�
 }
 ```
 
-- `deliver.mode: "new"`（默认）：每条通知**新建一条会话**，首句 = `deliver.promptFile`（固定提示词副本）+ `监控项目：<deliver.projectDir>` + 正文；新会话 `notify: false`，不进监听。
+- `deliver.mode: "new"`（默认）：每条通知**新建一条会话**，首句 = 编排提示词（**默认代码内置的** `src/builtin/dispatch-prompt.md` / `merge-prompt.md`；`deliver.promptFile` 给了路径才读那份）+ `监控项目：<deliver.projectDir>` + 正文；新会话 `notify: false`，不进监听。
 - `deliver.mode: "existing"` 才是塞回已有会话：`session` 写 `auto` → 取 `MCP_VM_CONVERSATION_ID`；也可写会话 id 或侧边栏标题。
 - 命令行：`foreman run --notify <会话id|标题>` 只改这一轮登记的通知目标（`existing` 模式）；`--no-notify` = 这一轮不登记监听，因此没有通知。
 - `existing` 下三种情况**不发**：`notify.enabled: false`、目标就是被监听会话自己、没配目标也没有环境变量；结论不在 `notify.events` 白名单也不发（显式盯的 `session-done` 例外）。
@@ -54,7 +54,7 @@ description: 端到端接单工作流：派活、建工作区、开会话、监�
 
 ## PR 监听（服务里 5 分钟一轮）
 
-服务另有定时器：每 `prWatch.intervalSeconds`（默认 300s）扫各仓库 open PR，**作者不是自己的（`pickup.me`）** 的单先过一遍冲突（有冲突的默认不报，`filterConflicts`），剩下的**交给编排 agent**：`deliver.mode: "new"`（默认）**每次新建一条会话**，首句是固定提示词（`deliver.promptFile`）+ 监控项目 + PR 列表；`deliver.mode: "existing"` 才塞回 `prWatch.notifyTarget`（默认 `earliest`，最早登记的调用方会话）。通知里带 `foreman pr merge <N> --repo R`；合并由编排 agent 核对工单后执行，合不了 foreman 回理由。命令：
+服务另有定时器：每 `prWatch.intervalSeconds`（默认 300s）扫各仓库 open PR，**作者不是自己的（`pickup.me`）** 的单先过一遍冲突（有冲突的默认不报，`filterConflicts`），剩下的**交给编排 agent**：`deliver.mode: "new"`（默认）**每次新建一条会话**，首句是编排提示词（默认用代码内置的那份）+ 监控项目 + PR 列表；`deliver.mode: "existing"` 才塞回 `prWatch.notifyTarget`（默认 `earliest`，最早登记的调用方会话）。通知里带 `foreman pr merge <N> --repo R`；合并由编排 agent 核对工单后执行，合不了 foreman 回理由。命令：
 
 ```bash
 foreman pr poll   # 立刻扫一轮（checked / notified / target）

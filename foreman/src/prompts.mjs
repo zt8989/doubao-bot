@@ -1,5 +1,6 @@
 // 提示词与结果协议：会话里那个执行器必须交 RESULT 块，foreman 只认这个块。
 import { slugify } from "./util.mjs"
+import { builtinPrompt } from "./builtin-prompts.mjs"
 
 export const RESULT_SPEC = `结束时（而且只在结束时）输出一个 RESULT 块，格式严格如下：
 <RESULT>{"status":"done","branch":"<分支名>","pr":<PR 编号>,"prUrl":"<PR 链接>","tests":"<你跑过的测试命令与结果，一行>","summary":"<改了什么，50 字内>"}</RESULT>
@@ -68,13 +69,13 @@ export function handoff({ repo, issue, worktree, branch }) {
     .join("\n")
 }
 
-// deliverPrompt：每次新建会话的首句 = 编排提示词（运行时副本，路径只从配置来）
+// deliverPrompt：每次新建会话的首句 = 编排提示词（配置给了路径就读运行时副本，没给用内置的）
 // + 产品 + 监控项目 + 触发原因 + 本次通知正文。
-// 关键：这是**编排**提示词，新会话只决定「续跑 / 继续接单 / 自动合并」，
+// 关键：这是**编排**提示词，新会话只决定「续跑 / 继续接单 / 判合并」，
 // 不是「编排提示词 + 去完成这张工单」——实现永远在执行会话里，不在这条投递会话里。
 export function deliverPrompt({ fixed = "", projectDir = "", product = "", kind = "", text = "", running = null, maxRunning = null, lane = "" } = {}) {
-  const head = String(fixed ?? "").trim()
-  if (!head) throw new Error("固定提示词为空：检查 deliver.promptFile / products[].promptFile 指向的文件")
+  const laneName = lane === "merge" ? "merge" : "dispatch"
+  const head = String(fixed ?? "").trim() || builtinPrompt(laneName).trim()
   const body = String(text ?? "").trim()
   const online = []
   if (product) online.push(`产品：${String(product).trim()}`)

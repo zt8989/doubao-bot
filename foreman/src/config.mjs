@@ -75,14 +75,14 @@ export const DEFAULTS = {
     filterConflicts: true,
   },
   // 投递方式：结论/PR 不再塞回已有会话，默认每次新建一条豆包会话来接手。
-  // mode=new 用 dws open 新开一条会话，首句 = promptFile（固定提示词，运行时副本）+ 监控项目 + 通知正文；
+  // mode=new 用 dws open 新开一条会话，首句 = 编排提示词（默认用代码内置的，配置给了路径才读那份运行时副本）+ 产品 + 监控项目 + 通知正文；
   // mode=existing 是旧行为（按 notify.session / prWatch.notifyTarget 找回已有会话塞消息）。
-  // promptFile 为空时启动不报错，投递时才报（便于先跑通再补提示词）；路径给了但文件不存在直接报错。
+  // promptFile 留空就用内置提示词（src/builtin/*.md）；路径给了但文件不存在直接报错。
   deliver: {
     mode: "new",
-    // 派单会话的提示词（续跑 / 接单）。
+    // 派单会话的提示词（续跑 / 接单 / 判合并）；留空用内置。
     promptFile: "",
-    // 合并会话的提示词；留空回落 promptFile。
+    // 合并会话的提示词（判可合性）；留空用内置。
     mergePromptFile: "",
     // 监控项目根目录：写进新会话首句，不出现在代码里。
     projectDir: "",

@@ -179,13 +179,14 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 ### 通知口径：默认每次新建会话
 
 - `deliver.mode: "new"`（默认）：**每条通知都新建一条豆包会话**，且**按通道分两类会话**：
-  - **派单会话**（`foreman-派单-<YYYYMMDD-HHmm>`）：读 `promptFile`（派单提示词），只做**续跑 / 接单**；
-  - **合并会话**（`foreman-合并-<YYYYMMDD-HHmm>`）：读 `mergePromptFile`（合并提示词，回落到 `promptFile`），只做**判断可合性 + 解冲突**，交 RESULT 给 workflow 合并。
-  首句 = 对应通道的提示词（运行时副本）+ `产品：<products[].name>` + `监控项目：<products[].projectDir>`
+  - **派单会话**（`foreman-派单-<YYYYMMDD-HHmm>`）：用派单提示词（`src/builtin/dispatch-prompt.md`，配置里 `promptFile` 给了路径才读那份），只做**续跑 / 接单 / 判合并**；
+  - **合并会话**（`foreman-合并-<YYYYMMDD-HHmm>`）：用合并提示词（`src/builtin/merge-prompt.md`，`mergePromptFile` 给了路径才读那份），只做**判断可合性 + 解冲突**，交 RESULT 给 workflow 合并。
+  首句 = 对应通道的提示词（**默认代码内置的**）+ `产品：<products[].name>` + `监控项目：<products[].projectDir>`
   + `触发：<类型>` + **`通道：派单（在跑 n / 上限 m）`** 或 **`通道：合并（1 并发，只管合 PR）`** + 这条通知正文，
   用 `dws open --no-wait` 投递（只确认首句送达，不等第一轮回复）。
   **这条会话是编排者，不是执行者**：首句明确写了「不要自己改代码实现工单」，通知正文只是决策输入，不是派给它的实现任务。
-  提示词与项目目录按工单所属产品取（`products[]`）；没配 products 时用顶层 `deliver.promptFile` / `deliver.mergePromptFile` / `deliver.projectDir`。
+  **提示词默认内置、随代码走**：不改提示词就不用配任何文件，`promptFile` / `mergePromptFile` 留空即用内置；要给某个产品单独换一份，再在 `products[]` 里写路径。
+  项目目录按工单所属产品取；没配 products 时用顶层 `deliver.projectDir`。
   新会话记进账本 `sessions`（`kind` = `deliver:dispatch` / `deliver:merge`、`notice` = 触发类型）但 `notify: false`，**不纳入监听**——它是编排者，纳入会自己通知自己。
   合并会话的判断结论由 `mergeVerdictOnce` 单独收（只认 `notice: "PR待合并"`，`merge.verdictAutoMerge` 关掉就只判不合）。
 - `deliver.mode: "existing"`：旧行为，塞回已有会话——目标 = 登记时写的 `notifyTo`，
@@ -274,15 +275,13 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 
 ### 产品分组（products）
 
-一个产品 = 一套自己的项目群（仓库列表）+ 派单/合并两份提示词 + 监控项目根目录：
+一个产品 = 一套自己的项目群（仓库列表）+ 监控项目根目录；提示词默认用代码内置的两份（`src/builtin/dispatch-prompt.md` / `merge-prompt.md`），只有想给这个产品单独换一份时才写 `promptFile` / `mergePromptFile`：
 
 ```json
 "products": [
   {
     "name": "win-ai-stack",
     "projectDir": "~/Documents/workspace/win-ai-stack",
-    "promptFile": "~/.foreman/prompts/派单提示词.md",
-    "mergePromptFile": "~/.foreman/prompts/合并提示词.md",
     "repos": [
       { "name": "win-ai-harness", "repo": "yyzl/win-ai-harness", "dir": "~/Documents/workspace/win-ai-stack/win-ai-harness", "base": "sit-20261126" },
       { "name": "yyjz-oa-cloud", "repo": "yyzl/yyjz-oa-cloud", "dir": "~/Documents/workspace/win-ai-stack/YYJZ_OA_CLOUD", "base": "sit-20261126" }
@@ -291,16 +290,16 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
   {
     "name": "<另一个产品>",
     "projectDir": "<它的项目根目录>",
-    "promptFile": "<这个产品自己的派单提示词>",
-    "mergePromptFile": "<这个产品自己的合并提示词>",
+    "promptFile": "<可选：这个产品自己的派单提示词，留空用内置>",
+    "mergePromptFile": "<可选：这个产品自己的合并提示词，留空用内置>",
     "repos": [ { "repo": "owner/name", "dir": "…", "base": "…" } ]
   }
 ]
 ```
 
 - 配了 `products` 就以它为准：捞单、PR 扫描、投递都按产品走（内部把各产品仓库摊平成一张清单）；
-- `promptFile` / `mergePromptFile` / `projectDir` 留空时回落顶层 `deliver` 同名配置（老配置不用改；`mergePromptFile` 再回落到 `promptFile`）；
-- 加新产品只改配置：加一段 `products[]`，给它的两份提示词，重启服务即可，不用动代码；
+- `promptFile` / `mergePromptFile` / `projectDir` 留空时回落顶层 `deliver` 同名配置（老配置不用改；`mergePromptFile` 再回落到 `promptFile`）；这些路径全空就用代码内置的两份提示词，所以新配置可以完全不写提示词；
+- 加新产品只改配置：加一段 `products[]`（提示词不写就用内置），重启服务即可，不用动代码；
 - PR 一轮可能跨多个仓库：全部来自同一仓库才按产品取提示词，混合时用全局 `deliver`。
 
 ### 自动巡检（pickup.auto）
@@ -353,8 +352,8 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
   "merge": { "enabled": false, "style": "merge", "deleteBranch": true, "concurrency": 1, "intervalSeconds": 60 },
   "deliver": {
     "mode": "new",
-    "promptFile": "~/.foreman/prompts/派单提示词.md",
-    "mergePromptFile": "~/.foreman/prompts/合并提示词.md",
+    "promptFile": "",
+    "mergePromptFile": "",
     "projectDir": "~/Documents/workspace/win-ai-stack",
     "namePrefix": "foreman",
     "waitFirstReply": false
@@ -406,9 +405,9 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
   `pr-open` 把 PR 记成 merged（记录留着给 prWatch 去重），`dispatch` 摘执行会话监听并收掉 `sessions` 记录，
   `workspace` 关 herdr 工作区 / 删 worktree / 删本地分支，`cleanup` 兜底（空目录、git 元数据、队列残留），
   `archive` 归档执行会话。合并没带 `--issue` 时按 PR 反查工单（流程实例 → 账本 `pr` 字段），close 节点不会空转。
-- **`deliver` 管「通知往哪去」**：`mode: "new"`（默认）每次新建会话投递，`promptFile` 是**派单提示词**的运行时副本路径，
-  `mergePromptFile` 是**合并提示词**的路径（留空回落 `promptFile`），
-  （都在 `~/.foreman/prompts/` 下；路径只从配置来，代码里没有内置文案），`projectDir` 是写进首句的监控项目，
+- **`deliver` 管「通知往哪去」**：`mode: "new"`（默认）每次新建会话投递，`promptFile` 是**派单提示词**的路径（可选），
+  `mergePromptFile` 是**合并提示词**的路径（可选，留空回落 `promptFile`），
+  **两者都留空就用代码内置的** `src/builtin/dispatch-prompt.md` / `merge-prompt.md`（提示词随代码走，不再依赖 `~/.foreman/prompts/` 下的运行时副本）；`projectDir` 是写进首句的监控项目，
   `waitFirstReply: false` 表示只确认首句送达、不等第一轮回复。`mode: "existing"` 退回塞回已有会话。
 - **通知默认开、且只有常驻服务这一条路**：会话跑完后，由服务按 `deliver.mode` 投递
   「哪条单 + 结论类别 + 分支 + PR 链接（有则带）」。run 自己不发通知。

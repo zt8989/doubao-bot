@@ -36,10 +36,13 @@ test("deliveryMode：手搓 cfg 缺 deliver 时保持旧行为（existing）", (
   assert.equal(deliveryMode({ deliver: { mode: "existing" } }), "existing")
 })
 
-test("readFixedPrompt：路径只从配置来，缺了/读不到/空文件都直接报错", () => {
+test("readFixedPrompt：配置没给路径就用内置提示词；给了路径读不到/空文件仍然报错", () => {
   const dir = tmpDir()
   try {
-    assert.throws(() => readFixedPrompt({}), /deliver\.promptFile/)
+    // 没配 promptFile：用代码内置的派单提示词（不再要求外部 md）。
+    assert.match(readFixedPrompt({}), /派单会话提示词/)
+    assert.match(readFixedPrompt({}), /判合并/)
+    assert.match(readFixedPrompt({}, "", { lane: "merge" }), /合并助手/)
     const missing = path.join(dir, "nope.md")
     assert.throws(() => readFixedPrompt({ deliver: { promptFile: missing } }), /读不到固定提示词/)
     const empty = path.join(dir, "empty.md")
@@ -75,7 +78,9 @@ test("deliverPrompt：编排提示词原文在前，只给编排决策，不派�
   assert.ok(!out.includes("下面是本次要处理的内容"))
   // 没给项目/类型/在跑数也要能拼出来
   assert.match(deliverPrompt({ fixed, text: "只有正文" }), /只有正文/)
-  assert.throws(() => deliverPrompt({ fixed: "  ", text: "x" }), /固定提示词为空/)
+  // 没给固定提示词 = 用内置的（派单/合并各一份），不再报「固定提示词为空」。
+  assert.match(deliverPrompt({ fixed: "  ", text: "x" }), /派单会话提示词/)
+  assert.match(deliverPrompt({ text: "x", lane: "merge" }), /合并助手/)
 })
 
 test("noticeSessionName：前缀 + 投递类型 + 本地时间戳", () => {
@@ -143,12 +148,19 @@ test("deliverNewSession：合并会话走自己的提示词、自己的命名，
   }
 })
 
-test("deliverNewSession：固定提示词没配好就报错，不静默降级", async () => {
+test("deliverNewSession：没配固定提示词就用内置的，照常开会话", async () => {
   const dir = tmpDir()
   try {
-    const cfg = cfgWith(dir, { deliver: { mode: "new" } })
-    const dws = { openNew: async () => { throw new Error("不该走到开会话") } }
-    await assert.rejects(() => deliverNewSession({ cfg, dws, log: () => {} }, { text: "x" }), /deliver\.promptFile/)
+    const cfg = cfgWith(dir, { deliver: { mode: "new", projectDir: "/w/win-ai-stack" } })
+    const calls = []
+    const dws = { openNew: async (arg) => { calls.push(arg); return { convId: "conv-builtin" } } }
+    const out = await deliverNewSession({ cfg, dws, log: () => {} }, { text: "【foreman】结论", kind: "工单结论" })
+
+    assert.equal(calls.length, 1)
+    assert.match(calls[0].prompt, /派单会话提示词/)
+    assert.match(calls[0].prompt, /判合并/)
+    assert.match(calls[0].prompt, /监控项目：\/w\/win-ai-stack/)
+    assert.equal(out.convId, "conv-builtin")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
