@@ -23,14 +23,23 @@ doubao-bot/
 三个工具互不代偿：dws 不碰工单和 PR，opencli 不碰豆包会话，herdr 只管 worktree，
 串联只发生在 `foreman` 里。
 
-## 挂载（都只有一份代码）
+## 挂载（源码只读，线上跑 dist）
 
-- **命令**：`dws`、`foreman` 各自 `npm link`，改源码立即生效
-  （`cd dws && npm link`；`cd foreman && npm link`）。
-- **技能**：`.user_skills/{dws,foreman,gitea-opencli,workflow}` 都是指向 `skills/*` 的软链。
+可上线的东西都先发布到 `dist/`，链接指向 dist 而不是源码——开发时改源码不会立刻影响
+线上命令，要上线就 commit 后跑一次发布。工作区有未提交改动的单元默认跳过。
+
+```bash
+scripts/publish.sh                 # 全部：bin（dws/foreman）+ skill + gitea 适配器
+scripts/publish.sh dws             # 只发某个单元：foreman / dws / skills / adapters
+scripts/publish.sh --allow-dirty   # 有未提交改动也照发（默认跳过脏单元）
+```
+
+- **命令**：`dws`、`foreman` 由 `npm link` 装到全局，指向 `dist/dws`、`dist/foreman`。
+- **技能**：`~/Doubao/skills/{dws,foreman,gitea-opencli,workflow}` 软链到 `dist/skills/*`。
 - **gitea 适配器**：`~/.opencli/clis/gitea` 必须保持**真目录**（opencli 的发现逻辑
   只扫 `entry.isDirectory()`，目录整体软链会让整条 `gitea` 命令消失），里面的 `.js`
-  逐个软链到 `adapters/gitea`。新增/删除适配器文件后跑一次：
+  逐个软链到 `dist/adapters/gitea`。发布 `adapters` 时会自动跑一次挂载；只改了适配器
+  想单独挂，也可以直接跑：
 
 ```bash
 bash scripts/link-adapter.sh    # 建文件软链 + 让适配器 import 能解析到全局 opencli 包

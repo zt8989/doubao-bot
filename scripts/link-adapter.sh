@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
-# 把仓库里的 gitea 适配器挂到 opencli 能认的位置（可重复执行）。
+# 把 **已发布** 的 gitea 适配器挂到 opencli 能认的位置（可重复执行）。
 #
 # 为什么要文件级软链：opencli 的发现逻辑是 readdir(clis, {withFileTypes}) 后
 # 只保留 entry.isDirectory()，目录软链会被直接跳过（整条 gitea 命令会消失）。
-# 所以 ~/.opencli/clis/gitea 必须是真目录，里面的 .js 逐个软链到本仓库。
+# 所以 ~/.opencli/clis/gitea 必须是真目录，里面的 .js 逐个软链到发布产物。
 #
-# 另外适配器 import 的是 `@jackwener/opencli/registry`，Node 按真实路径解析，
-# 所以仓库里要有一个指向全局包的 node_modules/@jackwener/opencli。
+# 链的是 dist/adapters/gitea，不是 adapters/gitea 源码：开发时改源码不会立刻作用到
+# 线上 opencli gitea 命令；要上线先 scripts/publish.sh adapters。
+#
+# 另外适配器 import 的是 `@jackwener/opencli/registry`，Node 按真实路径解析：
+# dist/adapters/gitea/*.js 向上找到仓库 node_modules/@jackwener/opencli（指向全局包）。
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC="$REPO/adapters/gitea"
+SRC="${ADAPTER_SRC:-$REPO/dist/adapters/gitea}"
 DST="${OPENCLI_CLIS_DIR:-$HOME/.opencli/clis}/gitea"
 
-[ -d "$SRC" ] || { echo "找不到适配器源码：$SRC" >&2; exit 1; }
+[ -d "$SRC" ] || { echo "找不到适配器发布产物：$SRC（先跑 scripts/publish.sh adapters）" >&2; exit 1; }
 command -v opencli >/dev/null || { echo "PATH 里没有 opencli" >&2; exit 1; }
 
 # 1) 让适配器的 import 能解析到全局包
@@ -23,7 +26,7 @@ mkdir -p "$REPO/node_modules/@jackwener"
 ln -sfn "$PKG" "$REPO/node_modules/@jackwener/opencli"
 echo "shim: node_modules/@jackwener/opencli -> $PKG"
 
-# 2) 真目录 + 每个文件软链回仓库
+# 2) 真目录 + 每个文件软链到发布产物
 mkdir -p "$DST"
 # 清掉仓库里已经删掉的文件的旧链接
 for old in "$DST"/*; do
