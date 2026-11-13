@@ -163,7 +163,7 @@ test("--no-notify：不登记 watch，sessions 里 notify=false（不被自动�
 
 // ---- 端到端异步 ----
 
-test("端到端：poll 驱动 running→finished 恰好发 1 次；同指纹再 poll 0 次；重启后仍 0 次", async () => {
+test("端到端：poll 跑完只落一次痕、一条消息都不发；同指纹不再处理；重启后仍不发", async () => {
   const dir = tmpDir()
   let server
   try {
@@ -199,18 +199,18 @@ test("端到端：poll 驱动 running→finished 恰好发 1 次；同指纹再 
     assert.equal(r.notified, 0)
     assert.equal(notified.length, 0)
 
-    // 第二轮 finished + 指纹变化 → 通知 1 次
+    // 第二轮 finished + 指纹变化 → notify 节点只落痕，不发消息
     r = await server.poll()
     assert.equal(r.settled, 1)
-    assert.equal(r.notified, 1)
-    assert.equal(notified.length, 1)
-    assert.equal(notified[0].target, "boss")
-    assert.match(notified[0].text, /【foreman】demo\/demo #1/)
+    assert.equal(r.notified, 0)
+    assert.equal(notified.length, 0, "通知停用期间一条都不发")
+    const led = new Book(cfg.stateFile).notified["conv-e2e"]
+    assert.match(led.fingerprint, /^[0-9a-f]{12}$/)
 
-    // 第三轮同指纹 → 不发
+    // 第三轮同指纹 → 不再处理
     r = await server.poll()
     assert.equal(r.notified, 0)
-    assert.equal(notified.length, 1)
+    assert.equal(notified.length, 0)
 
     // 关闭服务（模拟重启）
     await server.close()
@@ -221,7 +221,7 @@ test("端到端：poll 驱动 running→finished 恰好发 1 次；同指纹再 
     try {
       r = await server2.poll()
       assert.equal(r.notified, 0, "重启后不重发")
-      assert.equal(notified.length, 1)
+      assert.equal(notified.length, 0)
       await server2.close()
     } catch (e) {
       await server2.close()
@@ -266,9 +266,8 @@ test("notify 抛错 → dwsErrors 计数 + 不崩", async () => {
   }
 })
 
-// 真实踩到的坑：dws 把消息发进会话了，却回一个「豆包没有把这条消息发出去」。
-// 服务按失败处理、账本没记指纹，于是每轮 poll 又补一遍，调用方会话被刷成重复通知。
-test("notify 报假失败 → 同一指纹最多发 maxAttempts 次，不再每轮重发", async () => {
+// 通知停用期间：不管 poll 多少轮，一条消息都不发；同一指纹只落一次痕。
+test("notify 停用：连跑五轮也不调用 notify，同一指纹只落一次痕", async () => {
   const dir = tmpDir()
   let server
   try {
@@ -279,10 +278,9 @@ test("notify 报假失败 → 同一指纹最多发 maxAttempts 次，不再每�
     const dws = {
       status: async () => ({ name: "conv-ghost", streaming: false, finished: true, chars: 100, head: "H", tail: "T", status: "ok" }),
       info: async () => ({ lastReply: '<RESULT>{"status":"done","summary":"做完了"}</RESULT>' }),
-      // 每次都“报失败”，但消息其实已经到了（sent 记下来模拟真实投递）
       notify: async (target, text) => {
         sent.push({ target, text })
-        throw new Error("dws send 失败：✗ 豆包没有把这条消息发出去")
+        throw new Error("通知停用期间不该调用 notify")
       },
     }
     server = await startServer({ cfg, book, dws, log: () => {} })
@@ -291,11 +289,11 @@ test("notify 报假失败 → 同一指纹最多发 maxAttempts 次，不再每�
       const r = await server.poll()
       notified += r.notified
     }
-    assert.equal(sent.length, 2, "同一指纹只发两次（首发 + 一次补偿），不随 poll 轮数增长")
-    assert.equal(notified, 0, "报失败时不计 notified")
+    assert.equal(sent.length, 0, "五轮 poll 一条都不发")
+    assert.equal(notified, 0, "notify 节点只落痕，不计已通知")
     const led = new Book(cfg.stateFile).notified["conv-ghost"]
-    assert.equal(led.attempts, 2)
-    assert.match(led.lastError, /没有把这条消息发出去/) 
+    assert.match(led.fingerprint, /^[0-9a-f]{12}$/)
+    assert.equal(led.attempts ?? 0, 0, "不再记发送尝试次数")
   } finally {
     if (server) await server.close()
     fs.rmSync(dir, { recursive: true, force: true })

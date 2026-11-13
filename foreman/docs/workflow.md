@@ -40,7 +40,7 @@ service.mjs                  常驻服务、定时器、RPC；只在关键节点
 | close | `issue.closed` | 是 | 关联工单已关闭（关单） |
 | cleanup | `workspace.cleaned` | 是 | herdr 工作区与 worktree 已清理 |
 | archive | `session.archived` | 是 | 会话已归档收起 |
-| notify | `notice.delivered` | 是 | 结论已投递给编排会话 |
+| notify | `notice.delivered` | 是 | 结论节点（只落痕，暂不发消息） |
 
 `Lifecycle.emit(event, payload)` 的顺序：**先跑 `hooks[event]`，再按注册顺序跑每个适配器的 `on(event, payload)`**。
 适配器善后失败只写日志，不打断主流程（合并成功不会因为归档失败被推翻）。
@@ -78,10 +78,10 @@ workflow 面板能看到两条流程的全部节点。
    - `mergeable=true` → 走 `runMergeTask`（与 CLI `foreman pr merge` 共用 `ctx.mergeChain`）合并 + 收尾流水线；
    - `need_decision` / `blocked` / merge 失败 → 记 `mergeJudge`，写控制台 `pr_judge` 事件，交给人；
    - 判过就不再读这条会话（读 `dws info` 要切用户窗口）；`merge.verdictAutoMerge: false` 时只判断不合。
-4. 合并结果只落账本与控制台（`mergeAsk` / `mergeTask` / `pr_merge`），**不再新开一条会话发「合并完成」**：
-   合并助手交完 RESULT 就停手，合不合并、合没合上都由代码记账，回执会话没有可接的下一步。
+4. 合并结果只落账本与控制台（`mergeAsk` / `mergeTask` / `pr_merge`），**不回执、不通知任何人**：
+   关单 / 清工作区 / 归档做完就收工，合并助手交完 RESULT 也停手；合失败同样只记账，原因看 `mergeAsk.error`。
 
-会话跑完仍会把「PR 已开好」记进账本并发通知，但真正落地合并的是 workflow，不是会话自己。
+会话跑完仍会把「PR 已开好」记进账本（notify 节点只落痕、不发消息），真正落地合并的是 workflow，不是会话自己。
 
 ## 适配器契约
 

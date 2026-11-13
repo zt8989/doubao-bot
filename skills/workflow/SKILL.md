@@ -1,6 +1,6 @@
 ---
 name: workflow
-description: 端到端接单工作流：派活、建工作区、开会话、监听、通知、合并由 foreman 串起来；只有**建 PR（`foreman pr open`）与合并（`foreman pr merge`）**必须经 foreman，opencli gitea 的读与建单/改单/评论/关单、herdr、dws 会话都直连。当用户说「走一遍工作流」「整条链路」「接单到出 PR 怎么串」「收口通知」「几个工具怎么分工」，或问某一环卡在哪（app_busy / 会话没开起来 / 验收不过 / 卡在 pr-open）时使用。
+description: 端到端接单工作流：派活、建工作区、开会话、监听、结论落账、合并由 foreman 串起来；只有**建 PR（`foreman pr open`）与合并（`foreman pr merge`）**必须经 foreman，opencli gitea 的读与建单/改单/评论/关单、herdr、dws 会话都直连。当用户说「走一遍工作流」「整条链路」「接单到出 PR 怎么串」「结论落在哪」「几个工具怎么分工」，或问某一环卡在哪（app_busy / 会话没开起来 / 验收不过 / 卡在 pr-open）时使用。
 ---
 
 # workflow：一条工单从接到收
@@ -22,20 +22,31 @@ description: 端到端接单工作流：派活、建工作区、开会话、监�
    打印会捞哪条、worktree 建在哪、首句提示词长什么样；不建工作区、不动会话。
    接单顺序由配置决定：**我的（作者 `pickup.me`）→ 无人认领 → 他人**，同档最老先接。
 2. **派活**：`foreman run --once`（常驻用 `foreman run --every 1800`）。
-   foreman 内部依次做：选单（`opencli gitea search`，标签用数字 id）→ 建 worktree（`herdr`，失败退回 `git worktree add`）→ `dws open --name foreman-<仓库>-<N>` 发 kickoff → 账本记 `working` + `agent` → 登记监听。**派完只返回 `dispatched`，不等回复。**
-   kickoff 已经把边界写死：只在这个 worktree 改；自测通过后 `git push -u origin <分支>`，再用 `foreman pr open … --issue N` 开 PR；不合并、不 force push。
-3. **会话侧产出**：只在 worktree 改代码 → 本地提交 → 自测 → push → `foreman pr open --repo <仓库> --head <分支> --title "fix(#N): …" --body "<自证>" --issue N`（基线取配置 `repos[].base`，不写死）。
-   PR **只能**经 foreman 建（`pr open`），它写账本、立刻落 SQLite 控制台；工单侧评论/关单/改标签可以直接 `opencli gitea`，不经 foreman 也不影响流转。最后交 RESULT：`done` 必带 `pr` / `prUrl` / `tests`。
-4. **收结果**：服务在后台轮询 `dws status` + `dws info`，取最后一个 `<RESULT>` 块，把结论用 `dws send` 回给登记的调用方。
-   `planner.enabled: true` 时**同一条通知**里还会带上：跑完是 `done`、在跑单 < `maxRunning`、队列里还有活 → 「可以继续接单」+ 工单列表；不是 `done` → 「需要你看一下」+ 原因与 retry 提示。
+   foreman 内部依次做：选单（`opencli gitea search`，标签用数字 id）→ **按工程各建一个 worktree**（`herdr`，失败退回 `git worktree add`）→ `dws open --name foreman-<工单所在仓库>-<N>` 发 kickoff → 账本记 `working` + `agent` + `workspaces` → 登记监听。**派完只返回 `dispatched`，不等回复。**
+   kickoff 把边界按工程写死：**一工程一工作区**，每个工程只在自己那条工作区里改；要改的工程不在清单里就先 `foreman ws add` 现开（别交 need_decision、别动主 checkout）；每个工程自测通过后各自 `git push -u origin <分支>`，各自用 `foreman pr open … --issue N --issue-repo <工单所在仓库>` 开 PR；不合并、不 force push。
+3. **会话侧产出**：在每个工程自己的工作区改代码 → 各自提交 → 各自自测 → 各自 push → 各自 `foreman pr open --repo <该工程> --head <分支> --title "fix(#N): …" --body "<自证>" --issue N [--issue-repo <工单所在仓库>]`（基线取配置 `repos[].base`，不写死）。
+   PR **只能**经 foreman 建（`pr open`），它写账本、立刻落 SQLite 控制台；工单侧评论/关单/改标签可以直接 `opencli gitea`，不经 foreman 也不影响流转。最后交 RESULT：`done` 用 `prs[]` 交每条 PR（一个工程一条），`tests` 写清每个工程跑了什么。
+4. **收结果**：服务在后台轮询 `dws status` + `dws info`，取最后一个 `<RESULT>` 块，推进工单状态与账本。
+   当前 notify 节点**只落痕、不发消息**（不新建会话、不 `dws send`、不带续接催办）；`planner` 的续接内容也不再拼进任何消息。
    看进度用 `foreman tasks`，看服务用 `foreman status`；**不要拿 `dws status` 手工判**（那是服务内部的事）。
-5. **合并**：`merge.enabled: true` 时 **foreman 自己合并**（`pr-merge` + `close`），每张 PR 只合一次（账本 `mergeAsk`），`tests` 为空不自动合，冲突只记录不 force merge。通知正文会带「合并：已合并 PR #N」或「合并失败：…」。
+5. **合并**：`merge.enabled: true` 时 **foreman 自己合并**（`pr-merge` + `close`），每张 PR 只合一次（账本 `mergeAsk`），`tests` 为空不自动合，冲突只记录不 force merge。
+   **合完/合失败都不回执通知**：结果只落账本与控制台（`mergeAsk` / `pr_merge`），关单、清工作区、归档在 `afterMerge` 做完就收工。
    要人工决定就 `enabled: false`（默认），PR 停在 `pr-open` 等人。
-6. **回炉与收尾**：卡住的单先 `foreman tasks` 看状态，再 `foreman retry <仓库名|owner/name> <N>` 放回队列（attempts 清零）；worktree 需要清理时按 `~/.foreman/worktrees/<仓库>/fix-issue-N` 手动 `git worktree remove`（这是唯一需要动 git 的收尾动作）。
+6. **回炉与收尾**：卡住的单先 `foreman tasks` 看状态，再 `foreman retry <仓库名|owner/name> <N>` 放回队列（attempts 清零）；worktree 需要清理时按 `~/.foreman/worktrees/<工程>/fix-issue-N` 手动 `git worktree remove`（这是唯一需要动 git 的收尾动作；跨工程的单有好几个目录，按工程逐个清）。
 
-## 通知（异步，只有常驻服务发）
+## 一工程一工作区（跨工程工单）
 
-`foreman run` 派完就返回，不发通知。会话跑完后由服务判定并发：
+一张单要求同时改两个仓库（比如 `win-ai-harness/web` 与 `yyjz-oa-frontend/apps/admin` 的镜像页）时，**不是一张单一个 worktree，而是一个工程一个 worktree、一个工程一条 PR**：
+
+- 派单时主仓库（工单所在仓库）永远有工作区，其余工程从工单标题+正文里的 `owner/name`、`<仓库名>/<子路径>` 或仓库名认出来（只在本产品内认），各建一个。
+- 首句把每个工程的工作区列成清单，并写死「不在这张清单里的工程，先 `foreman ws add --repo <工程> --issue <owner/name>#N` 现开一个（幂等），再进去改」。**执行会话不该因为跨工程交 need_decision。**
+- 每个工程各自提交、各自 push、各自 `foreman pr open --repo <该工程> … --issue N --issue-repo <工单所在仓库>`；账本把几条 PR 记成同一张单的 `prs[]`。
+- 合并按工程逐条来：合一条只清那个工程的工作区；**所有工程的 PR 都合完才关单**。RESULT 里 `prs` 多于一条时不自动合（`multi-pr`），交编排核对后逐条 `foreman pr merge`。
+- 现场补开/查看：`foreman ws add --repo <工程> --issue <owner/name>#<N>`、`foreman ws list --issue <owner/name>#<N>`。
+
+## 通知（notify 节点保留，当前只落痕）
+
+`foreman run` 派完就返回，不发通知。会话跑完后由服务判定并发；判定照做、指纹照记，notify 节点落一次痕，**但不向谁发消息**：
 
 ```json
 "notify": {
@@ -45,12 +56,11 @@ description: 端到端接单工作流：派活、建工作区、开会话、监�
 }
 ```
 
-- `deliver.mode: "new"`（默认）：每条通知**新建一条会话**，首句 = 编排提示词（**默认代码内置的** `src/builtin/dispatch-prompt.md` / `merge-prompt.md`；`deliver.promptFile` 给了路径才读那份）+ `监控项目：<deliver.projectDir>` + 正文；新会话 `notify: false`，不进监听。
-- `deliver.mode: "existing"` 才是塞回已有会话：`session` 写 `auto` → 取 `MCP_VM_CONVERSATION_ID`；也可写会话 id 或侧边栏标题。
-- 命令行：`foreman run --notify <会话id|标题>` 只改这一轮登记的通知目标（`existing` 模式）；`--no-notify` = 这一轮不登记监听，因此没有通知。
-- `existing` 下三种情况**不发**：`notify.enabled: false`、目标就是被监听会话自己、没配目标也没有环境变量；结论不在 `notify.events` 白名单也不发（显式盯的 `session-done` 例外）。
-- 正文含仓库、单号、结论类别、执行会话 id（编排会话靠它 `dws info` 排查/续跑）、PR 链接，以及合并结果（有则带）；没解析出 RESULT 时贴执行会话最后一条回复原文（末 1500 字）。**自动合并成功后服务会做本地收尾**：关 herdr 工作区、删 worktree、本地分支 `-d` 安全删（有未提交改动就保留并写明），通知带「清理：…」和 `<RESULT>{status:done, merged:true, pr, cleanup}</RESULT>`，通知会话随后可 `dws archive` 归档。发送失败只写 `service.log`、计 `dwsErrors`，不打断轮询。
-- **服务没在跑时通知会丢**：`foreman ping` → `foreman serve` → `foreman watch list` 看登记 → `foreman watch poll` 补一轮 → `foreman status` 看 `lastPollAt` / `pollCount` / `dwsErrors`。
+- **notify 节点保留，但暂时只落痕、不投递**：会话跑完照常判结论、推进工单状态（`done`→`pr-open`/`done`，`need_decision`→`needs-human`，`blocked`/`failed` 各自停态）、记指纹去重，节点落一次 `notice.delivered` 痕；**不新建派单会话、不 `dws notify`、也不带续接催办**。`deliver.mode` 与 `notify.enabled` 暂时不影响「发不发」——要恢复投递看 git 历史里 2026-11-13 之前的 `pollOnce`。
+- `deliver.mode: "new"` 仍用于 **PR 扫描**：扫到别人的 PR 时**新建一条合并会话**，首句 = 合并提示词（默认代码内置的 `src/builtin/merge-prompt.md`）+ `监控项目：<deliver.projectDir>` + PR 列表；新会话 `notify: false`，不进监听。
+- `deliver.mode: "existing"` 才塞回已有会话：`session` 写 `auto` → 取 `MCP_VM_CONVERSATION_ID`；也可写会话 id 或侧边栏标题。
+- 命令行：`foreman run --notify <会话id|标题>` 只改这一轮登记的通知目标；`--no-notify` = 这一轮不登记监听。
+- **合并不回执**：`foreman pr merge` 或合并助手判 `mergeable=true` 落地合并后，只落账本（`mergeAsk` / `mergeTask`）+ 控制台 `pr_merge`，关单 / 清 herdr 工作区 / 删 worktree 与本地分支 / 归档执行会话都在 `afterMerge` 做完；合失败也只记账（看 `mergeAsk.error`）。
 
 ## PR 监听（服务里 5 分钟一轮）
 
@@ -79,7 +89,7 @@ foreman pr list   # 看 PR 监听账本
 | `app_busy` /「豆包正在用你自己的 profile 运行」 | 用户自己开着豆包，占了单实例 | 让用户 ⌘Q 退出，别换 profile、别重试 |
 | 一条也捞不到 | `labelIds` 不是数字 id、被排除标签命中、或已处理过 | `foreman run --dry-run --once` 看「open N 条，可接 M 条」；`foreman tasks` 看状态 |
 | 卡在 `pr-open` | `merge.enabled=false` | 正常，等人验收；要自动合就改配置 |
-| 会话跑完没通知 | 服务没跑、或登记被 `--no-notify` 跳过 | `foreman ping` → `foreman serve` → `foreman watch list` → `foreman watch poll` |
+| 会话跑完没收到消息 | 通知停用期间本来就不发（notify 节点只落痕）；或服务没跑、登记被 `--no-notify` 跳过 | `foreman ping` → `foreman serve` → `foreman watch list` → `foreman watch poll` 补判一轮；结论看 `foreman tasks` |
 | 合并失败 | 分支冲突 / 无可合并 | 记录在 `mergeAsk`（`failed`），不重试；按提示人工处理或 `foreman retry` |
 | `skipped: locked` | 另一轮还在跑 | `~/.foreman/run.lock` 里的 pid 探活；进程死了下轮自动接管 |
 | worktree 已存在 / `already checked out` | 上次没清干净 | `git worktree list` 确认不是在跑的工单，再 `remove` + `branch -D` |

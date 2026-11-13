@@ -30,6 +30,7 @@ dws 开会话，把工单 + 边界 + RESULT 协议一次发进去
 
 run 到这里就返回：**不在进程里等回复、不读 RESULT、不验收、不 push/PR、不发通知**。
 会话跑完没有、结果是什么、通知谁，全由常驻服务在后台异步完成（见下一节）。
+当前 notify 节点只落痕、不投递（暂时不需要向谁通知），结论照常推进工单状态与账本。
 `verify` / `publish`（验收、push、开 PR）的代码还在，但当前没接线，run 不自动调用——
 push 与开 PR 由会话自己在自测通过后做完，foreman 只负责派活、监听、通知。
 
@@ -62,16 +63,17 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
   （`foreman-合并-<时间戳>`，读合并提示词，判断可合性 + 解冲突，不自己合）。账本 `sessions.kind` 记 `deliver:dispatch` / `deliver:merge`，
   `sessions.notice` 记触发类型（只有「PR待合并」会被合并判断链路消费）。
 - 派单判定完一条会话，**不再当场合并、也不再入队**：会话自己 push + 开 PR，工单置 `pr-open`，
-  通知里写「合并：PR 已开好，核对工单/改动后自己跑 `foreman pr merge <N>`」，然后立刻返回。
-- 合并结果不另开会话：CLI `foreman pr merge` 与合并判断（`mergeable=true`）触发的合并都只落账本 + 控制台
-  （`mergeAsk` / `mergeTask` / `pr_merge`），不发「合并完成」回执会话；合并助手交完 RESULT 即收工。
+  然后立刻返回（notify 节点只落痕，不发消息；见下面「通知口径」）。
+- 合并结果不另开会话、也不回执：CLI `foreman pr merge` 与合并判断（`mergeable=true`）触发的合并都只落账本 + 控制台
+  （`mergeAsk` / `mergeTask` / `pr_merge`），关单 / 清工作区 / 归档做完即收工。
 - `foreman status` 里能看：`pickup.maxRunning / inflight`、`lanes.dispatch.workflowActive`、`merge.queued`、
   `merge.judge`（合并助手判断账：pending / merged / held / failed）、`workflow.{workflows,stages,nodes,active,runs,recent}`。
 
 ## 常驻服务与会话监听
 
-通知只有一条路：常驻服务在后台轮询被监听的会话，判定「这一轮跑完了」再发通知。
+通知只有一条路：常驻服务在后台轮询被监听的会话，判定「这一轮跑完了」再走 notify 节点。
 run 自己不发任何通知——没有同步发送的第二条路，也没有降级分支。
+**notify 节点当前只落痕、不投递**：判定照做、指纹照记，但不新建会话、不 `dws notify`。
 
 ### 起与停
 
@@ -176,33 +178,23 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 - 指纹 = `sha1(chars|head|tail)` 前 12 位。**跑完 + 指纹相对上次已通知的指纹变了**，才发一次；
   同一个 `(会话, 指纹)` 只发一次，去重记在 `state.json` 的 `notified` 键——**服务重启也不重发**。
 
-### 通知口径：默认每次新建会话
+### 通知口径：notify 节点保留，暂时只落痕、不投递
 
-- `deliver.mode: "new"`（默认）：**每条通知都新建一条豆包会话**，且**按通道分两类会话**：
-  - **派单会话**（`foreman-派单-<YYYYMMDD-HHmm>`）：用派单提示词（`src/builtin/dispatch-prompt.md`，配置里 `promptFile` 给了路径才读那份），只做**续跑 / 接单 / 判合并**；
-  - **合并会话**（`foreman-合并-<YYYYMMDD-HHmm>`）：用合并提示词（`src/builtin/merge-prompt.md`，`mergePromptFile` 给了路径才读那份），只做**判断可合性 + 解冲突**，交 RESULT 给 workflow 合并。
-  首句 = 对应通道的提示词（**默认代码内置的**）+ `产品：<products[].name>` + `监控项目：<products[].projectDir>`
-  + `触发：<类型>` + **`通道：派单（在跑 n / 上限 m）`** 或 **`通道：合并（1 并发，只管合 PR）`** + 这条通知正文，
-  用 `dws open --no-wait` 投递（只确认首句送达，不等第一轮回复）。
-  **这条会话是编排者，不是执行者**：首句明确写了「不要自己改代码实现工单」，通知正文只是决策输入，不是派给它的实现任务。
-  **提示词默认内置、随代码走**：不改提示词就不用配任何文件，`promptFile` / `mergePromptFile` 留空即用内置；要给某个产品单独换一份，再在 `products[]` 里写路径。
-  项目目录按工单所属产品取；没配 products 时用顶层 `deliver.projectDir`。
-  新会话记进账本 `sessions`（`kind` = `deliver:dispatch` / `deliver:merge`、`notice` = 触发类型）但 `notify: false`，**不纳入监听**——它是编排者，纳入会自己通知自己。
-  合并会话的判断结论由 `mergeVerdictOnce` 单独收（只认 `notice: "PR待合并"`，`merge.verdictAutoMerge` 关掉就只判不合）。
-- `deliver.mode: "existing"`：旧行为，塞回已有会话——目标 = 登记时写的 `notifyTo`，
-  没写取 `notify.session`（`auto` → 环境变量 `MCP_VM_CONVERSATION_ID`）。合并结果不走执行会话自己。
-- 正文含仓库、工单号、结论类别、PR 链接（有则带）。结论类别由服务用 `dws info` 读最后回复、
-  按 RESULT 映射：`done` / `needs-human` / `blocked` / `failed`；读不到或没有工单记录 → `session-done`。
-  带 PR 时多一行「合并：PR 已开好，核对后自己跑 foreman pr merge <N>」，合并结果另行通知。
-- **不发的情况**：`notify.enabled: false`；结论不在 `notify.events` 白名单里；
-  `existing` 模式下目标为空（no-target）或目标正好是被监听的会话自己（self）。
-- **`--notify` 只影响 `existing` 模式**：`foreman run --notify <会话id|标题>` = 这一轮派出去的会话，登记监听时通知目标写谁。
-  **`--no-notify` 只表示本轮不登记监听**：这一轮的会话不会被盯，也就不会有通知。
-- 投递失败只写 `service.log`、`dwsErrors++`，不打断轮询；同一指纹最多试 `notify.maxAttempts` 次。
+- **notify 节点（`notice.delivered`）还在**：暂停 / 继续、累计执行次数、控制台状态照旧；
+  但节点里**不再真的发通知**——不新建派单会话、不 `dws notify`、也不拼续接催办，
+  只把指纹记进账本 `notified`、落一次节点痕（detail 写「通知已停用，未发送」）。
+- **PR 待合并仍然投递**：PR 扫描走的是 `deliver.mode`（`new` 新建一条 `foreman-合并-<时间戳>` 会话），
+  不经 notify 节点，所以「扫到别人的 PR 交给合并助手核对」照常工作。
+- **合并结果不回执**：合完只落账本（`mergeAsk` / `mergeTask`）+ 控制台 `pr_merge`，
+  关单、清工作区、归档执行会话与通知会话都在 `afterMerge` 里做完，然后收工；
+  合失败同样只记账，失败原因看控制台 / `mergeAsk.error`。
+- **恢复投递**：从 git 历史取回 2026-11-13 之前 `pollOnce` 里的 deliver / `dws.notify` 与续接那一段，接回本节第 1 条。
+- 账本 `notified` 仍按 `(会话, 指纹)` 去重：同一结论只落一次痕，服务重启不重复处理。
+- `--no-notify` 仍表示**这一轮不登记监听**：这一轮的会话不会被盯，也就不会进 notify 节点。
 
-### 服务没在跑时，通知会丢
+### 服务没在跑时，结论没人判
 
-异步的代价：服务没跑的时间段里跑完的会话，不会有人发通知。这不是 bug，补法：
+异步的代价：服务没跑的时间段里跑完的会话，没人轮询判定（不会发通知，也不会推进工单状态）。这不是 bug，补法：
 
 1. `foreman watch list` —— 登记在账本里，不依赖服务活着，先看会话还在不在听。
 2. `foreman watch poll` —— 立刻重放一轮，已跑完且指纹没通知过的会补发。
@@ -267,10 +259,12 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 
 ### 续接调度（planner）
 
-`planner.enabled: true` 时，服务把续接内容**并进这条结论通知**（一次只发一条）：
+`planner.enabled: true` 时，续接内容原本并进结论通知一起发（一次一条）。
+**通知停用期间这段不生效**：内容不再拼进任何消息，`planner` 这张定时表只剩空跑一轮（`pollOnce`），
+`planner.mjs` 的函数与账本字段保留，恢复投递后接回即可：
 
-- 结论 `done` + 在跑单 `< maxRunning`（默认 2）+ 队列还有可接工单 → 发「可以继续接单」，正文带工单列表（`listLimit` 条，默认 5）
-- 结论不是 `done` → 发「需要你看一下」，带状态/原因/分支/PR 和 `foreman retry` 提示
+- 结论 `done` + 在跑单 `< maxRunning`（默认 2）+ 队列还有可接工单 → 「可以继续接单」，正文带工单列表（`listLimit` 条，默认 5）
+- 结论不是 `done` → 「需要你看一下」，带状态/原因/分支/PR 和 `foreman retry` 提示
 - 同一 `(会话, 指纹)` 只提醒一次（账本 `planner.lastKey`）；目标 `planner.target`（默认 `auto` = 最早登记的调用方）
 
 ### 产品分组（products）
@@ -397,9 +391,9 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 - **`pickup.labelIds` 必须用数字 id，别用名字**。opencli 的列表接口不回 labels，
   按名字配会静默捞 0 条；`label-list` 能查名→id（`ready-for-agent` 当前是 5）。
 - 配了 `labelIds` 后不再拿名字做二次过滤（列表里本来就没有 labels）。
-- **合并通道已取消**：会话 `done` 只把 PR 记进账本并发通知，合不合由编排会话核对工单后
+- **合并通道已取消**：会话 `done` 只把 PR 记进账本，合不合由编排会话核对工单后
   `foreman pr merge <N> --repo R` **当场执行**。每张 PR 只合一次（账本 `mergeAsk` 记 `merged`/`failed`），
-  冲突只记录并通知、不 force merge。
+  冲突只记录、不 force merge；合完/合失败都不回执通知，原因看账本与控制台。
 - **收尾按节点自清**（`src/workflow/cleaners.mjs`）：每个 workflow 节点只清自己产生的东西，漏一步不连带别的节点——
   `merge` 落合并事实（`mergeAsk` / 队列），`close` 关单 + 摘 `ready-for-agent` + 工单 `done`，
   `pr-open` 把 PR 记成 merged（记录留着给 prWatch 去重），`dispatch` 摘执行会话监听并收掉 `sessions` 记录，
@@ -409,10 +403,11 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
   `mergePromptFile` 是**合并提示词**的路径（可选，留空回落 `promptFile`），
   **两者都留空就用代码内置的** `src/builtin/dispatch-prompt.md` / `merge-prompt.md`（提示词随代码走，不再依赖 `~/.foreman/prompts/` 下的运行时副本）；`projectDir` 是写进首句的监控项目，
   `waitFirstReply: false` 表示只确认首句送达、不等第一轮回复。`mode: "existing"` 退回塞回已有会话。
-- **通知默认开、且只有常驻服务这一条路**：会话跑完后，由服务按 `deliver.mode` 投递
-  「哪条单 + 结论类别 + 分支 + PR 链接（有则带）」。run 自己不发通知。
-- **`--notify` / `--no-notify` 只管登记**：`foreman run --notify <会话id|标题>` 把这一轮派出会话的通知目标写它
-  （只对 `deliver.mode: existing` 有意义）；`--no-notify` 表示这一轮不登记监听、也就不会有通知。要永久关：`notify.enabled: false`。
+- **notify 节点保留、暂时只落痕**：会话跑完后服务照常判结论、推进状态、记指纹，
+  notify 节点落一次 `notice.delivered` 痕，但**不向谁发消息**（不新建派单会话、不 `dws notify`、不带续接催办）。
+  要恢复投递看上面「通知口径」。
+- **`--notify` / `--no-notify` 只管登记**：`foreman run --notify <会话id|标题>` 把这一轮派出会话的通知目标写它；
+  `--no-notify` 表示这一轮不登记监听。通知停用期间这两个开关只影响登记，不影响是否发消息（本来也不发）。
 - **什么时候不发**：`notify.enabled: false`；结论不在 `notify.events` 白名单里（默认只发上面那 6 个，
   `working`/`planned` 不发；显式盯的 `session-done` 例外）；`existing` 模式下目标为空、或目标正好是被监听会话自己。
   投递本身失败只写 `service.log`、计 `dwsErrors`，不打断轮询。

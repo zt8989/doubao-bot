@@ -209,7 +209,7 @@ test("prWatchOnce：给了 deliver 就新建会话投递，不再通知已有会
   }
 })
 
-test("端到端：deliver.mode=new 时 poll 跑完就新建会话投递，不碰已有会话", async () => {
+test("端到端：notify 节点只落痕，不新建派单会话、也不碰已有会话", async () => {
   const dir = tmpDir()
   let server
   try {
@@ -254,18 +254,12 @@ test("端到端：deliver.mode=new 时 poll 跑完就新建会话投递，不碰
 
     server = await startServer({ cfg, book, dws, log: () => {} })
     const r = await server.poll()
-    assert.equal(r.notified, 1)
-    assert.equal(notified.length, 0, "不再往已有会话里塞")
-    assert.equal(opened.length, 1)
-    assert.equal(opened[0].noWait, true)
-    assert.match(opened[0].name, /^foreman-派单-/)
-    assert.match(opened[0].prompt, /# 固定提示词/)
-    assert.match(opened[0].prompt, /监控项目：\/w\/win-ai-stack/)
-    assert.match(opened[0].prompt, /【foreman】demo\/demo #1/)
+    assert.equal(r.notified, 0, "notify 节点不再真的发通知")
+    assert.equal(notified.length, 0, "不往已有会话里塞")
+    assert.equal(opened.length, 0, "也不新开派单会话投递")
 
     const b2 = new Book(cfg.stateFile)
-    assert.equal(b2.session(opened[0].name).notify, false, "投递会话不纳入监听")
-    assert.match(b2.notified["conv-e2e"].fingerprint, /^[0-9a-f]{12}$/, "发成功后记账，指纹落库")
+    assert.match(b2.notified["conv-e2e"].fingerprint, /^[0-9a-f]{12}$/, "节点照样落痕，指纹落库")
   } finally {
     if (server) await server.close()
     fs.rmSync(dir, { recursive: true, force: true })

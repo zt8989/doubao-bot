@@ -14,7 +14,7 @@ import { NODE_TEARDOWN, runNodeCleanup, resolveIssueKey } from "./workflow/clean
 import { DoubaoSessionAdapter } from "./workflow/adapters/doubao.mjs"
 import { GiteaTrackerAdapter } from "./workflow/adapters/gitea.mjs"
 import { prWatchOnce, prWatchTarget, mergeFailureReason } from "./prwatch.mjs"
-import { plannerDecision, plannerTarget, plannerText, loadQueue, inflightIssues } from "./planner.mjs"
+import { inflightIssues } from "./planner.mjs"
 import { listPulls, mergePr, closeIssue, createPr, commentIssue } from "./gitea.mjs"
 import { ConsoleStore } from "./console.mjs"
 import { listSchedules, applySchedules, persistSchedules, cronOf } from "./schedules.mjs"
@@ -71,7 +71,7 @@ export function phaseOf(status) {
   return "pending"
 }
 
-// judgePoll：跑完 + 指纹相对上次已通知指纹变化，才发通知。
+// judgePoll：跑完 + 指纹相对上次已处理的指纹变化，才走一次 notify 节点（当前只落痕）。
 // 传了 maxAttempts 时，同一指纹发失败（账本里记了 attempts）允许再重试，用完次数就停；
 // 不传则保持老口径（同指纹一律不发）。
 export function judgePoll(prev, status, { maxAttempts = Infinity } = {}) {
@@ -873,43 +873,7 @@ export async function pollOnce(ctx) {
       const book2 = new Book(cfg.stateFile)
       const nd = notifyDecision({ cfg, watcher: w, book: book2, env: process.env, result: resultOut })
 
-      // 续接内容并进同一条通知：done 就带 PR + 剩余列表，不是 done 就带“去看一下”。
-      let planBlock = ""
-      let planNote = ""
-      let planKind = ""
-      const planKey = `${w.target}#${decision.fingerprint}`
-      try {
-        const pb = new Book(cfg.stateFile)
-        const pd = plannerDecision({ cfg, book: pb, result: resultOut, key: planKey })
-        if (pd.send) {
-          let issues = []
-          if (pd.kind === "continue") {
-            issues = await loadQueue({ cfg, book: pb, gitea, limit: Number(cfg.planner?.listLimit) || 5 })
-            if (!issues.length) pd.send = false
-          }
-          if (pd.send) {
-            planBlock = plannerText({
-              cfg, kind: pd.kind, watcher: w, result: resultOut,
-              running: pd.running, maxRunning: pd.maxRunning, issues,
-            })
-            planKind = pd.kind
-            planNote = pd.kind === "continue" ? `续接 ${issues.length} 条` : "催查看"
-          }
-        }
-      } catch (e) {
-        state.dwsErrors++
-        log(`续接内容生成失败：${e.message}`)
-      }
-
-      const mode = deliveryMode(cfg)
-      const target = String(nd.send ? nd.target : "") || (planBlock ? plannerTarget(cfg, new Book(cfg.stateFile), process.env) : "")
-      const text = [nd.send ? nd.text : "", planBlock].filter(Boolean).join("\n\n")
-      if (!text) {
-        log(`通知跳过 ${w.target}：${nd.reason || "empty"}`)
-        park()
-        continue
-      }
-      // 通知节点被暂停：这一轮不发，也不记指纹，等继续后自然补发（不影响别的节点）。
+      // 通知节点被暂停：这一轮不落，也不记指纹，等继续后自然补一次（不影响别的节点）。
       if (ctx.engine?.paused?.("notify")) {
         log(`通知跳过 ${w.target}：通知节点已暂停`)
         continue
@@ -933,51 +897,21 @@ export async function pollOnce(ctx) {
         continue
       }
 
-      // existing 才需要「发给谁」；new 模式每次都新建会话，跟哪个会话在跑无关。
-      if (mode === "existing" && (!target || target === String(w.target))) {
-        log(`通知跳过 ${w.target}：${nd.reason || "no-target"}`)
-        park()
-        continue
+      // notify 节点保留，但节点里不再真的发通知：只落一次痕（指纹 + 节点事件 + 操作日志），
+      // 不新建会话、不 dws.notify、也不跑续接催办——暂时不需要向谁通知。
+      // 要恢复投递：从 git 历史（本提交之前）取回 deliver / dws.notify 与续接那一整段。
+      const payload = {
+        issueKey: issKey,
+        target: "",
+        kind: nd.send ? nd.event : "",
+        detail: nd.send ? "通知已停用，未发送" : (nd.reason || "无需通知"),
       }
-      // 先记账再发：发送本身可能几十秒，崩溃/假失败时不能让下一轮从零重发。
-      book2.markAttempted(w.target, decision.fingerprint, {
-        phase: decision.phase,
-        chars: status?.chars ?? 0,
-      })
-      let sentTo = target
-      try {
-        if (mode === "new") {
-          const out = await ctx.deliver({ text, kind: "工单结论", watcher: w })
-          sentTo = out?.session || out?.convId || "新会话"
-        } else {
-          await dws.notify(target, text)
-        }
-        book2.markNotified(w.target, decision.fingerprint, {
-          phase: decision.phase,
-          chars: status?.chars ?? 0,
-        })
-        if (planBlock) new Book(cfg.stateFile).markPlanner(planKey, { kind: planKind, target: sentTo })
-        state.notifiedCount++
-        out.notified++
-        rec.notifiedAt = nowIso()
-        await engine.emit("notice.delivered", { issueKey: w.issueKey ?? "", target: sentTo, kind: planKind || nd.event })
-        log(`已通知 ${sentTo}：${w.target} 跑完（${decision.phase}/${nd.event}）${planNote ? `，${planNote}` : ""}`)
-        park()
-      } catch (e) {
-        state.dwsErrors++
-        const n = notifyMaxAttempts(cfg)
-        const led = book2.notified[String(w.target)]
-        if (led) {
-          led.lastError = e.message
-          book2.save()
-        }
-        log(`通知 ${sentTo || "新会话"} 失败（第 ${led?.attempts ?? 1}/${n} 次）：${e.message}`)
-        if ((led?.attempts ?? 1) >= n) {
-          log(`通知 ${sentTo || "新会话"} 放弃重试：${w.target} 同指纹已试 ${n} 次`)
-          // 次数用光还落 idle：不然这条会话每轮都要读一次 status，白白拽走用户窗口。
-          park()
-        }
-      }
+      book2.markNotified(w.target, decision.fingerprint, { phase: decision.phase, chars: status?.chars ?? 0 })
+      rec.notifiedAt = nowIso()
+      if (engine.lifecycle && typeof engine.lifecycle.emit === "function") await engine.lifecycle.emit("notice.delivered", payload)
+      else await engine.emit("notice.delivered", payload)
+      log(`通知跳过 ${w.target}：notify 节点只落痕（${decision.phase}/${payload.kind || "-"}）`)
+      park()
     }
     // 合并助手交回的 RESULT 也在这轮收：判了可合就走 workflow 合并（runMergeTask）。
     // 复用上面读过的侧边栏，不再切一次窗口；判过的会话落 mergeJudge，不再反复读。
@@ -1055,7 +989,7 @@ export async function runMergeTask(ctx, task = {}) {
       b.markMergeTask(key, { status: "failed", error: reason })
       log(`合并失败 ${repo}#${pr}：${reason}`)
       finishOperation(ctx, op, "failed", reason)
-      await notifyMergeOutcome(ctx, { ...task, key, repo, pr, issue: issueNo }, { ok: false, reason })
+      // 失败也只记账：通知暂停期间不回执给任何人，负责合并的一方从控制台/账本看原因。
       return { ok: false, reason }
     }
   }
@@ -1115,47 +1049,8 @@ export async function runMergeTask(ctx, task = {}) {
   try { ctx.consoleStore?.sync(new Book(cfg.stateFile)) } catch {}
   finishOperation(ctx, op, "success", `${alreadyMerged ? "原本已合并" : "合并成功"}${notes.length ? ` · ${notes.join("；")}` : ""}`)
   log(`合并通道：已合并 ${repo}#${pr}（${key}）${resolvedNo ? `，关单 #${resolvedNo}` : ""}`)
-  await notifyMergeOutcome(
-    ctx,
-    { ...task, key, repo, pr, issue: resolvedNo },
-    { ok: true, alreadyMerged, cleanup: { notes }, prUrl: task.url ?? "" },
-  )
+  // 合并成功不回执、不通知任何人：清理/归档已经做完，结果只落账本 + 控制台就收工。
   return { ok: true, alreadyMerged, notes }
-}
-
-// notifyMergeOutcome：合并结果交给合并会话（1 并发的那条通道），不是派单会话。
-// 通知里带 RESULT 块，合并会话读完就能收尾归档；CLI 自己触发的合并（task.notify===false）不发。
-async function notifyMergeOutcome(ctx, task, out = {}) {
-  const { cfg, log = () => {} } = ctx
-  if (task.notify === false) return
-  const text = notifyText(
-    { repo: task.repo, number: Number(task.issue ?? 0) || Number(task.pr), title: "" },
-    {
-      state: out.ok ? "done" : "merge-failed",
-      pr: task.pr,
-      prUrl: out.prUrl ?? "",
-      merged: !!out.ok,
-      mergeError: out.reason ?? "",
-      cleanup: out.cleanup ?? null,
-    }
-  )
-  try {
-    if (deliveryMode(cfg) === "new" && typeof ctx.deliver === "function") {
-      await ctx.deliver({ text, kind: "合并完成", repo: task.repo, lane: "merge" })
-      return
-    }
-    // existing 模式：回给这条单登记的通知目标（没登记才回调用方）。
-    // 不能回执行会话自己——那条会话已经收工，合并结果给它没有意义。
-    const target = String(task.notifyTo ?? "").trim() || notifyTarget(cfg.notify ?? {}, process.env)
-    if (!target) {
-      log(`合并结果没有通知目标（${task.key}），只记账`)
-      return
-    }
-    await ctx.dws.notify(target, text)
-  } catch (e) {
-    // 通知失败不影响账本与合并事实，只记日志。
-    log(`合并结果通知失败（不影响账本）：${e.message}`)
-  }
 }
 
 // ---- 合并判断：合并助手交 RESULT → workflow 合并 ----

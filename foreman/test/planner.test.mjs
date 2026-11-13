@@ -106,7 +106,7 @@ test("plannerText：继续接单带工单列表，not-done 带原因与 retry �
   assert.match(t2, /foreman retry demo 1/)
 })
 
-test("poll：done 跑完且槽位空着 → 催编排继续接单；同一结论只催一次", async () => {
+test("poll：done 跑完推进状态与账本；通知停用期间不催接单、不发消息", async () => {
   const dir = tmpDir()
   let server
   try {
@@ -128,24 +128,19 @@ test("poll：done 跑完且槽位空着 → 催编排继续接单；同一结论
     }
     server = await startServer({ cfg, book, dws, gitea, log: () => {} })
 
-    await server.poll()
-    const boss = sends.filter((s) => s.target === "boss")
-    assert.equal(boss.length, 1, "done 通知与剩余列表合成一条")
-    assert.match(boss[0].text, /状态：done/, "带结论")
-    assert.match(boss[0].text, /PR：#11/, "带 PR")
-    assert.match(boss[0].text, /可以继续接单/)
-    assert.match(boss[0].text, /demo\/demo #2/)
-
-    // 同一指纹再来一轮：不再催
-    await server.poll()
-    assert.equal(sends.filter((s) => s.target === "boss").length, 1)
+    const r = await server.poll()
+    assert.equal(sends.length, 0, "通知停用：不催接单、不发结论")
+    assert.equal(r.notified, 0)
+    const rec = new Book(cfg.stateFile).issue("demo/demo#1")
+    assert.equal(rec.state, "pr-open", "结论照常推进状态")
+    assert.equal(rec.pr, 11)
   } finally {
     if (server) await server.close()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test("poll：不是 done → 催编排去看，不去接单", async () => {
+test("poll：不是 done → 推进到 blocked，通知停用期间不发消息", async () => {
   const dir = tmpDir()
   let server
   try {
@@ -161,11 +156,7 @@ test("poll：不是 done → 催编排去看，不去接单", async () => {
     }
     server = await startServer({ cfg, book, dws, gitea, log: () => {} })
     await server.poll()
-    const boss = sends.filter((s) => s.target === "boss")
-    assert.equal(boss.length, 1, "不是 done：结论与“去看一下”合成一条")
-    assert.match(boss[0].text, /状态：blocked/)
-    assert.match(boss[0].text, /需要你看一下/)
-    assert.match(boss[0].text, /缺依赖/)
+    assert.equal(sends.length, 0, "不发消息")
     assert.equal(new Book(cfg.stateFile).issue("demo/demo#1").state, "blocked", "状态推进到 blocked")
   } finally {
     if (server) await server.close()

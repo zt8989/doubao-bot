@@ -50,9 +50,9 @@ export const DEFAULTS = {
     // 置 false 只判断、不合（结论仍记进 mergeJudge，交给人处理）。
     verdictAutoMerge: true,
   },
-  // 收口通知：每条工单处理完，用 dws send 把结果回给「调用方会话」。
-  // session 写 "auto" 就取环境变量 MCP_VM_CONVERSATION_ID（在豆包会话里跑 foreman 时就是那条会话），
-  // 也可以直接写会话 id 或侧边栏标题。
+  // 收口通知的配置位：保留语义，但 **notify 节点当前只落痕、不投递**（暂时不需要向谁通知）。
+  // 恢复投递后：每条工单处理完用 dws send 回给「调用方会话」；session 写 "auto" 取
+  // MCP_VM_CONVERSATION_ID（在豆包会话里跑 foreman 时就是那条会话），也可写会话 id 或侧边栏标题。
   notify: {
     enabled: true,
     session: "auto",

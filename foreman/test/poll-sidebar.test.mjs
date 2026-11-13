@@ -50,7 +50,7 @@ test("侧边栏显示还在跑：不调用 dws.status，也就不切窗口", asy
   }
 })
 
-test("侧边栏显示没在跑：照常读 status 并投递结论", async () => {
+test("侧边栏显示没在跑：照常读 status，结论只落痕、不发消息", async () => {
   const { ctx, calls, dir } = mkCtx({
     runningMap: async () => ({ "conv-a": { running: false, title: "w" } }),
     status: async () => ({ streaming: false, finished: true, chars: 500, head: "H", tail: "T", status: "ok" }),
@@ -58,14 +58,15 @@ test("侧边栏显示没在跑：照常读 status 并投递结论", async () => 
   try {
     const r = await pollOnce(ctx)
     assert.equal(calls.status, 1)
-    assert.equal(r.notified, 1)
-    assert.equal(calls.notified.length, 1)
+    assert.equal(r.notified, 0, "notify 节点不再真的发通知")
+    assert.equal(calls.notified.length, 0, "没有向任何人发消息")
+    assert.match(new Book(ctx.cfg.stateFile).notified["conv-a"].fingerprint, /^[0-9a-f]{12}$/)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test("侧边栏读不到：退回逐条 status，不漏通知", async () => {
+test("侧边栏读不到：退回逐条 status，结论照样只落痕", async () => {
   const { ctx, calls, dir } = mkCtx({
     runningMap: async () => { throw new Error("list 失败") },
     status: async () => ({ streaming: false, finished: true, chars: 500, head: "H", tail: "T", status: "ok" }),
@@ -73,7 +74,9 @@ test("侧边栏读不到：退回逐条 status，不漏通知", async () => {
   try {
     const r = await pollOnce(ctx)
     assert.equal(calls.status, 1)
-    assert.equal(r.notified, 1)
+    assert.equal(r.notified, 0)
+    assert.equal(calls.notified.length, 0)
+    assert.ok(new Book(ctx.cfg.stateFile).notified["conv-a"])
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -110,10 +113,11 @@ test("侧边栏又报 running：清掉 idle，收工后再判一轮并再通知"
     assert.equal(calls.status, 0)
     assert.equal(new Book(ctx.cfg.stateFile).notified["conv-a"].idle, false)
     running = false
-    const r2 = await pollOnce(ctx) // 收工：读一次 status，指纹变了要再通知
+    const r2 = await pollOnce(ctx) // 收工：读一次 status，指纹变了节点再落一次痕
     assert.equal(calls.status, 1)
-    assert.equal(r2.notified, 1)
-    assert.equal(calls.notified.length, 1)
+    assert.equal(r2.notified, 0)
+    assert.equal(calls.notified.length, 0, "不发任何消息")
+    assert.match(new Book(ctx.cfg.stateFile).notified["conv-a"].fingerprint, /^[0-9a-f]{12}$/)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -162,7 +166,7 @@ test("gone 之后又出现在侧边栏：清 gone 并重新判一轮", async () 
     present = true
     const r2 = await pollOnce(ctx)
     assert.equal(calls.status, 1)
-    assert.equal(r2.notified, 1)
+    assert.equal(r2.notified, 0)
     assert.ok(!new Book(ctx.cfg.stateFile).notified["conv-a"].gone)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })

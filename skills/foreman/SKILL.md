@@ -1,6 +1,6 @@
 ---
 name: foreman
-description: 接单编排 CLI（项目 foreman，命令 foreman）：用 opencli 读内网 Gitea 的 ready-for-agent 工单、用 herdr 从 origin/<base> 开 worktree、用 dws 把活派给豆包会话后立即返回（不验收、不 push：会话自测通过后自己 push，并经 `foreman pr open` 开 PR），常驻服务异步监听会话、跑完把结论与 PR 回通知。只收口两件事：**建 PR（`foreman pr open`）与合并（`foreman pr merge`）**——它们要写账本、要幂等；Gitea 的读、建单/改单/评论/关单、dws 会话、herdr 一律直连，不经 foreman。当用户说自动接单、接工单、把工单派给豆包、批量跑 Gitea 工单、看某条工单处理到哪、把卡住的单放回队列，或提到 foreman 时报 app_busy / locked / pr-open 时使用。它带一个常驻服务：CLI 每次启动先跟服务握手，会话由服务异步监听，跑完再回通知（只有异步一条路径，没有同步发送）。整条链路的验收口径见 workflow。提到 foreman 但报「服务没起 / service_unavailable / 监听没收到」也用本技能。派单与合并走两条独立通道（派单并行 2 张单、合并 1 并发），互不阻塞；会话层分「派单会话」与「合并会话」两类。
+description: 接单编排 CLI（项目 foreman，命令 foreman）：用 opencli 读内网 Gitea 的 ready-for-agent 工单、用 herdr 从 origin/<base> 开 worktree、用 dws 把活派给豆包会话后立即返回（不验收、不 push：会话自测通过后自己 push，并经 `foreman pr open` 开 PR），常驻服务异步监听会话、跑完把结论落账（当前 notify 节点只落痕、不发消息）。只收口两件事：**建 PR（`foreman pr open`）与合并（`foreman pr merge`）**——它们要写账本、要幂等；Gitea 的读、建单/改单/评论/关单、dws 会话、herdr 一律直连，不经 foreman。当用户说自动接单、接工单、把工单派给豆包、批量跑 Gitea 工单、看某条工单处理到哪、把卡住的单放回队列，或提到 foreman 时报 app_busy / locked / pr-open 时使用。它带一个常驻服务：CLI 每次启动先跟服务握手，会话由服务异步监听，跑完由服务判结论并落账（notify 节点当前只落痕、不发消息）。整条链路的验收口径见 workflow。提到 foreman 但报「服务没起 / service_unavailable / 监听没收到」也用本技能。派单与合并走两条独立通道（派单并行 2 张单、合并 1 并发），互不阻塞；会话层分「派单会话」与「合并会话」两类。
 ---
 
 # foreman：接单编排
@@ -81,7 +81,7 @@ foreman status                   # 带 prWatch.lastPollAt / pollCount / notified
 
 ## 续接调度（planner，默认关）
 
-服务每轮 poll 判定完一条会话后，**把续接内容并进同一条通知**（不另发一条），让编排 agent 一次看清“这条结了什么 + 还剩什么”：
+`planner.enabled: true` 时，续接内容原本并进结论通知一起发（一次一条）。**通知停用期间这段不生效**：内容不再拼进任何消息，函数与账本字段保留，恢复投递后接回即可：
 
 - **跑完是 `done`**、且「在跑的单 < `planner.maxRunning`（默认 2）」、且队列里还有可接工单 → 同一条通知里追加「可以继续接单」+ **工单列表**（仓库/单号/标题 + 我的·无人认领·他人 标签）+ 命令 `foreman run --once`；结论那一行照旧带 PR 链接。
 - **跑完不是 `done`**（`need_decision`/`blocked`/`failed`/没 RESULT）→ 同一条通知里追加「需要你看一下」，带状态、原因、分支、PR，并提示 `foreman tasks` 看进度、`foreman retry <仓库> <N>` 放回。
@@ -157,8 +157,8 @@ RESULT 协议（只认最后一个块，差一点按失败处理）：
 - **续接调度**：`planner.enabled` 默认 **false**；开了就是一个跑完、槽位 `< maxRunning`、还有活就催编排继续接，不是 done 就催它去查（详见上面「续接调度」）。
 - **接单三档**：`pickup.priority` 默认 `["mine","unassigned","others"]`，`pickup.me` 从配置读（自己的 Gitea 账号）；「我的」按工单作者（`creator`）认定。`onlyUnassigned: true` 会把「他人」整档排除。**在飞工单（账本 `working` 且无 `lastFailure`）不再被捞单**：续跑只由编排 AI / `foreman retry` 触发，否则每轮巡检都会给同一张单重发一次「继续处理」；只有派单失败（有 `lastFailure`）且 `attempts < maxAttempts` 的才会被自动重试。
 - **投递默认每次新建会话，且按通道分两类**：**派单会话**（`foreman-派单-<时间戳>`，用内置派单提示词（`src/builtin/dispatch-prompt.md`；配置 `promptFile` 给了路径才读那份），只做续跑/接单/判合并）与**合并会话**（`foreman-合并-<时间戳>`，用内置合并提示词（`mergePromptFile` 给了路径才读那份），只管合 PR）。`deliver.mode`（默认 `new`）、`deliver.projectDir`（写进首句的监控项目）、`deliver.namePrefix`、`deliver.waitFirstReply`（默认 `false`：只确认首句送达）。**配了 `products` 就按工单所属产品取提示词与项目目录**（产品没写的回落顶层 deliver）。首句还带 `触发：<类型>` 与 **`通道：派单（在跑 n / 上限 m）`**（合并会话为 `通道：合并（1 并发，只管合 PR）`），并明确「**你是编排者不是执行者**」：正文只是决策输入，**不是派给它的实现任务**（实现只在执行会话）。新会话记账留痕（`kind` = `deliver:dispatch`/`deliver:merge`）但 `notify: false`，不进监听。要退回旧行为设 `mode: "existing"`。
-- **通知默认开、且只有异步这一条**：会话跑完后由**服务**按 `deliver.mode` 投递（`new` 新建会话 / `existing` 用 `dws send` 回给登记的通知目标，`notify.session: "auto"` 取 `MCP_VM_CONVERSATION_ID`）。run 自己不发。`--no-notify` = 这一轮派出的会话**不登记给服务监听、因此不会有通知**；`notify.enabled: false` 永久关；`--notify <会话id|标题>` 只改登记时的通知目标（`existing` 模式）。`existing` 下不发的三种情况：目标为空、目标就是这条单自己的执行会话 `foreman-<仓库>-<N>`、结论不在 `notify.events` 白名单（显式盯的 `session-done` 例外）。
-- **服务没在跑时通知会丢**（异步的代价，不是 bug）：补法是 `foreman watch list` 看登记还在不在 → `foreman watch poll` 立刻重放一轮 → `foreman status` 看 `lastPollAt` / `pollCount` / `dwsErrors`。
+- **notify 节点保留，但只落痕、不投递**：会话跑完后服务照常判定、推进状态、记指纹，节点落一次 `notice.delivered`，**不新建派单会话、不 `dws notify`、不带续接催办**。`deliver.mode`（`new` / `existing`）只管 **PR 扫描**是否新建合并会话；`--no-notify` 仍表示这一轮不登记监听。要恢复投递看 git 历史里 2026-11-13 之前的 `pollOnce`。
+- **服务没在跑时没人判结论**（异步的代价，不是 bug）：补法是 `foreman watch list` 看登记还在不在 → `foreman watch poll` 立刻重放一轮 → `foreman status` 看 `lastPollAt` / `pollCount` / `dwsErrors`。
 - **工作时间窗**：`workHours`（`enabled`、`days` 1=周一…7=周日、`start`/`end` 如 `08:30`–`18:30`、`offUntil` 临时闭嘴）。两套定时轮询（会话监听 + PR 扫描）只在窗口内跑；窗口外一律跳过，手动 `foreman watch poll` / `foreman pr poll` 不受限。`foreman status` 的 `workHours.active` 就是当前是否在跑。
 - **PR 监听**：`prWatch.enabled`（默认 `true`）、`intervalSeconds`（默认 300）、`ignoreAuthors`（自己的 Gitea 用户名，由 `pickup.me` 补齐）、`notifyTarget`（`earliest` 取最早登记的调用方；只在 `deliver.mode: existing` 下才用到）。要停就 `enabled: false`。
 - **`service.enabled: false`** 等价于一直带 `--no-service`：子命令不握手、不自动拉起；`pidFile` / `logFile` / `service.http.portFile` 可改路径（测试用临时目录）。
