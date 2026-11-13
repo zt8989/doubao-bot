@@ -17,6 +17,7 @@ import {
 } from "./gitx.mjs"
 import { doneComment, holdComment, issueBranch, kickoff, prBody, resume } from "./prompts.mjs"
 import { findWorkspace, reposForIssue, workspacePath } from "./workspaces.mjs"
+import { Book } from "./book.mjs"
 import { startOperation, finishOperation } from "./operations.mjs"
 import { bindWorker, ensureOrchestrator, handToOrchestrator, sessionFlowEnabled, workerOf } from "./sessionflow.mjs"
 
@@ -194,7 +195,11 @@ export async function runRound(ctx) {
 // 派活：读工单 → 建/复用 worktree → 记账 working → dws.open/send 派出去 → 记账会话 → 登记监听。
 // 返回 { repo, number, state:"dispatched", branch, convId }。不 waitFinished、不 info、不验收、不 PR。
 export async function handleIssue(ctx, repoCfg, summary) {
-  const { cfg, book, dws, log } = ctx
+  const { cfg, dws, log } = ctx
+  // 账本兜底：自动接单那一路（pickup/run）的 ctx 自带 book，服务里 `foreman dispatch` 那条 RPC
+  // 用的是服务级 ctx（只有 state/cfg/dws/engine），不带 book——不兜底就会在 book.issue 上崩
+  // （Cannot read properties of undefined (reading 'issue')）。
+  const book = ctx.book ?? new Book(cfg.stateFile)
   const gitea = ctx.gitea ?? realGitea
   const key = issueKey(repoCfg.repo, summary.number)
   const prev = book.issue(key) ?? {}
