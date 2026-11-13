@@ -47,7 +47,7 @@ skip_if_dirty() {
 publish_bin() {
   local name="$1"; shift
   local src="$REPO/$name" dst="$DIST/$name"
-  skip_if_dirty "$name" "$name" || return 0
+  skip_if_dirty "$name" "$name" || return 1
 
   rm -rf "$dst"
   mkdir -p "$dst"
@@ -82,7 +82,7 @@ fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + "\n")
 
 # 发布 skills/ 下的每个技能目录，再逐个软链到豆包技能目录。
 publish_skills() {
-  skip_if_dirty "skills" "skills" || return 0
+  skip_if_dirty "skills" "skills" || return 1
   mkdir -p "$DIST/skills" "$SKILLS_LINK"
   for dir in "$REPO"/skills/*/; do
     local name dst
@@ -95,11 +95,26 @@ publish_skills() {
     ln -sfn "$dst" "$SKILLS_LINK/$name"
     echo "已发布 skill：${name} → ${dst}（链接 ${SKILLS_LINK}/${name}）"
   done
+
+  # 源码里已经删掉的技能：连 dist 和链接一起收掉，别让线上还挂着旧技能
+  for old in "$DIST"/skills/*/; do
+    [ -d "$old" ] || continue
+    name="$(basename "$old")"
+    [ -d "$REPO/skills/$name" ] && continue
+    rm -rf "$old"
+    echo "已收掉旧 skill：${name}"
+  done
+  for link in "$SKILLS_LINK"/*; do
+    [ -L "$link" ] || continue
+    case "$(readlink "$link")" in
+      "$DIST"/skills/*) [ -e "$link" ] || { rm -f "$link"; echo "已收掉旧链接：${link}"; } ;;
+    esac
+  done
 }
 
 # 发布 opencli 的 gitea 适配器，再按文件级软链挂到 ~/.opencli/clis/gitea（链接逻辑在 link-adapter.sh）。
 publish_adapters() {
-  skip_if_dirty "adapters" "adapters" || return 0
+  skip_if_dirty "adapters" "adapters" || return 1
   local dst="$DIST/adapters/gitea"
   rm -rf "$DIST/adapters"
   mkdir -p "$dst"
