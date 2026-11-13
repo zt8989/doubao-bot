@@ -310,3 +310,25 @@ test("notifyDecision：无 RESULT 时正文带执行会话 id 与最后回复；
   assert.ok(!done.text.includes("没有检测到 RESULT"))
   assert.ok(!done.text.includes("原文不该出现"))
 })
+
+// 服务级 ctx 不带账本（只有 state/cfg/dws/engine），dispatch 这条 RPC 必须自己兜底开 Book，
+// 否则 handleIssue 一进来读 book.issue(key) 就崩：Cannot read properties of undefined (reading 'issue')。
+test("dispatch RPC：ctx 不带 book 也能派（dry-run 走完不崩在 book.issue）", async () => {
+  const dir = tmpDir()
+  try {
+    const repo = { repo: "yyzl/demo", name: "demo", dir, base: "sit-20261126", product: "demo" }
+    const cfg = mkCfg(dir, { worktreeDir: path.join(dir, "worktrees"), repos: [repo], sessionFlow: { enabled: true } })
+    const ctx = {
+      ...mkCtx(cfg),
+      dryRun: true,
+      gitea: { viewIssue: async (repoArg, n) => ({ number: n, title: "登录改造", body: "", labels: [], assignees: [], url: "" }) },
+    }
+    assert.equal(ctx.book, undefined, "这条 RPC 的 ctx 就是服务级 ctx，本身没有 book")
+    const r = await handleRequest(ctx, { id: "t", cmd: "dispatch", issue: "yyzl/demo#7" })
+    assert.equal(r.ok, true)
+    assert.equal(r.state, "planned")
+    assert.equal(r.workspaces.length, 1)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
