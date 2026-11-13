@@ -13,12 +13,12 @@ doubao-bot/
 ├── dws/                  # dws 包：bin/dws.mjs、src/、test/、README、package.json
 ├── foreman/              # foreman 包：bin/foreman.mjs、src/、test/、README、package.json
 ├── adapters/gitea/       # opencli 的 gitea 站点适配器源码（23 条命令）
-├── skills/               # dws / foreman / gitea-opencli / workflow 四个技能
+├── skills/               # dws / foreman / gitea-opencli 三个技能
 ├── scripts/link-adapter.sh
 └── package.json          # 只有 test / link:adapter 两个脚本，不放任何 CLI
 ```
 
-技能与链路的对应：`dws` 只管会话、`gitea-opencli` 只管工单读写、`foreman` 管串联、`workflow` 写整条链路（选单→worktree→派活→验收→PR→通知调用方）。
+技能与链路的对应：`dws` 只管会话、`gitea-opencli` 只管工单读写、`foreman` 管串联（选单→worktree→派活→验收→PR→通知调用方）。
 
 三个工具互不代偿：dws 不碰工单和 PR，opencli 不碰豆包会话，herdr 只管 worktree，
 串联只发生在 `foreman` 里。
@@ -35,7 +35,9 @@ scripts/publish.sh --allow-dirty   # 有未提交改动也照发（默认跳过�
 ```
 
 - **命令**：`dws`、`foreman` 由 `npm link` 装到全局，指向 `dist/dws`、`dist/foreman`。
-- **技能**：`~/Doubao/skills/{dws,foreman,gitea-opencli,workflow}` 软链到 `dist/skills/*`。
+- **技能**：`~/Doubao/skills/{dws,foreman,gitea-opencli}` 软链到 `dist/skills/*`。**只有这一处**——
+  别再往工作区 `.user_skills/` 复制同一技能：两个目录都会被扫描，同一技能会出现两张卡片，
+  名字大小写还不一致（踩过一次：`.user_skills/dws` + `~/Doubao/skills/dws` 同时在，面板出现 `Dws` 和 `dws`）。
 - **gitea 适配器**：`~/.opencli/clis/gitea` 必须保持**真目录**（opencli 的发现逻辑
   只扫 `entry.isDirectory()`，目录整体软链会让整条 `gitea` 命令消失），里面的 `.js`
   逐个软链到 `dist/adapters/gitea`。发布 `adapters` 时会自动跑一次挂载；只改了适配器
