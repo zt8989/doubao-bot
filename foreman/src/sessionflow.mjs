@@ -143,9 +143,9 @@ export function ticketText({ repo, issue, orchestrator = "" } = {}) {
     "",
     "下一步（你只做决策，不写代码）：",
     `1. foreman dispatch --issue ${key} —— 建一工程一工作区、开工作会话，会话 id 会绑回这条会话；`,
-    `2. 工作会话的更新会 steer 进来；失败就 foreman resume --issue ${key}（同一会话里续跑，别新开）；`,
-    `3. done 带 PR 就核对后 foreman pr merge <N> --repo <PR 所在仓库>（合并即关单）；`,
-    `4. 合完 foreman clean --issue ${key}，清 worktree 与工作会话。`
+    `2. 工作会话只管改完 commit（不 push、不开 PR、不碰工单），更新会 steer 进来；失败就 foreman resume --issue ${key}（同一会话里续跑，别新开）；`,
+    `3. 工作会话 commit 之后，foreman 自己 push 分支并开 PR（PR 号与链接写进账本与这条更新里）——你不用催它开 PR；`,
+    `4. 核对 PR 后 foreman pr merge <N> --repo <PR 所在仓库>（合并即关单），合完 foreman clean --issue ${key}。`
   )
   return lines.join("\n")
 }

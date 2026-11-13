@@ -22,6 +22,7 @@ import {
   sessionFlowEnabled,
   steerOrchestrator,
 } from "./sessionflow.mjs"
+import { openPrsForIssue } from "./prflow.mjs"
 import { findWorkspace, mergeWorkspace, upsertPr } from "./workspaces.mjs"
 import { WorkflowEngine } from "./workflow/engine.mjs"
 import { NODE_TEARDOWN, runNodeCleanup, resolveIssueKey, issueKeyForPr } from "./workflow/cleaners.mjs"
@@ -879,6 +880,35 @@ export async function pollOnce(ctx) {
       } catch (e) {
         state.dwsErrors++
         log(`dws info ${w.target} 失败：${e.message}`)
+      }
+
+      // 工作会话只负责改完 commit：push 分支、开 PR 都由 foreman 在判定 done 之后自己做。
+      // 它压根不需要知道 foreman 的存在；PR 号与链接进账本，编排会话读到 PR 再决定合不合。
+      if (result?.status === "done" && !Number(result.pr) && w.issueKey) {
+        try {
+          const prOut = await openPrsForIssue(ctx, {
+            issueKey: w.issueKey,
+            summary: result.summary ?? "",
+            tests: result.tests ?? "",
+          })
+          if (prOut.prs.length) {
+            const first = prOut.prs.find((p) => p.repo === String(w.issueKey).split("#")[0]) ?? prOut.prs[0]
+            result = { ...result, prs: prOut.prs, pr: first.pr, prUrl: first.prUrl ?? "", branch: first.branch ?? result.branch }
+            log(`${w.issueKey}：工作会话只 commit 了，foreman 已代开 ${prOut.prs.map((p) => `${p.repo}#${p.pr}`).join("、")}`)
+            for (const p of prOut.prs) {
+              await engine.emit("pr.opened", { issueKey: w.issueKey, pr: p.pr, prUrl: p.prUrl ?? "", target: w.target, workflow: "own" })
+            }
+          } else {
+            // 没有可交付的提交（没 commit / 工作区脏）：当失败处理，交给编排 resume 同一条会话。
+            const why = prOut.notes.join("；") || "工作会话没有留下可交付的提交"
+            result = { ...result, status: "failed", summary: why }
+            log(`${w.issueKey}：done 但没有可开的 PR，按失败处理（${why}）`)
+          }
+        } catch (e) {
+          const why = `自动开 PR 失败：${String(e?.message ?? e).slice(0, 160)}`
+          result = { ...result, status: "failed", summary: why }
+          log(`${w.issueKey}：${why}`)
+        }
       }
 
       // 出结论就推进工单状态：done → pr-open/done，其余进各自的停态（failed 还能 retry）。

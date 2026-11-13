@@ -3,12 +3,11 @@ import { slugify } from "./util.mjs"
 import { builtinPrompt } from "./builtin-prompts.mjs"
 
 export const RESULT_SPEC = `结束时（而且只在结束时）输出一个 RESULT 块，格式严格如下：
-<RESULT>{"status":"done","prs":[{"repo":"<owner/name>","branch":"<该工程的分支>","pr":<PR 编号>,"prUrl":"<PR 链接>"}],"tests":"<你跑过的测试命令与结果，一行>","summary":"<改了什么，50 字内>"}</RESULT>
+<RESULT>{"status":"done","tests":"<你跑过的测试命令与结果，一行>","summary":"<改了什么，50 字内>"}</RESULT>
 status 只有四种：
-- done：改完、自测通过、已经 push 并开了 PR。一工程一 PR：动过几个工程就在 prs 里写几条（每条必带 repo / branch / pr / prUrl），
-  只改一个工程时也可以沿用 "branch" + "pr" + "prUrl" 三个字段；几个工程不能合成一条 PR。
+- done：改完、自测通过、已经 commit（工作区里不留未提交改动）。push、开 PR、合并、关工单都不用你做，也别往 RESULT 里写 prs；
 - need_decision：缺信息或需要人拍板，加 "question" 字段写清楚要问什么，不要猜；
-- blocked：试过了做不了，summary 里写原因；
+- blocked：试过了做不了，summary 里写原因；要改的工程没有工作区也算 blocked，summary 写「缺工作区：<owner/name>」；
 - failed：这次没做成但还能再试，summary 写卡在哪。
 除 RESULT 块外不要在结尾再写别的。`
 
@@ -32,22 +31,22 @@ export function kickoff({ repo, issue, worktree, branch, base, workspaces, faile
   const baseOf = (w) => w.base || base
   const rules = [
     `一工程一工作区：只在自己那条工作区里改（上面按工程列好了）。不要跨到别的工程目录，也不要动各仓库的主 checkout、不要动别的目录。`,
-    `要改的工程不在上面：先 foreman ws add --repo <工程名|owner/name> --issue ${key} 现开一个（幂等，回工作区路径与分支），再进去改；不要因为跨工程交 need_decision，也不要在主 checkout 里改。`,
-    `每个工程各自在本工作区自测通过后：先 git push -u origin <该工程的分支>，再用 foreman pr open --repo <该工程> --base <基线> --head <分支> --title "fix(#${issue.number}): <一句话>" --body "<自证正文>" --issue ${issue.number}${multi ? ` --issue-repo ${repo}` : ""} 开 PR。PR 必须走 foreman（它记账、同步控制台），不要直接 opencli gitea pr；开出几条就把几条写进 RESULT 的 prs。`,
-    `自测没过就先别 push、别开 PR，按 status 交 RESULT 说明卡在哪。工单侧（评论/关单/改标签）可以直接 opencli gitea issue-comment|close|issue-edit，不经 foreman；但 PR 只能经 foreman pr open 建（绕过它这条 PR 就不进账本），合并由 foreman 做、你不要合。不要 force push、不要手改基线。`,
-    `提交信息用中文，首行写 “fix(#${issue.number}): <一句话>”，正文写清改法与验证方式。`,
+    `要改的工程不在上面：先别动手，交 blocked，summary 写「缺工作区：<owner/name>」——工作区由外面补开，你不用自己开，也不要在主 checkout 里改。`,
+    `改完就 commit，然后结束。提交完就停：不要 push、不要开 PR、不要合并、不要关工单、不要动 worktree 或会话——push、PR、合并、收尾都由外面做。`,
+    `提交信息用中文，首行写 “fix(#${issue.number}): <一句话>”，正文写清改法与验证方式。工作区里不要留未提交的改动。`,
+    `想多看工单细节可以读：opencli gitea issue-view --repo ${repo} ${issue.number}（只读，别改工单）。`,
     `先读各仓库里的 AGENTS.md / docs/agents/ 约定（如果有），按仓库自己的规矩来。`,
     multi
       ? `改完必须自己在每个动过的工程里跑相关测试；某个工程跑不了就在 tests 里写清是哪个工程、为什么，不要假装跑过。`
       : `改完必须自己跑相关测试；跑不了就在 tests 里写清原因，不要假装跑过。`,
   ]
   const lines = [
-    `【foreman 接单 · ${repo} #${issue.number} · 第 ${attempt} 次】`,
+    `【工作会话 · ${repo} #${issue.number} · 第 ${attempt} 次】`,
     ``,
     `工单：#${issue.number} ${issue.title}`,
   ]
   if (issue.url) lines.push(`工单链接：${issue.url}`)
-  lines.push(`工单键：${key}（foreman ws add / foreman pr open 用它认单）`)
+  lines.push(`工单键：${key}`)
   lines.push(
     ``,
     `工单正文：`,
@@ -61,7 +60,7 @@ export function kickoff({ repo, issue, worktree, branch, base, workspaces, faile
     ])
   )
   if (failedWorkspaces.length) {
-    lines.push(``, `这些工程的工作区没建成（要改就先 foreman ws add 补开）：`, ...failedWorkspaces.map((f) => `- ${f.repo}：${f.error}`))
+    lines.push(``, `这些工程的工作区没建成（要改就先交 blocked，summary 写「缺工作区：<owner/name>」，工作区由外面补开）：`, ...failedWorkspaces.map((f) => `- ${f.repo}：${f.error}`))
   }
   if (lastFailure) lines.push(``, `上一次没成的反馈：${lastFailure}`)
   lines.push(``, `要求：`, ...rules.map((r, i) => `${i + 1}. ${r}`), ``, RESULT_SPEC)
@@ -69,7 +68,6 @@ export function kickoff({ repo, issue, worktree, branch, base, workspaces, faile
 }
 
 export function resume({ issue, attempt, base = "", failure = "", repo = "", workspaces }) {
-  const key = repo ? `${repo}#${issue.number}` : ""
   const list = normalizeWorkspaces({ repo, workspaces })
   const where = list.length
     ? `一个工程一个工作区：${list.map((w) => `${w.repo} → ${w.worktree}（${w.branch}）`).join("；")}`
@@ -77,8 +75,8 @@ export function resume({ issue, attempt, base = "", failure = "", repo = "", wor
   return [
     `继续工单 #${issue.number}（第 ${attempt} 次尝试）。`,
     failure ? `上一次的问题：${failure}` : "上一次没有跑完，接着当前工作区状态继续，不要重做已完成的部分。",
-    `${where}。要改的工程还没有工作区，先 foreman ws add --repo <工程名|owner/name> --issue ${key || `#${issue.number}`} 现开一个，别跨目录、别在主 checkout 里改。`,
-    `每个工程自测通过后自己 git push + foreman pr open 开 PR（${base ? `--base ${base} ` : ""}--issue ${issue.number}），开出几条就写几条进 RESULT 的 prs；建 PR 只走 foreman、不合并、不 force push。`,
+    `${where}。要改的工程还没有工作区，交 blocked 并在 summary 写「缺工作区：<owner/name>」，别跨目录、别在主 checkout 里改。`,
+    `改完就 commit，然后结束：不要 push、不要开 PR、不要合并、不要关工单、不要动 worktree 或会话。`,
     ``,
     RESULT_SPEC,
   ].join("\n")
