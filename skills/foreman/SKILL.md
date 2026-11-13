@@ -17,22 +17,29 @@ description: 接单编排 CLI（项目 foreman，命令 foreman）：**以编排
 
 ## 以编排会话为中心（默认）
 
-全程只有**一条编排智能体会话**（账本顶层 `orchestrator` 记 `convId`）。整条链路：
+**谁发起，谁就是这张单的编排会话**，工作会话绑到它（账本 `issues[键].orchestrator` + `agentConvId`）。两种发起：
+
+| 发起方式 | 编排会话是谁 | 怎么派 |
+| --- | --- | --- |
+| 定时任务自动接单 | foreman 起的**全局**编排会话（`orch start`，全局只有一条） | 服务 `foreman hand` 交给它 → 它调 `dispatch` |
+| 用户自主发起 | **发起方自己的那条会话**（`--orchestrator`，不传取 `MCP_VM_CONVERSATION_ID`） | 发起方自己调 `foreman dispatch` |
+
+整条链路：
 
 | 步 | 命令 | 谁做 |
 | --- | --- | --- |
-| 起编排会话 | `foreman orch start` | 幂等：已有 convId 就复用，**绝不开第二条** |
+| 起编排会话 | `foreman orch start` | 自动接单才要；幂等，已有 convId 就复用，**绝不开第二条** |
 | 交工单 | `foreman hand <owner/name>#N` | 把工单正文 steer 进编排会话，账本记 `handed`；不建工作区 |
 | 分配工作 | `foreman dispatch <owner/name>#N` | **编排调用**：建一工程一工作区 + 开工作会话，会话 id 绑回编排；已派过就 steer 同一条续跑 |
-| 看链路 | `foreman orch show` | 编排会话、绑了哪些工作会话、最近 steer 了什么 |
+| 看链路 | `foreman orch show` | 每条编排会话（含发起方会话）绑了哪些工作会话、最近 steer 了什么 |
 | 失败续跑 | `foreman resume <owner/name>#N` | 在**同一条工作会话**里 `dws steer`，**不新开** |
-| 合并 | `foreman pr merge <N> --repo R` | 合并即关单；结果 steer 回编排 |
+| 合并 | `foreman pr merge <N> --repo R` | 合并即关单；结果 steer 回这条单的编排会话 |
 | 清尾 | `foreman clean <owner/name>#N`（或 `--all`） | 清 worktree、本地分支、工作会话与监听（幂等） |
 
-- 工作会话的**任何状态更新**（结论、PR、失败原因）都由服务轮询后 `dws steer` 插进编排会话，
-  不再新建会话、不再 `dws notify`。
+- 工作会话的**任何状态更新**（结论、PR、失败原因）都由服务轮询后 `dws steer` 插进**这张单绑的编排会话**，
+  不再新建会话、不再 `dws notify`；用户自主发起的单就插回发起方会话。
 - 失败/卡住一律 `resume`：编排读到 `failed`/`blocked` 就 steer 同一条工作会话；重派也认账本里绑定的 `agentConvId`。
-- PR 监听（别人家的 PR）也 steer 编排会话，不再起「合并会话」。
+- PR 监听（别人家的 PR）steer 到全局编排会话，不再起「合并会话」。
 - 降级：配置 `sessionFlow.enabled: false` 或 `foreman run --direct` 退回老的多会话模型。
 
 ## 收口边界（PR 两步 + 清尾 + 工作区）
@@ -158,11 +165,13 @@ foreman run --every 1800              # 常驻，每 30 分钟一轮
 foreman run --repo win-ai-harness --once
 foreman run --notify <会话id|标题>      # 这一轮派出的会话，登记监听时通知目标写谁
 foreman run --no-notify                # 这一轮不登记监听，因此不会有通知
-foreman orch start                    # 起/复用唯一编排会话（幂等）
-foreman orch show                     # 编排会话、绑了哪些工作会话、最近 steer 了什么
+foreman orch start                    # 起/复用全局编排会话（幂等；自动接单用这条）
+foreman orch show                     # 每条编排会话（含发起方会话）绑了哪些工作会话、最近 steer 了什么
 foreman hand <owner/name>#<N>         # 把工单交给编排会话（不建工作区、不开工作会话）
 foreman dispatch <owner/name>#<N>     # 编排调用：建工作区 + 开工作会话，会话 id 绑回编排
 foreman resume <owner/name>#<N>       # 失败/卡住：在同一条工作会话里 steer（不新开）
+                                      # 以上三条都支持 --orchestrator <会话id|标题>：绑到发起方会话
+                                      #（不传则取 MCP_VM_CONVERSATION_ID，即「用户自己发起的会话」）
 foreman clean <owner/name>#<N>        # 合并关单后清 worktree / 分支 / 工作会话（幂等）
 foreman clean --all                   # 清所有终端态工单的残留
 foreman tasks                         # 每条工单到哪一步、卡在哪

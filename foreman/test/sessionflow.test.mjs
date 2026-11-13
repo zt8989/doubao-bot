@@ -401,6 +401,109 @@ test("dry-run + hand：只打印会交给谁，不 ensure、不 steer", async ()
   }
 })
 
+test("用户自主发起：dispatch 绑调用方会话，不再起全局编排会话", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-caller-"))
+  try {
+    const cfg = mkCfg(dir)
+    const repo = mkRepo(dir, "demo")
+    cfg.repos = [repo]
+    const wt = path.join(cfg.worktreeDir, repo.name, "fix-issue-7")
+    fs.mkdirSync(wt, { recursive: true })
+    fs.writeFileSync(path.join(wt, ".git"), "gitdir: .\n")
+
+    const issue = { number: 7, title: "镜像页", body: "", labels: [], assignees: [], url: "" }
+    const dws = mkDws()
+    const ctx = {
+      cfg,
+      book: new Book(cfg.stateFile),
+      dws,
+      log: () => {},
+      once: true,
+      dryRun: false,
+      // 发起方会话就是这个对话（CLI 从 MCP_VM_CONVERSATION_ID 取到）。
+      orchestrator: "conv-user",
+      gitea: {
+        listIssues: async () => [issue],
+        viewIssue: async (r, n) => ({ ...issue, number: n }),
+        commentIssue: async () => ({}),
+        editLabels: async () => ({}),
+      },
+    }
+
+    const out = await runRound(ctx)
+    assert.equal(out[0].state, "dispatched")
+    const key = "yyzl/demo#7"
+    const book = new Book(cfg.stateFile)
+    const rec = book.issue(key)
+    assert.equal(rec.orchestrator, "conv-user", "单上绑的是发起方会话")
+    assert.equal(book.session(rec.agent).parent, "conv-user")
+    assert.equal(dws.calls.openNew.length, 1, "只开工作会话，不再另起全局编排")
+    assert.equal(orchestratorTarget(book), "", "全局编排会话不该被创建")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("用户自主发起 hand：直接交给调用方会话（不开全局编排）", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-hand-caller-"))
+  try {
+    const cfg = mkCfg(dir)
+    const repo = mkRepo(dir, "demo")
+    cfg.repos = [repo]
+    const dws = mkDws()
+    const issue = { number: 7, title: "镜像页", body: "改 demo 的镜像页" }
+    const ctx = { cfg, dws, log: () => {}, gitea: { viewIssue: async () => issue } }
+
+    const out = await handToOrchestrator(ctx, { repoCfg: repo, issue, orchestrator: "conv-user" })
+    assert.equal(out.convId, "conv-user")
+    assert.equal(dws.calls.openNew.length, 0, "调用方自己就是编排，不用再起会话")
+    assert.equal(dws.calls.steer[0].target, "conv-user")
+    const rec = new Book(cfg.stateFile).issue("yyzl/demo#7")
+    assert.equal(rec.state, "handed")
+    assert.equal(rec.orchestrator, "conv-user")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("pollOnce：更新 steer 到单上绑的发起方会话，不是全局编排", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-poll-caller-"))
+  try {
+    const cfg = mkCfg(dir)
+    const book = new Book(cfg.stateFile)
+    book.setOrchestrator({ convId: "conv-orch", name: "foreman-编排" })
+    book.setIssue("demo/demo#1", {
+      state: "working",
+      agent: "foreman-demo-1",
+      agentConvId: "conv-a",
+      orchestrator: "conv-user",
+    })
+    book.setWatch({ target: "conv-a", name: "foreman-demo-1", issueKey: "demo/demo#1", repo: "demo/demo", number: 1, notifyTo: "" })
+
+    const steered = []
+    const ctx = {
+      cfg,
+      state: { polling: false, watchers: new Map(), dwsErrors: 0, notifiedCount: 0 },
+      log: () => {},
+      gitea: {},
+      dws: {
+        runningMap: async () => ({ "conv-a": { running: false, title: "foreman-demo-1" } }),
+        status: async () => ({ streaming: false, finished: true, chars: 500, head: "H", tail: "T", status: "ok" }),
+        info: async () => ({ lastReply: '<RESULT>{"status":"blocked","summary":"要改另一个仓库"}</RESULT>' }),
+        steer: async (target, text) => { steered.push({ target, text }) },
+        notify: async () => {},
+      },
+    }
+
+    const r = await pollOnce(ctx)
+    assert.equal(r.steered, 1)
+    assert.equal(steered[0].target, "conv-user", "发起方会话才是这条单的编排")
+    assert.match(steered[0].text, /foreman resume --issue demo\/demo#1/)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("sessionFlow 开关：只有显式 enabled=true 才走编排会话", () => {
   assert.equal(sessionFlowEnabled({ sessionFlow: { enabled: true } }), true)
   assert.equal(sessionFlowEnabled({}), false)

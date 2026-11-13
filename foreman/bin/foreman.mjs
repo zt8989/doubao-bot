@@ -33,11 +33,11 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman issue comment <N> --repo R --body <正文>
   foreman issue close <N> --repo R
   foreman run   [--once] [--dry-run] [--direct] [--repo <名字|owner/name>] [--every <秒>] [--notify <会话id|标题>] [--no-notify] [-c <配置>]
-  foreman orch start [--name <会话名>]   起/复用唯一编排会话（幂等，全程只有这一条）
-  foreman orch show                    看编排会话、绑了哪些工作会话、最近 steer 了什么
-  foreman hand <owner/name>#<单号>      把工单交给编排会话（它再自己调 dispatch）
-  foreman dispatch <owner/name>#<单号>  编排调用：建工作区 + 开工作会话，会话 id 绑回编排
-  foreman resume <owner/name>#<单号>    失败/卡住：在同一条工作会话里 steer 续跑（不新开）
+  foreman orch start [--name <会话名>]   起/复用全局编排会话（幂等；只有自动接单用这条）
+  foreman orch show                    看每条编排会话绑了哪些工作会话、最近 steer 了什么
+  foreman hand <owner/name>#<单号> [--orchestrator <id>]      把工单交给编排会话（它再自己调 dispatch）
+  foreman dispatch <owner/name>#<单号> [--orchestrator <id>]  编排调用：建工作区 + 开工作会话，会话 id 绑回编排
+  foreman resume <owner/name>#<单号> [--orchestrator <id>]    失败/卡住：在同一条工作会话里 steer 续跑（不新开）
   foreman clean <owner/name>#<单号>     合并关单后清 worktree、本地分支、工作会话（幂等）
   foreman clean --all                  清所有终端态工单残留的工作区与会话
   foreman pickup [-c <配置>]        手动催一轮自动巡检（服务按 pickup 配置捞一轮单）
@@ -64,9 +64,15 @@ const HELP = `foreman — 接单编排 + 常驻服务
   issue comment|close   评论/关单（可选：用它才会记账，直接 opencli gitea 也行）
   --no-service  跳过自动握手与拉起（逃生口）
 
-run 以编排会话为中心：捞到单先交给唯一编排会话（dws steer），由它调 foreman dispatch 分配工作；
+run 以编排会话为中心：捞到单先交给编排会话（dws steer），由它调 foreman dispatch 分配工作；
 工作会话的每次状态更新都 steer 回这条编排会话，失败也用 foreman resume 在同一会话里续跑。
 合并关单后由编排调 foreman clean 清 worktree 与会话。--direct 退回老行为（run 自己派活）。
+
+编排会话从哪来（工作会话与更新都绑它）：
+  1. 定时任务自动接单：foreman 起的那条全局编排会话（orch start，全局只有一条）；
+  2. 用户自主发起：发起那条会话自己就是编排——hand/dispatch/resume 自动取 MCP_VM_CONVERSATION_ID
+     （或显式 --orchestrator <会话id|标题>，--no-orchestrator 关掉自动识别），
+     工作会话的状态更新 steer 回这条发起方会话。
 --notify <id|标题>：本轮派出去的会话通知给该目标；--no-notify：本轮不登记监听。
 `
 
@@ -501,12 +507,31 @@ async function cmdOrch(pos, flags) {
   return out({ ok: true, ...r })
 }
 
+// 调用方会话 = 谁发起的这张单。两种来源：
+//   1) 定时任务自动接单：发起的进程是服务本身，没有会话 → 返回空，由 foreman 用全局编排会话；
+//   2) 用户在自己的豆包会话里发起：显式 --orchestrator <id|名称>，或自动取 MCP_VM_CONVERSATION_ID
+//      （在会话里跑时它就是发起方那条会话）。--no-orchestrator 关掉自动识别。
+function callerOrchestrator(flags = {}) {
+  const explicit = String(flags.orchestrator ?? flags.orch ?? "").trim()
+  if (explicit) return explicit
+  if (truthy(flags["no-orchestrator"])) return ""
+  return String(process.env.MCP_VM_CONVERSATION_ID ?? "").trim()
+}
+
+// 调用方会话并不总是要绑：传了才写进请求（空字符串等于「交给全局编排会话」）。
+function orchestratorArg(flags = {}) {
+  const who = callerOrchestrator(flags)
+  if (who) process.stderr.write(`  编排：${who}（调用方会话，更新会 steer 到这里）\n`)
+  else process.stderr.write("  编排：全局编排会话（foreman orch start 起的那条）\n")
+  return who ? { orchestrator: who } : {}
+}
+
 async function cmdHand(pos, flags) {
   const ref = String(pos[0] ?? flags.issue ?? "").trim()
   if (!ref) throw new Error("用法：foreman hand <owner/name>#<单号>")
   const cfg = loadConfig(flags.config)
   const port = await resolvePort(cfg)
-  const r = await callRaw(port, { id: "cli", cmd: "hand", issue: ref }, 600000)
+  const r = await callRaw(port, { id: "cli", cmd: "hand", issue: ref, ...orchestratorArg(flags) }, 600000)
   if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
   return out({ ok: true, ...r })
 }
@@ -517,7 +542,7 @@ async function cmdDispatch(pos, flags) {
   const cfg = loadConfig(flags.config)
   const port = await resolvePort(cfg)
   // 派活要建 worktree、开工作会话（no-wait）；窗口忙时可能等一会儿，给足时间。
-  const r = await callRaw(port, { id: "cli", cmd: "dispatch", issue: ref }, 900000)
+  const r = await callRaw(port, { id: "cli", cmd: "dispatch", issue: ref, ...orchestratorArg(flags) }, 900000)
   if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
   return out({ ok: true, ...r })
 }
@@ -527,7 +552,7 @@ async function cmdResume(pos, flags) {
   if (!ref) throw new Error("用法：foreman resume <owner/name>#<单号>（在已有工作会话里 steer 续跑）")
   const cfg = loadConfig(flags.config)
   const port = await resolvePort(cfg)
-  const r = await callRaw(port, { id: "cli", cmd: "resume", issue: ref }, 600000)
+  const r = await callRaw(port, { id: "cli", cmd: "resume", issue: ref, ...orchestratorArg(flags) }, 600000)
   if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
   return out({ ok: true, ...r })
 }

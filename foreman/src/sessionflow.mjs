@@ -81,19 +81,27 @@ export async function ensureOrchestrator(ctx, { name = "" } = {}) {
   return { ok: true, reused: false, created: true, convId: newConvId, name: nm }
 }
 
+// 一张单的编排会话：先看绑在单上的（用户自主发起时会话 id 就记在这里），
+// 没有才回落到 foreman 起的那条全局编排会话。
+export function orchestratorOf(book, issueKey = "", fallback = "") {
+  const own = String(book?.issue?.(String(issueKey ?? ""))?.orchestrator ?? "").trim()
+  return own || String(fallback ?? "").trim() || orchestratorTarget(book)
+}
+
 // 往编排会话里插一条（dws steer：Command+Enter，不打断它当前那一轮）。
-export async function steerOrchestrator(ctx, text, { kind = "" } = {}) {
+// target 给了就用它（单上绑的编排 / 调用方会话），没给才用全局编排会话。
+export async function steerOrchestrator(ctx, text, { kind = "", target = "" } = {}) {
   const cfg = ctx?.cfg ?? {}
   const book = new Book(cfg.stateFile)
-  const target = orchestratorTarget(book)
-  if (!target) return { ok: false, reason: "no-orchestrator" }
+  const to = String(target ?? "").trim() || orchestratorTarget(book)
+  if (!to) return { ok: false, reason: "no-orchestrator" }
   const body = String(text ?? "").trim()
   if (!body) return { ok: false, reason: "empty" }
   if (typeof ctx.dws?.steer !== "function") return { ok: false, reason: "no-steer" }
-  await ctx.dws.steer(target, body)
-  book.markSteer(target, { kind, chars: body.length })
+  await ctx.dws.steer(to, body)
+  book.markSteer(to, { kind, chars: body.length })
   ctx.log?.(`已 steer 进编排会话${kind ? `（${kind}）` : ""}：${body.split("\n")[0].slice(0, 80)}`)
-  return { ok: true, convId: target }
+  return { ok: true, convId: to }
 }
 
 // 账本里这条单绑的工作会话：agent（会话名）+ agentConvId + 绑定时记的 orchestrator。
@@ -143,7 +151,8 @@ export function ticketText({ repo, issue, orchestrator = "" } = {}) {
 }
 
 // 把一张工单交给编排：起/复用编排会话 → steer 工单 → 账本记 handed（等编排来 dispatch）。
-export async function handToOrchestrator(ctx, { repoCfg, issue } = {}) {
+// orchestrator 给了就直接交给那条会话（用户自主发起：它自己就是编排），不再去起全局编排会话。
+export async function handToOrchestrator(ctx, { repoCfg, issue, orchestrator = "" } = {}) {
   const { cfg, log = () => {} } = ctx
   const gitea = ctx.gitea ?? realGitea
   const key = `${repoCfg.repo}#${Number(issue?.number)}`
@@ -156,8 +165,12 @@ export async function handToOrchestrator(ctx, { repoCfg, issue } = {}) {
       log(`${key}：读工单正文失败（只按标题交）：${e.message}`)
     }
   }
-  const orch = await ensureOrchestrator(ctx)
-  await steerOrchestrator(ctx, ticketText({ repo: repoCfg.repo, issue: detail, orchestrator: orch.convId }), { kind: "ticket" })
+  const caller = String(orchestrator ?? ctx.orchestrator ?? "").trim()
+  const convId = caller || (await ensureOrchestrator(ctx)).convId
+  await steerOrchestrator(ctx, ticketText({ repo: repoCfg.repo, issue: detail, orchestrator: convId }), {
+    kind: "ticket",
+    target: convId,
+  })
   const book = new Book(cfg.stateFile)
   const prev = book.issue(key) ?? {}
   book.setIssue(key, {
@@ -166,12 +179,12 @@ export async function handToOrchestrator(ctx, { repoCfg, issue } = {}) {
     issue: Number(issue.number),
     title: String(issue.title ?? detail.title ?? ""),
     url: String(issue.url ?? detail.url ?? ""),
-    orchestrator: orch.convId,
+    orchestrator: convId,
     handedAt: nowIso(),
     attempts: Number(prev.attempts ?? 0) || 0,
   })
-  log(`${key}：已交给编排会话${orch.convId ? `（${orch.convId}）` : ""}，等它 dispatch`)
-  return { repo: repoCfg.repo, number: Number(issue.number), issueKey: key, state: "handed", convId: orch.convId, orchestrator: orch.convId }
+  log(`${key}：已交给编排会话${convId ? `（${convId}）` : ""}${caller ? "（调用方会话）" : ""}，等它 dispatch`)
+  return { repo: repoCfg.repo, number: Number(issue.number), issueKey: key, state: "handed", convId, orchestrator: convId }
 }
 
 // 失败续跑：在同一条工作会话里 steer，不新开（编排侧只看这一条）。

@@ -268,15 +268,20 @@ export async function handleIssue(ctx, repoCfg, summary) {
   const primary = workspaces[0]
   const attempt = (prev.attempts ?? 0) + 1
   const flowOn = sessionFlowEnabled(cfg)
-  // 编排会话只起一次（幂等）。起不来不阻断派单：这条单先不绑，日志里写清，
-  // 之后 foreman orch start 起来再 dispatch 一次就会绑上。
-  let orchConvId = flowOn ? String(prev.orchestrator ?? "").trim() : ""
+  // 编排会话有两种来源，都写进 issues[键].orchestrator，后续更新一律 steer 到它：
+  //   1) 定时任务自动接单：由 foreman 起的那条**唯一**编排会话（ensureOrchestrator 幂等）；
+  //   2) 用户自主发起的会话调 dispatch：直接把调用方会话 id 绑成这张单的编排（--orchestrator / MCP_VM_CONVERSATION_ID）。
+  const caller = String(ctx.orchestrator ?? "").trim()
+  let orchConvId = flowOn ? caller || String(prev.orchestrator ?? "").trim() : ""
   if (flowOn && !orchConvId) {
+    // 起不来不阻断派单：这条单先不绑，日志里写清，之后 orch start 起来再 dispatch 一次就会绑上。
     try {
       orchConvId = (await ensureOrchestrator(ctx)).convId
     } catch (e) {
       log(`${key}：编排会话没起来（${e.message}），这条单先不绑定`)
     }
+  } else if (flowOn && caller) {
+    log(`${key}：绑定调用方会话 ${caller} 为这张单的编排（用户自主发起）`)
   }
 
   book.setIssue(key, {

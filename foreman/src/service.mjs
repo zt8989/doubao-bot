@@ -15,6 +15,7 @@ import {
   ensureOrchestrator,
   handToOrchestrator,
   nextStepLine,
+  orchestratorOf,
   orchestratorInfo,
   orchestratorTarget,
   resumeWorker,
@@ -733,16 +734,19 @@ export async function prPollOnce(ctx, { force = false } = {}) {
     state.pr.target = target
     let out
     try {
-      // 会话中心（默认）：PR 待合并也 steer 进唯一编排会话，不再新建合并会话。
-      // 老模型（sessionFlow.enabled:false）才按 deliver.mode 新建 / 通知。
-      const push = sessionFlowEnabled(cfg)
-        ? async (text) => {
-            const r = await steerOrchestrator(ctx, text, { kind: "pr" })
-            if (!r.ok) throw new Error(`编排会话不可用：${r.reason}`)
-            return r.convId
-          }
-        : null
-      const deliver = !push && deliveryMode(cfg) === "new" ? ctx.deliver : null
+      // 会话中心（默认）：PR 待合并也 steer 进编排会话，不再新建合并会话。
+      // 没有编排会话（还没 orch start）就先不推，免得每轮都报失败；老模型才按 deliver.mode 新建 / 通知。
+      const flowOn = sessionFlowEnabled(cfg)
+      const orchForPr = flowOn ? orchestratorTarget(book) : ""
+      const push =
+        flowOn && orchForPr
+          ? async (text) => {
+              const r = await steerOrchestrator(ctx, text, { kind: "pr", target: orchForPr })
+              if (!r.ok) throw new Error(`编排会话不可用：${r.reason}`)
+              return r.convId
+            }
+          : null
+      const deliver = !flowOn && deliveryMode(cfg) === "new" ? ctx.deliver : null
       out = await prWatchOnce({ cfg, gitea, dws, log, target, deliver, push })
     } catch (e) {
       log(`PR 扫描失败：${e.message}`)
@@ -941,14 +945,15 @@ export async function pollOnce(ctx) {
         continue
       }
 
-      // 会话中心（默认）：把结论 steer 进**唯一编排会话**，由它决定 dispatch / resume / merge / clean。
+      // 会话中心（默认）：把结论 steer 进**这条单绑定的编排会话**（用户自主发起时就是发起方会话；
+      // 自动接单时是 foreman 起的那条全局编排会话），由它决定 dispatch / resume / merge / clean。
       // 不再新建「派单/合并」会话，也不再 dws.notify——一条编排会话读所有这些更新。
-      const orchId = orchestratorTarget(new Book(cfg.stateFile))
+      const orchId = orchestratorOf(new Book(cfg.stateFile), issKey)
       if (sessionFlowEnabled(cfg) && orchId && typeof dws?.steer === "function") {
         const body = [nd.text, nextStepLine({ issueKey: issKey, result: resultOut })].filter(Boolean).join("\n")
         const head = `【工作会话更新】${issKey ? `${issKey} · ` : ""}${w.name || w.target}`
         try {
-          await steerOrchestrator(ctx, `${head}\n${body}`, { kind: nd.event || "session-done" })
+          await steerOrchestrator(ctx, `${head}\n${body}`, { kind: nd.event || "session-done", target: orchId })
           out.steered = (out.steered ?? 0) + 1
           const b = new Book(cfg.stateFile)
           b.markNotified(w.target, decision.fingerprint, { phase: decision.phase, chars: status?.chars ?? 0 })
@@ -1136,13 +1141,14 @@ export async function runMergeTask(ctx, task = {}) {
   // 没有编排会话（老模型 / 还没 orch start）就静默跳过，不影响合并本身。
   if (sessionFlowEnabled(cfg)) {
     try {
+      const target = orchestratorOf(new Book(cfg.stateFile), resolvedKey)
       await steerOrchestrator(
         ctx,
         [
           `【合并完成】${repo}#${pr} 已合并${resolvedNo ? `，工单 ${resolvedKey} 已关单` : ""} · ${where}`,
           resolvedNo ? `下一步：foreman clean --issue ${resolvedKey}（清 worktree 与工作会话）` : "",
         ].filter(Boolean).join("\n"),
-        { kind: "merged" }
+        { kind: "merged", target }
       )
     } catch (e) {
       log(`合并结果 steer 编排会话失败：${e.message}`)
@@ -1530,6 +1536,20 @@ function findRepoCfg(cfg, ref) {
   return (cfg.repos ?? []).find((r) => r.repo === raw || r.name === raw) ?? null
 }
 
+// 这张单的编排会话是谁：自动接单是全局编排会话，用户自主发起是发起方自己的会话。
+// 按 convId 归并，看每条编排会话手里有几条在跑的单。
+export function boundInitiators(book) {
+  const m = new Map()
+  for (const [key, it] of Object.entries(book?.issues ?? {})) {
+    if (!String(it?.agentConvId ?? "").trim()) continue
+    const orch = String(it?.orchestrator ?? "").trim()
+    if (!orch) continue
+    if (!m.has(orch)) m.set(orch, [])
+    m.get(orch).push(key)
+  }
+  return [...m.entries()].map(([convId, issues]) => ({ convId, issues }))
+}
+
 export async function handleRequest(ctx, req) {  const id = req?.id
   const ok = (extra) => ({ id, ok: true, ...extra })
   const fail = (error, message) => ({ id, ok: false, error, message })
@@ -1554,6 +1574,7 @@ export async function handleRequest(ctx, req) {  const id = req?.id
       sessionFlow: {
         enabled: sessionFlowEnabled(ctx.cfg),
         orchestrator: orchestratorTarget(new Book(ctx.cfg.stateFile)),
+        initiators: boundInitiators(new Book(ctx.cfg.stateFile)),
       },
       http: ctx.httpUrl || "",
       port: ctx.state.port ?? null,
@@ -1734,6 +1755,9 @@ export async function handleRequest(ctx, req) {  const id = req?.id
       enabled: sessionFlowEnabled(ctx.cfg),
       orchestrator: orchestratorInfo(book),
       bound: !!target,
+      // 自动接单：工作会话绑到全局编排会话（orchestrator.convId）。
+      // 用户自主发起：工作会话绑到发起方那条会话（initiators 里按 convId 分组）。
+      initiators: boundInitiators(book),
       workers,
       steers: (book.steers[target] ?? []).slice(-5),
     })
@@ -1755,7 +1779,8 @@ export async function handleRequest(ctx, req) {  const id = req?.id
       return fail("gitea-error", `读不到工单 ${repoCfg.repo}#${number}：${e.message}`)
     }
     try {
-      return ok(await handToOrchestrator(ctx, { repoCfg, issue }))
+      // 用户自主发起的会话调 hand：它自己就是这条单的编排，不再另起全局编排会话。
+      return ok(await handToOrchestrator(ctx, { repoCfg, issue, orchestrator: String(req.orchestrator ?? "").trim() }))
     } catch (e) {
       return fail(e.code === "app_unavailable" ? "app_unavailable" : "hand-failed", e.message)
     }
@@ -1771,6 +1796,9 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     const repoCfg = findRepoCfg(ctx.cfg, m[1])
     if (!repoCfg) return fail("bad-request", `配置里没有这个工程：${m[1]}`)
     const number = Number(m[2])
+    // 用户自主发起：调用方会话就是这张单的编排，工作会话的更新都 steer 回它。
+    // 不传（定时任务自动接单）才由 foreman 起/复用那条全局编排会话。
+    const orchestrator = String(req.orchestrator ?? "").trim()
     let issue
     try {
       issue = { ...(await ctx.gitea.viewIssue(repoCfg.repo, number)), number }
@@ -1778,7 +1806,7 @@ export async function handleRequest(ctx, req) {  const id = req?.id
       return fail("gitea-error", `读不到工单 ${repoCfg.repo}#${number}：${e.message}`)
     }
     try {
-      const out = await handleIssue(ctx, repoCfg, issue)
+      const out = await handleIssue({ ...ctx, orchestrator }, repoCfg, issue)
       // 派活这一步补推 session.dispatched：hand 时只推了 issue.picked。
       await ctx.engine?.emit("session.dispatched", {
         issueKey: `${repoCfg.repo}#${number}`,
@@ -1792,8 +1820,15 @@ export async function handleRequest(ctx, req) {  const id = req?.id
   }
 
   // resume：失败/卡住时在**同一条**工作会话里 steer 续跑——不新开工作会话（这是编排的硬约束）。
+  // orchestrator 传了就把这条单改绑到它（用户自主发起时重新认领），后续更新 steer 到那条。
   if (cmd === "resume") {
-    const out = await resumeWorker(ctx, { issueKey: String(req.issue ?? "").trim() })
+    const key = String(req.issue ?? "").trim()
+    const orchestrator = String(req.orchestrator ?? "").trim()
+    if (orchestrator) {
+      const b = new Book(ctx.cfg.stateFile)
+      if (b.issue(key)) b.setIssue(key, { orchestrator })
+    }
+    const out = await resumeWorker(ctx, { issueKey: key })
     if (!out.ok) {
       const msg =
         out.reason === "no-worker" ? "这条单还没有工作会话，先 foreman dispatch"
@@ -1973,11 +2008,13 @@ export async function handleRequest(ctx, req) {  const id = req?.id
         running: ctx.state.pickup?.running === true,
         lastResult: ctx.state.pickup?.lastResult ?? null,
       },
-      // 以编排会话为中心：全程只有这一条编排会话，工作会话绑在它身上，更新走 steer。
+      // 以编排会话为中心：自动接单只有一条全局编排会话；用户自主发起的单把调用方会话绑成它的编排。
+      // 每条单的更新都 steer 进它自己绑的那条（issues[键].orchestrator）。
       sessionFlow: {
         enabled: sessionFlowEnabled(ctx.cfg),
         orchestrator: orchestratorInfo(new Book(ctx.cfg.stateFile)),
         bound: Object.values(new Book(ctx.cfg.stateFile).issues ?? {}).filter((it) => String(it?.agentConvId ?? "").trim()).length,
+        initiators: boundInitiators(new Book(ctx.cfg.stateFile)),
       },
       // 派单与合并都不再有独立通道：接单容量按 workflow 实例数，合并由 `foreman pr merge` 当场执行。
       lanes: {
