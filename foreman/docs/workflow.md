@@ -80,6 +80,9 @@ workflow 面板能看到两条流程的全部节点。
    - 判过就不再读这条会话（读 `dws info` 要切用户窗口）；`merge.verdictAutoMerge: false` 时只判断不合。
 4. 合并结果只落账本与控制台（`mergeAsk` / `mergeTask` / `pr_merge`），**不回执、不通知任何人**：
    关单 / 清工作区 / 归档做完就收工，合并助手交完 RESULT 也停手；合失败同样只记账，原因看 `mergeAsk.error`。
+5. **合并要指出工程与 worktree**：日志 / 控制台事件 / CLI 回包都写 `工程 <仓库> · worktree <路径>`，
+   worktree 取账本里这条单的实现工作区（一工程一工作区时按 PR 所在仓库对号）；别人的 PR 没有工作区时写
+   「无 worktree」并留一行说明，清理 notes 也带路径（`worktree 已删除：<路径>`）。
 
 会话跑完仍会把「PR 已开好」记进账本（notify 节点只落痕、不发消息），真正落地合并的是 workflow，不是会话自己。
 

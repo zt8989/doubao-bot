@@ -977,6 +977,15 @@ export async function runMergeTask(ctx, task = {}) {
     declared: task.workflow,
   })
 
+  // 合并要指明「哪张单、哪个工程、哪块 worktree（有的话）」：工程是 PR 所在仓库，
+  // worktree/分支取账本里这张单的实现工作区（一工程一工作区时按 repo 对号），没有就写「无」。
+  const recOf = plannedKey ? (book0.issue?.(plannedKey) ?? {}) : {}
+  const wsOf = (Array.isArray(recOf.workspaces) ? recOf.workspaces : []).find((x) => String(x?.repo ?? "") === repo) ?? null
+  const worktree = String(task.worktree ?? wsOf?.worktree ?? recOf.worktree ?? "").trim()
+  const branch = String(task.branch ?? wsOf?.branch ?? recOf.branch ?? "").trim()
+  const where = `工程 ${repo}${worktree ? ` · worktree ${worktree}` : " · 无 worktree"}`
+  if (!worktree) log(`合并 ${repo}#${pr}：账本里没有工作区记录（可能是别人的 PR，或工作区已经清掉）`)
+
   if (book0.mergeAsk?.[key]?.status === "merged") {
     book0.markMergeTask(key, { status: "merged", detail: "账本里已是合并状态" })
     return { ok: true, skipped: "already-merged" }
@@ -984,7 +993,7 @@ export async function runMergeTask(ctx, task = {}) {
 
   const op = startOperation(ctx, "merge", `合并 PR ${repo}#${pr}`, {
     key,
-    detail: `${style} · 并发 ${cfg.merge?.concurrency ?? 1} · 不 force merge`,
+    detail: `${style} · 并发 ${cfg.merge?.concurrency ?? 1} · 不 force merge · ${where}`,
   })
   let alreadyMerged = false
   // 「他人 PR」流程：动手合之前先记一笔「核对完、决定合」。
@@ -1003,8 +1012,8 @@ export async function runMergeTask(ctx, task = {}) {
       const reason = await mergeFailureReason({ gitea: ctx.gitea, repo, pr, error: e })
       const b = new Book(cfg.stateFile)
       b.markMergeAsked(key, { pr, url: task.url ?? "", status: "failed", error: reason })
-      b.markMergeTask(key, { status: "failed", error: reason })
-      log(`合并失败 ${repo}#${pr}：${reason}`)
+      b.markMergeTask(key, { status: "failed", error: reason, repo, worktree, branch })
+      log(`合并失败 ${repo}#${pr}（${where}）：${reason}`)
       finishOperation(ctx, op, "failed", reason)
       // 失败也只记账：通知暂停期间不回执给任何人，负责合并的一方从控制台/账本看原因。
       return { ok: false, reason }
@@ -1058,16 +1067,16 @@ export async function runMergeTask(ctx, task = {}) {
   }
   const notes = [...(done.notes ?? []), ...(cleanup?.notes ?? []), ...archivedNotes]
   const book = new Book(cfg.stateFile)
-  book.markMergeTask(key, { status: "merged", mergedAt: nowIso(), notes })
+  book.markMergeTask(key, { status: "merged", mergedAt: nowIso(), notes, repo, worktree, branch })
   ctx.consoleStore?.event({
-    kind: "pr_merge", key, repo, number: pr,
-    to: "merged", detail: `${style}${resolvedNo ? ` · 关单 #${resolvedNo}` : ""}${alreadyMerged ? " · 原本已合并" : ""}`,
+    kind: "pr_merge", key, repo, number: pr, worktree, branch,
+    to: "merged", detail: `${style}${resolvedNo ? ` · 关单 #${resolvedNo}` : ""}${alreadyMerged ? " · 原本已合并" : ""} · ${where}`,
   })
   try { ctx.consoleStore?.sync(new Book(cfg.stateFile)) } catch {}
-  finishOperation(ctx, op, "success", `${alreadyMerged ? "原本已合并" : "合并成功"}${notes.length ? ` · ${notes.join("；")}` : ""}`)
-  log(`合并通道：已合并 ${repo}#${pr}（${key}）${resolvedNo ? `，关单 #${resolvedNo}` : ""}`)
+  finishOperation(ctx, op, "success", `${alreadyMerged ? "原本已合并" : "合并成功"} · ${where}${notes.length ? ` · ${notes.join("；")}` : ""}`)
+  log(`合并通道：已合并 ${repo}#${pr}（${key}）${resolvedNo ? `，关单 #${resolvedNo}` : ""} · ${where}`)
   // 合并成功不回执、不通知任何人：清理/归档已经做完，结果只落账本 + 控制台就收工。
-  return { ok: true, alreadyMerged, notes }
+  return { ok: true, alreadyMerged, notes, repo, issueKey: resolvedKey, worktree, branch }
 }
 
 // ---- 合并判断：合并助手交 RESULT → workflow 合并 ----
@@ -1388,15 +1397,15 @@ export async function cleanupPrArtifacts({ repoDir, worktree, branch = "" } = {}
     return { notes }
   }
   if (!fs.existsSync(worktree)) {
-    notes.push("worktree 已不在，跳过")
+    notes.push(`worktree 已不在，跳过：${worktree}`)
   } else {
     let dirty = ""
     try {
       dirty = await statusPorcelain(worktree)
     } catch {}
-    if (dirty) notes.push("worktree 还有未提交改动，保留")
-    else if (await worktreeRemove(repoDir, worktree)) notes.push("worktree 已删除")
-    else notes.push("worktree 删除失败，保留")
+    if (dirty) notes.push(`worktree 还有未提交改动，保留：${worktree}`)
+    else if (await worktreeRemove(repoDir, worktree)) notes.push(`worktree 已删除：${worktree}`)
+    else notes.push(`worktree 删除失败，保留：${worktree}`)
   }
   if (branch && repoDir) {
     try {
@@ -1643,8 +1652,8 @@ export async function handleRequest(ctx, req) {
     // 通知会话收尾：它报的 PR 现在都合完了，自动归档，别把会话留在侧边栏。
     const notes = [...(result.notes ?? [])]
     try { notes.push(...(await archiveMergedNotices({ dws: ctx.dws, stateFile: ctx.cfg.stateFile, log: ctx.log }))) } catch {}
-    ctx.log?.(`已合并 ${repo}#${number}${issueNo ? `，关单 #${issueNo}` : ""}（走 foreman）${notes.length ? `；收尾：${notes.join("；")}` : ""}`)
-    return ok({ repo, number, merged: true, alreadyMerged: !!result.alreadyMerged, issue: issueNo || null, cleanup: notes })
+    ctx.log?.(`已合并 ${repo}#${number}${issueNo ? `，关单 #${issueNo}` : ""}（走 foreman · 工程 ${repo}${result?.worktree ? ` · worktree ${result.worktree}` : ""}）${notes.length ? `；收尾：${notes.join("；")}` : ""}`)
+    return ok({ repo, number, merged: true, alreadyMerged: !!result.alreadyMerged, issue: issueNo || null, worktree: result?.worktree ?? "", cleanup: notes })
   }
 
   if (cmd === "issue comment") {

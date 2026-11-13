@@ -66,6 +66,9 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
   然后立刻返回（notify 节点只落痕，不发消息；见下面「通知口径」）。
 - 合并结果不另开会话、也不回执：CLI `foreman pr merge` 与合并判断（`mergeable=true`）触发的合并都只落账本 + 控制台
   （`mergeAsk` / `mergeTask` / `pr_merge`），关单 / 清工作区 / 归档做完即收工。
+- **合并要指明「工程 + worktree」**：日志、控制台 `pr_merge`、CLI 回包都写成 `工程 <仓库> · worktree <路径>`；
+  worktree 取账本里这条单的实现工作区（一工程一工作区时按 PR 所在仓库对号），别人的 PR / 没有工作区时写
+  「无 worktree」并留一行说明；本地清理的每条 notes 也带路径（`worktree 已删除：<路径>`）。
 - `foreman status` 里能看：`pickup.maxRunning / inflight`、`lanes.dispatch.workflowActive`、`merge.queued`、
   `merge.judge`（合并助手判断账：pending / merged / held / failed）、`workflow.{workflows,stages,nodes,active,runs,recent}`。
 

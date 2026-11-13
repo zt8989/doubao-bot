@@ -31,6 +31,7 @@ description: 端到端接单工作流：派活、建工作区、开会话、监�
    看进度用 `foreman tasks`，看服务用 `foreman status`；**不要拿 `dws status` 手工判**（那是服务内部的事）。
 5. **合并**：`merge.enabled: true` 时 **foreman 自己合并**（`pr-merge` + `close`），每张 PR 只合一次（账本 `mergeAsk`），`tests` 为空不自动合，冲突只记录不 force merge。
    **合完/合失败都不回执通知**：结果只落账本与控制台（`mergeAsk` / `pr_merge`），关单、清工作区、归档在 `afterMerge` 做完就收工。
+   **合并要指明工程与 worktree**：日志/控制台/回包写 `工程 <仓库> · worktree <路径>`，没有工作区就写「无 worktree」，清理 notes 也带路径。
    要人工决定就 `enabled: false`（默认），PR 停在 `pr-open` 等人。
 6. **回炉与收尾**：卡住的单先 `foreman tasks` 看状态，再 `foreman retry <仓库名|owner/name> <N>` 放回队列（attempts 清零）；worktree 需要清理时按 `~/.foreman/worktrees/<工程>/fix-issue-N` 手动 `git worktree remove`（这是唯一需要动 git 的收尾动作；跨工程的单有好几个目录，按工程逐个清）。
 

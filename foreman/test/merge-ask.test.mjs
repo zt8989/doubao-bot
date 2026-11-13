@@ -98,16 +98,23 @@ test("poll：done+PR 只把 PR 记下来、不入队合并；通知停用期间�
     const rec = new Book(cfg.stateFile).issue("demo/demo#9")
     assert.equal(rec.state, "pr-open")
     assert.equal(rec.pr, 12)
+    // 账本里带着实现工作区：合并时要把「工程 + worktree」指出来。
+    new Book(cfg.stateFile).setIssue("demo/demo#9", { worktree: "/w/demo/fix-issue-9", branch: "fix/issue-9" })
 
     // 编排核对后手动合：runMergeTask 直接执行，合完关单，不回执通知。
+    const logs = []
     const out = await runMergeTask(
-      { cfg, log: () => {}, gitea, dws: mkDws([], sends) },
+      { cfg, log: (s) => logs.push(String(s)), gitea, dws: mkDws([], sends) },
       { key: "demo/demo#12", repo: "demo/demo", pr: 12, issue: 9, notifyTo: "boss", workflow: "own" }
     )
     assert.equal(out.ok, true)
     assert.deepEqual(merged[0], { repo: "demo/demo", pr: 12, opts: { style: "merge", deleteBranch: true } })
     assert.deepEqual(closed, [{ repo: "demo/demo", n: 9 }])
     assert.equal(sends.length, 0, "合并成功不回执、不通知任何人")
+    // 合并结果要指明工程与 worktree（有的话）：回包与日志都带。
+    assert.equal(out.repo, "demo/demo", "回包写明工程")
+    assert.equal(out.worktree, "/w/demo/fix-issue-9", "回包写明 worktree")
+    assert.ok(logs.some((s) => /工程 demo\/demo/.test(s) && s.includes("/w/demo/fix-issue-9")), "日志写明工程与 worktree")
   } finally {
     if (server) await server.close()
     fs.rmSync(dir, { recursive: true, force: true })
