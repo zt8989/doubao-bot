@@ -24,6 +24,23 @@ export function prKey(repo, number) {
   return `${repo}#${number}`
 }
 
+// 账本里已经登记过的自家 PR：issues[<工单仓库>#<工单号>] 的 pr 与 prs[]（一工程一工作区时跨工程各一条）。
+// Gitea 列表返回的 author 常为空，不能只靠作者判归属；账本记过就一定是自己的单。
+export function ownedPrKeys(book) {
+  const keys = new Set()
+  for (const [issueKey, rec] of Object.entries(book?.issues ?? {})) {
+    const repo = String(issueKey).split("#")[0]
+    const pr = Number(rec?.pr ?? 0)
+    if (repo && pr) keys.add(prKey(repo, pr))
+    for (const w of Array.isArray(rec?.prs) ? rec.prs : []) {
+      const r = String(w?.repo ?? "").trim()
+      const n = Number(w?.pr ?? 0)
+      if (r && n) keys.add(prKey(r, n))
+    }
+  }
+  return keys
+}
+
 // 这条 PR 要不要报：作者不在忽略名单里（缺失作者时按「要报」处理，避免漏单）。
 export function shouldReport(pr, cfg) {
   if (!pr?.number || !pr?.repo) return false
@@ -83,6 +100,7 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
   const book = new Book(cfg.stateFile)
   // 调用方（服务层）可以显式给目标；没给就按配置/账本自己算。
   const target = String(overrideTarget ?? prWatchTarget(cfg, book) ?? "").trim()
+  const owned = ownedPrKeys(book)
   const stateFilter = String(pw.state ?? "open")
   const maxPages = Number(pw.maxPages ?? 3) || 3
 
@@ -103,6 +121,11 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
         const key = prKey(pr.repo || repoCfg.repo, pr.number)
         const seen = book.prSeen[key]
         if (seen?.notifiedAt) continue
+        // 账本里已判过「自家 PR」（foreman pr open 时登记的 skipped=self）就不再按 author 重判：
+        // Gitea 列表返回的 author 常为空，shouldReport 又是 fail-open，会被重新报成「别人家的 PR」。
+        if (String(seen?.skipped ?? "") === "self") continue
+        // 账本 issues 里已经挂着这条 PR（foreman pr open 建的），就是自家单，跳过。
+        if (owned.has(key)) continue
         if (!shouldReport({ ...pr, repo: pr.repo || repoCfg.repo }, cfg)) {
           // 自己的 PR 也记一笔，避免以后误报；不发通知。
           book.markPrSeen(key, { ...pr, skipped: "self" })

@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { earliestCaller, prWatchTarget, shouldReport, prNotifyText, prWatchOnce } from "../src/prwatch.mjs"
+import { earliestCaller, prWatchTarget, shouldReport, prNotifyText, prWatchOnce, ownedPrKeys } from "../src/prwatch.mjs"
 import { startServer, prPollOnce } from "../src/service.mjs"
 import { Book } from "../src/book.mjs"
 
@@ -112,6 +112,65 @@ test("prWatchOnce：别人的 PR 报一次、自己的不报、重复扫描不�
     r = await prWatchOnce({ cfg, gitea, dws, log })
     assert.equal(r.notified, 0)
     assert.equal(sent.length, 1)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("ownedPrKeys：从 issues 账本收集自家 PR（含跨工程 prs[]）", () => {
+  const book = {
+    issues: {
+      "demo/demo#11": { pr: 21, prs: [{ repo: "demo/other", pr: 22 }] },
+      "demo/skip#12": { state: "done" },
+    },
+  }
+  const keys = ownedPrKeys(book)
+  assert.ok(keys.has("demo/demo#21"))
+  assert.ok(keys.has("demo/other#22"))
+  assert.equal(keys.size, 2)
+})
+
+test("prWatchOnce：issues 账本里挂着 PR 的自家单，author 为空也不再报", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = baseCfg(dir)
+    // foreman pr open 建完 PR 后写进 issues 账本：这条 PR 是自家单的
+    const book = new Book(cfg.stateFile)
+    book.record("caller-1", { convId: "conv-first" })
+    book.setIssue("demo/demo#7", { pr: 7, state: "pr-open" })
+
+    // Gitea 列表把作者丢了（流水线账号 / 解析为空），账本 prWatch 里没有这条
+    const gitea = { listPulls: async () => [{ repo: "demo/demo", number: 7, title: "自家的", author: "", url: "http://x/pulls/7", state: "open" }] }
+    const sent = []
+    const dws = { notify: async (target, text) => sent.push({ target, text }) }
+
+    const r = await prWatchOnce({ cfg, gitea, dws, log: () => {} })
+    assert.equal(r.notified, 0)
+    assert.equal(sent.length, 0)
+    assert.equal(new Book(cfg.stateFile).prSeen["demo/demo#7"], undefined)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("prWatchOnce：账本里登记过 skipped=self 的自家 PR，author 解析为空也不再报", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = baseCfg(dir)
+    // 模拟 foreman pr open 建完 PR 后的登记：author 记的是自己，skipped=self
+    const book = new Book(cfg.stateFile)
+    book.record("caller-1", { convId: "conv-first" })
+    book.markPrSeen("demo/demo#7", { repo: "demo/demo", number: 7, title: "自家的", author: "233151", skipped: "self" })
+
+    // Gitea 列表把作者丢了（流水线账号 / 解析为空）
+    const gitea = { listPulls: async () => [{ repo: "demo/demo", number: 7, title: "自家的", author: "", url: "http://x/pulls/7", state: "open" }] }
+    const sent = []
+    const dws = { notify: async (target, text) => sent.push({ target, text }) }
+
+    const r = await prWatchOnce({ cfg, gitea, dws, log: () => {} })
+    assert.equal(r.notified, 0)
+    assert.equal(sent.length, 0)
+    assert.equal(new Book(cfg.stateFile).prSeen["demo/demo#7"].notifiedAt, "")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
