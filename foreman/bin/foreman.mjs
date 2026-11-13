@@ -27,7 +27,9 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman watch poll [-c] [--no-service]
   foreman pr list [-c] [--no-service]
   foreman pr poll [-c] [--no-service]
-  foreman pr open --repo R --base <基线> --head <分支> --title <标题> [--body <正文>] [--issue <单号>]
+  foreman pr open --repo R --base <基线> --head <分支> --title <标题> [--body <正文>] [--issue <单号>] [--issue-repo <工单所在仓库>]
+  foreman ws add --repo <工程名|owner/name> --issue <owner/name>#<单号> [--base <基线>]
+  foreman ws list --issue <owner/name>#<单号>
   foreman issue comment <N> --repo R --body <正文>
   foreman issue close <N> --repo R
   foreman run   [--once] [--dry-run] [--repo <名字|owner/name>] [--every <秒>] [--notify <会话id|标题>] [--no-notify] [-c <配置>]
@@ -48,6 +50,8 @@ const HELP = `foreman — 接单编排 + 常驻服务
               监控项目（deliver.projectDir）+ 正文；existing 才塞回已有会话。路径与项目只从配置读。
   pr open     建 PR（唯一入口：agent 也走它，账本/控制台才记得到）
   pr merge <N> --repo R [--issue <单号>]   合并 PR（唯一入口：先核对关联工单再合；失败回理由）
+  ws add      一工程一工作区：工单跨工程时现开一个工作区（幂等），执行会话不许跨目录改
+  ws list     看这条工单已经开了哪几个工程的工作区
   workflow view                            看两条流程（自有工单 / 他人 PR）的节点与累计次数
   workflow pause|resume <节点>             暂停/继续某个节点（只停这个节点，不停止整条流程）
   issue comment|close   评论/关单（可选：用它才会记账，直接 opencli gitea 也行）
@@ -235,6 +239,8 @@ async function cmdPr(pos, flags) {
       repo, base, head, title,
       body: strFlag(flags.body),
       issue: Number(strFlag(flags.issue)) || 0,
+      // 跨工程的单：--issue-repo 指工单所在仓库，账本记到那条单上（不写就是 PR 自己的仓库）。
+      issueRepo: strFlag(flags["issue-repo"]),
     }, 300000)
     if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
     return out({ ok: true, ...r })
@@ -255,6 +261,20 @@ async function cmdPr(pos, flags) {
     return out({ ok: true, ...r })
   }
   throw new Error(`未知 pr 子命令：${sub}（list|poll|open|merge）`)
+}
+
+// ws：一工程一工作区。执行会话跑到一半发现还要改别的工程，用它现开一个工作区（幂等）。
+async function cmdWs(pos, flags) {
+  const cfg = loadConfig(flags.config)
+  const sub = pos.shift() || "list"
+  if (!["add", "list"].includes(sub)) throw new Error("用法：foreman ws add --repo <工程> --issue <owner/name>#<单号> | foreman ws list --issue <owner/name>#<单号>")
+  const issue = strFlag(flags.issue)
+  if (!issue) throw new Error("ws 子命令要 --issue <owner/name>#<工单号>（首句里给的「工单键」）")
+  const req = { id: "cli", cmd: `ws ${sub}`, issue, repo: strFlag(flags.repo), base: strFlag(flags.base) }
+  if (sub === "add" && !req.repo) throw new Error("ws add 要 --repo <工程名|owner/name>")
+  const r = await callRaw(resolvePort(cfg), req, 300000)
+  if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
+  return out({ ok: true, ...r })
 }
 
 // workflow：看两条流程的节点、暂停/继续某个节点（节点级开关，不停止整条流程）。
@@ -345,7 +365,14 @@ async function cmdRun(pos, flags) {
     out({
       ok: true,
       dryRun,
-      handled: handled.map((h) => ({ repo: h.repo, number: h.number, state: h.state, branch: h.branch ?? null, convId: h.convId ?? null })),
+      handled: handled.map((h) => ({
+        repo: h.repo,
+        number: h.number,
+        state: h.state,
+        branch: h.branch ?? null,
+        workspaces: Array.isArray(h.workspaces) ? h.workspaces.length : null,
+        convId: h.convId ?? null,
+      })),
       summary: summarize(handled),
     })
   } catch (e) {
@@ -487,6 +514,8 @@ async function main() {
       return cmdWatch(pos, flags)
     case "workflow":
       return cmdWorkflow(pos, flags)
+    case "ws":
+      return cmdWs(pos, flags)
     case "pr":
       return cmdPr(pos, flags)
     case "issue":

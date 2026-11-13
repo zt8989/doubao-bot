@@ -6,11 +6,12 @@ import path from "node:path"
 import crypto from "node:crypto"
 import { nowIso, sleep, inWorkHours } from "./util.mjs"
 import { Book } from "./book.mjs"
-import { parseResult, deliverPrompt, noticeSessionName } from "./prompts.mjs"
+import { parseResult, deliverPrompt, noticeSessionName, issueBranch } from "./prompts.mjs"
 import { builtinPrompt } from "./builtin-prompts.mjs"
 import { notifyTarget, shouldNotify, notifyText, runRound, acquireLock, releaseLock } from "./orchestrator.mjs"
+import { findWorkspace, mergeWorkspace, upsertPr } from "./workspaces.mjs"
 import { WorkflowEngine } from "./workflow/engine.mjs"
-import { NODE_TEARDOWN, runNodeCleanup, resolveIssueKey } from "./workflow/cleaners.mjs"
+import { NODE_TEARDOWN, runNodeCleanup, resolveIssueKey, issueKeyForPr } from "./workflow/cleaners.mjs"
 import { DoubaoSessionAdapter } from "./workflow/adapters/doubao.mjs"
 import { GiteaTrackerAdapter } from "./workflow/adapters/gitea.mjs"
 import { prWatchOnce, prWatchTarget, mergeFailureReason } from "./prwatch.mjs"
@@ -23,7 +24,7 @@ import { startOperation, finishOperation } from "./operations.mjs"
 import { startConsoleHttp } from "./consolehttp.mjs"
 import { fileURLToPath } from "node:url"
 import { pingOnce, readPortFile } from "./svclient.mjs"
-import { worktreeRemove, statusPorcelain, git } from "./gitx.mjs"
+import { worktreeRemove, statusPorcelain, git, createWorktree } from "./gitx.mjs"
 
 export const MAX_FRAME_BYTES = 1 << 20
 
@@ -245,6 +246,7 @@ export function notifyDecision({ cfg, watcher, book, env = process.env, result }
   let branch = ""
   let pr = null
   let prUrl = ""
+  let workspaces = []
   if (watcher?.issueKey) {
     const rec = book?.issue?.(watcher.issueKey) ?? {}
     const [r, n] = String(watcher.issueKey).split("#")
@@ -254,6 +256,7 @@ export function notifyDecision({ cfg, watcher, book, env = process.env, result }
     branch = rec.branch ?? ""
     pr = rec.pr ?? null
     prUrl = rec.prUrl ?? ""
+    workspaces = Array.isArray(rec.workspaces) ? rec.workspaces : []
   }
   // 会话自己开了 PR：以 RESULT 里的为准（账本里可能还没有）。
   if (result?.pr) pr = result.pr
@@ -266,6 +269,7 @@ export function notifyDecision({ cfg, watcher, book, env = process.env, result }
     branch,
     pr,
     prUrl,
+    workspaces,
     merged: !!result?.merged,
     mergeQueued: !!result?.mergeQueued,
     mergeError: result?.mergeError || "",
@@ -283,6 +287,10 @@ export function mergeDecision({ cfg, watcher, book, result }) {
   if (merge.enabled !== true) return { send: false, reason: "disabled" }
   if ((merge.by ?? "foreman") !== "foreman") return { send: false, reason: `by-${merge.by}` }
   if (result?.status !== "done") return { send: false, reason: "not-done" }
+  // 一工程一工作区：跨工程的单有几条 PR，自动合并只认一条会半合，交编排逐条核对后再合。
+  if (Array.isArray(result?.prs) && result.prs.length > 1) {
+    return { send: false, reason: `multi-pr:${result.prs.length}` }
+  }
   const pr = Number(result.pr) || 0
   if (!pr) return { send: false, reason: "no-pr" }
   // 没有自证就不自动合：测试没跑过/没写结果的，交给人看。
@@ -954,12 +962,21 @@ export async function runMergeTask(ctx, task = {}) {
   if (!repo || !pr) return { ok: false, reason: "bad-task" }
   const style = String(task.style ?? cfg.merge?.style ?? "merge")
   const deleteBranch = task.deleteBranch !== false
-  // 这条 PR / 这张单属于哪条流程：显式指定就用它；没指定时按账本推断。
-  // foreman 派过的单一定有 branch / worktree / agent（own）；查不到痕迹的 PR 才是别人开的（review）。
-  const workflow = workflowForIssue({ book: new Book(cfg.stateFile), repo, issueNo, declared: task.workflow })
-
   // 账本里已经是合并状态：不重复合，直接把队列条目收掉。
   const book0 = new Book(cfg.stateFile)
+  // 一工程一工作区：跨工程的单，PR 在别的仓库、工单在哪个仓库只有账本的 prs[] 知道，
+  // 所以先在账本里按 (repo, pr) 反查工单键，别拿 PR 自己的仓库硬拼。
+  const plannedKey = issueKeyForPr(book0, repo, pr, issueNo)
+  const plannedNo = Number(String(plannedKey).split("#")[1] ?? 0) || issueNo
+  // 这条 PR / 这张单属于哪条流程：显式指定就用它；没指定时按账本推断。
+  // foreman 派过的单一定有 branch / worktree / agent（own）；查不到痕迹的 PR 才是别人开的（review）。
+  const workflow = workflowForIssue({
+    book: book0,
+    repo: String(plannedKey).split("#")[0] || repo,
+    issueNo: plannedNo,
+    declared: task.workflow,
+  })
+
   if (book0.mergeAsk?.[key]?.status === "merged") {
     book0.markMergeTask(key, { status: "merged", detail: "账本里已是合并状态" })
     return { ok: true, skipped: "already-merged" }
@@ -997,11 +1014,10 @@ export async function runMergeTask(ctx, task = {}) {
   // 合并成功：按 PR 反查它属于哪张工单。没传 --issue 时不再留空——留空的话 close 节点
   // 接不上，工单就停在 pr-open（PR #122 合完 #121 还挂着就是这个原因）。
   const book1 = new Book(cfg.stateFile)
-  const resolvedKey = issueNo
-    ? `${repo}#${issueNo}`
-    : (ctx.engine?.issueKeyForPr?.(book1, repo, pr) || resolveIssueKey({ runs: ctx.engine?.runs?.(200) ?? [], book: book1, repo, pr }))
+  const resolvedKey = issueKeyForPr(book1, repo, pr, issueNo) || plannedKey
   const resolvedNo = Number(String(resolvedKey).split("#")[1] ?? 0) || 0
-  const finalWorkflow = workflowForIssue({ book: book1, repo, issueNo: resolvedNo, declared: task.workflow })
+  const issueRepo = String(resolvedKey).split("#")[0] || repo
+  const finalWorkflow = workflowForIssue({ book: book1, repo: issueRepo, issueNo: resolvedNo, declared: task.workflow })
 
   // 逐节点收尾：每个节点只清自己产生的东西。有 engine 时由它按节点跑
   // （merge → pr-open → dispatch → close → cleanup → archive）；没有 engine 时用同口径的 finishMergedPr。
@@ -1025,6 +1041,7 @@ export async function runMergeTask(ctx, task = {}) {
       repo,
       number: pr,
       issueNo: resolvedNo,
+      issueKey: resolvedKey,
       url: String(task.url ?? ""),
       alreadyMerged,
       cleanup: async () => ({ notes: [] }),
@@ -1325,20 +1342,22 @@ export async function finishMergedPr({
   repo,
   number,
   issueNo = 0,
+  issueKey = "",
   url = "",
   alreadyMerged = false,
   cleanup = cleanupPrArtifacts,
 } = {}) {
   const key = `${repo}#${number}`
   const book = new Book(stateFile)
-  const issueKey = issueNo ? `${repo}#${issueNo}` : ""
+  // 一工程一工作区：跨工程时 PR 的仓库不是工单的仓库，工单键必须由调用方给（或按 prs[] 反查）。
+  const issueKeyResolved = issueKey || (issueNo ? issueKeyForPr(book, repo, number, issueNo) : "")
   const ctx = {
     book,
     cfg,
     repo,
     pr: number,
     prUrl: url,
-    issueKey,
+    issueKey: issueKeyResolved,
     issueNo: Number(issueNo ?? 0),
     key,
     tracker: {
@@ -1354,9 +1373,9 @@ export async function finishMergedPr({
     notes.push(...(await runNodeCleanup(stage, ctx)).notes)
   }
   // workspace 节点处置账本里的 worktree/分支；没有关联工单时它只回一句跳过说明。
-  if (issueKey) notes.push(...(await runNodeCleanup("workspace", ctx)).notes)
+  if (issueKeyResolved) notes.push(...(await runNodeCleanup("workspace", ctx)).notes)
   notes.push(...(await runNodeCleanup("cleanup", ctx)).notes)
-  return { key, issueKey, notes, alreadyMerged }
+  return { key, issueKey: issueKeyResolved, notes, alreadyMerged }
 }
 
 // cleanupPrArtifacts：合并后的本地收尾——删 worktree、删本地分支。
@@ -1482,17 +1501,114 @@ export async function handleRequest(ctx, req) {
       skipped: "self",
     })
     const issueNo = Number(req.issue ?? 0)
-    if (issueNo) b.setIssue(`${repo}#${issueNo}`, { state: "pr-open", title, pr: number, prUrl: pr.url ?? "", branch: head })
+    // 一工程一工作区：跨工程的单会在多个仓库各开一条 PR，账本按 <工单所在仓库>#<N> 记一组 prs[]。
+    // 主仓库那条仍写 pr / prUrl / branch（控制台与老逻辑读这几个字段）。
+    const issueRepo = String(req.issueRepo ?? "").trim() || repo
+    if (issueNo) {
+      const issueKey = `${issueRepo}#${issueNo}`
+      const rec = b.issue(issueKey) ?? {}
+      const patch = {
+        state: rec.state === "done" ? "done" : "pr-open",
+        prs: upsertPr(rec.prs, { repo, branch: head, pr: number, prUrl: pr.url ?? "" }),
+      }
+      if (repo === issueRepo || !Number(rec.pr ?? 0)) {
+        patch.pr = number
+        patch.prUrl = pr.url ?? ""
+        patch.branch = head
+      }
+      b.setIssue(issueKey, patch)
+    }
     ctx.consoleStore?.event({
       kind: "pr_open", key: `${repo}#${number}`, repo, number,
       to: "open",
-      detail: `${base} ← ${head}${issueNo ? ` · 工单 #${issueNo}` : ""}`,
+      detail: `${base} ← ${head}${issueNo ? ` · 工单 ${issueRepo}#${issueNo}` : ""}`,
     })
     // 立刻落库，控制台不用等下一轮同步。
     try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
     ctx.log?.(`PR 建好 ${repo}#${number} ${pr.url ?? ""}（走 foreman）`)
     finishOperation(ctx, op, "success", `${repo}#${number} · ${pr.url ?? ""}`)
-    return ok({ repo, pr: number, url: pr.url ?? "", issue: issueNo || null })
+    return ok({ repo, pr: number, url: pr.url ?? "", issue: issueNo || null, issueRepo: issueNo ? issueRepo : null })
+  }
+
+  // ws add：一工程一工作区。执行会话在跑的过程中发现还要改别的工程，就用这条现开一个工作区
+  // （幂等：已有就复用），不必为了跨工程交 need_decision，也不许去主 checkout 里改。
+  // 用法：foreman ws add --repo <工程名|owner/name> --issue <owner/name>#<工单号> [--base <基线>]
+  if (cmd === "ws add") {
+    const issueRef = String(req.issue ?? "").trim()
+    const m = issueRef.match(/([^#\s]+)#([0-9]+)$/)
+    if (!m) return fail("bad-request", `ws add 的 --issue 要写成 <owner/name>#<工单号>，收到：${issueRef || "（空）"}`)
+    const key = `${m[1]}#${Number(m[2])}`
+    const repoRef = String(req.repo ?? "").trim()
+    const repoCfg = (ctx.cfg.repos ?? []).find((r) => r.repo === repoRef || r.name === repoRef)
+    if (!repoCfg) return fail("bad-request", `配置里没有这个工程：${repoRef || "（空）"}`)
+    const book0 = new Book(ctx.cfg.stateFile)
+    const rec = book0.issue(key)
+    if (!rec) return fail("bad-request", `没处理过这条工单：${key}（先核对 --issue 的仓库与单号）`)
+    const prev = findWorkspace(rec, repoCfg.repo)
+    const branch = prev?.branch || issueBranch({ number: Number(m[2]) }, rec.title ?? "")
+    const base = String(req.base ?? "").trim() || repoCfg.base
+    let wt
+    try {
+      wt = await createWorktree({
+        repoDir: repoCfg.dir,
+        worktreeDir: path.join(ctx.cfg.worktreeDir, repoCfg.name),
+        branch,
+        base,
+        herdrBin: ctx.cfg.herdr?.bin ?? "herdr",
+        useHerdr: ctx.cfg.herdr?.enabled !== false,
+        log: ctx.log ?? (() => {}),
+      })
+    } catch (e) {
+      return fail("workspace-failed", String(e?.message ?? e))
+    }
+    // 老账本（没有 workspaces）只有主仓库那条：先用工单键里的仓库把它补进清单，再加新工程，
+    // 免得把主仓库的 worktree 记录冲掉、以后收尾找不到它。
+    const keyRepo = String(m[1])
+    const base0 = Array.isArray(rec.workspaces) && rec.workspaces.length
+      ? rec.workspaces
+      : (rec.worktree ? [{ repo: keyRepo, branch: rec.branch ?? "", worktree: rec.worktree }] : [])
+    const workspaces = mergeWorkspace(base0, {
+      repo: repoCfg.repo,
+      name: repoCfg.name,
+      branch,
+      base,
+      worktree: wt.path,
+      backend: wt.backend,
+      addedAt: nowIso(),
+    })
+    book0.setIssue(key, {
+      workspaces,
+      repo: rec.repo || keyRepo,
+      // 主仓库那条老字段保持原样：没有才补，别让后加的工程覆盖掉。
+      ...(rec.branch ? {} : { branch: prev?.branch || workspaces[0]?.branch || branch }),
+      ...(rec.worktree ? {} : { worktree: workspaces[0]?.worktree || wt.path }),
+    })
+    try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
+    ctx.log?.(`ws add ${key}：${repoCfg.repo} → ${wt.path}（${branch}，${wt.reused ? "复用" : `新建·${wt.backend}`}）`)
+    return ok({
+      key,
+      repo: repoCfg.repo,
+      branch,
+      base,
+      worktree: wt.path,
+      reused: !!wt.reused,
+      workspaces: workspaces.map((w) => ({ repo: w.repo, branch: w.branch, worktree: w.worktree })),
+    })
+  }
+
+  // ws list：这条工单现在有几个工作区（每个工程一个）。
+  if (cmd === "ws list") {
+    const issueRef = String(req.issue ?? "").trim()
+    const m = issueRef.match(/([^#\s]+)#([0-9]+)$/)
+    if (!m) return fail("bad-request", `ws list 的 --issue 要写成 <owner/name>#<工单号>，收到：${issueRef || "（空）"}`)
+    const key = `${m[1]}#${Number(m[2])}`
+    const rec = new Book(ctx.cfg.stateFile).issue(key)
+    if (!rec) return fail("bad-request", `没处理过这条工单：${key}`)
+    return ok({
+      key,
+      workspaces: (rec.workspaces ?? []).map((w) => ({ repo: w.repo, branch: w.branch, worktree: w.worktree })),
+      prs: (rec.prs ?? []).map((p) => ({ repo: p.repo, pr: p.pr, prUrl: p.prUrl, branch: p.branch })),
+    })
   }
 
   if (cmd === "pr merge") {

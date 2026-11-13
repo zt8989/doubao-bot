@@ -29,10 +29,14 @@ function at(stage, msg) {
 
 export const NODE_TEARDOWN = {
   // workspace：它建的 worktree 与本地分支，只有它自己清得掉（herdr 工作区按 checkout_path 匹配）。
+  // 一工程一工作区：只清这次合并那条 PR 所属工程的工作区，别的工程的留着（它们的 PR 还没合）。
   async workspace({ book, issueKey, repo, cfg = {}, workspace, log = () => {} }) {
     const rec = issueKey ? book.issue(issueKey) : null
-    if (!rec?.worktree && !rec?.branch) {
-      return { notes: [`账本里没有 worktree 记录，跳过本地清理`] }
+    const ws = (rec?.workspaces ?? []).find((w) => w?.repo === repo)
+      // 老账本只有单工作区：只认主仓库。
+      ?? (!rec?.workspaces?.length && (rec?.repo === repo || (!rec?.repo && rec?.worktree)) ? { worktree: rec?.worktree, branch: rec?.branch } : null)
+    if (!ws?.worktree && !ws?.branch) {
+      return { notes: [`账本里没有 ${repo || "该工程"} 的工作区记录，跳过本地清理`] }
     }
     const repoDir = (cfg.repos ?? []).find((r) => r.repo === repo)?.dir ?? ""
     if (!workspace?.cleanup || !repoDir) {
@@ -41,8 +45,8 @@ export const NODE_TEARDOWN = {
     try {
       const out = await workspace.cleanup({
         repoDir,
-        worktree: rec.worktree ?? "",
-        branch: rec.branch ?? "",
+        worktree: ws.worktree ?? "",
+        branch: ws.branch ?? "",
       })
       return { notes: out?.notes ?? [] }
     } catch (e) {
@@ -56,7 +60,9 @@ export const NODE_TEARDOWN = {
   async dispatch({ book, issueKey, repo, issueNo }) {
     let count = 0
     while (issueKey && book.delWatchIssue(issueKey)) count++
-    const slug = String(repo ?? "").split("/").pop() ?? ""
+    // 执行会话名按工单所在仓库起（跨工程时 PR 的仓库不是工单的仓库）。
+    const issueRepo = String(issueKey ?? "").split("#")[0] || String(repo ?? "")
+    const slug = issueRepo.split("/").pop() ?? ""
     const sessionName = slug && issueNo ? `foreman-${slug}-${issueNo}` : ""
     const droppedSession = sessionName && typeof book.delSession === "function" ? book.delSession(sessionName) : false
     const notes = []
@@ -92,12 +98,26 @@ export const NODE_TEARDOWN = {
   },
 
   // close：关单 + 摘 ready-for-agent + 工单账本 done。没有工单号时明确说一句，不静默。
+  // 一工程一工作区：这张单在几个工程各开了一条 PR，只合了一条就先不关单——
+  // 关早了另一条 PR 再也接不上工单，人也以为整单收完了。
   async close({ tracker, book, issueKey, repo, issueNo, pr, prUrl = "" }) {
     const number = Number(issueNo ?? 0)
     if (!number || !issueKey) return { notes: [at("close", "没有关联工单号，关单与摘标签跳过")] }
+    const rec = book.issue(issueKey) ?? {}
+    const prs = (Array.isArray(rec.prs) ? rec.prs : []).filter((p) => Number(p?.pr) > 0)
+    const pending = prs.filter((p) => !(String(p.repo) === String(repo) && Number(p.pr) === Number(pr)) && !prMerged(book, p))
+    if (pending.length) {
+      return {
+        notes: [
+          at("close", `还有 ${pending.length} 个工程的 PR 没合（${pending.map((p) => `${p.repo}#${p.pr}`).join("、")}），工单 #${number} 先不关`),
+        ],
+      }
+    }
     const notes = []
+    // 关单关在工单自己所在的仓库（跨工程时 PR 的仓库可能不是它）。
+    const issueRepo = String(issueKey).split("#")[0] || repo
     try {
-      await tracker.closeIssue(repo, number)
+      await tracker.closeIssue(issueRepo, number)
     } catch (e) {
       const msg = String(e?.message ?? e ?? "")
       // 已经是关闭状态同样算收尾完成，不算失败。
@@ -107,7 +127,7 @@ export const NODE_TEARDOWN = {
     // 标签是 close 节点的产物：单都关了，接单标签必须摘掉，不然控制台/查询里还挂着。
     try {
       if (typeof tracker.editLabels === "function") {
-        const out = await tracker.editLabels(repo, number, { remove: READY_LABEL })
+        const out = await tracker.editLabels(issueRepo, number, { remove: READY_LABEL })
         if (out?.changed) notes.push(`摘掉标签 ${READY_LABEL}`)
       }
     } catch (e) {
@@ -119,6 +139,7 @@ export const NODE_TEARDOWN = {
       prUrl: prUrl || undefined,
       mergeError: "",
     })
+    if (prs.length > 1) notes.push(`整单收尾：${prs.length} 个工程的 PR 都合了`)
     return { notes }
   },
 
@@ -179,8 +200,38 @@ export async function runNodeCleanup(stage, ctx, { paused = false } = {}) {
   return { stage, notes: out?.notes ?? [] }
 }
 
+// 这条 PR 是不是已经合了：pr-open 节点盖的 merged，或 merge 节点盖的 mergeAsk。
+export function prMerged(book, p = {}) {
+  const repo = String(p.repo ?? "").trim()
+  const number = Number(p.pr ?? 0)
+  if (!repo || !number) return false
+  const key = `${repo}#${number}`
+  const seen = book?.prSeen?.[key]
+  const ask = book?.mergeAsk?.[key]
+  return seen?.merged === true || seen?.skipped === "merged" || ask?.status === "merged"
+}
+
+// 按 PR 反查工单键：先认「PR 仓库 + 工单号」这条直路，再翻账本里的 prs[]。
+// 一工程一工作区之后，PR 的仓库常常不是工单所在的仓库，只按仓库前缀拼会拼出一条不存在的单。
+export function issueKeyForPr(book, repo, pr, issueNo = 0) {
+  const direct = issueNo ? `${repo}#${Number(issueNo)}` : ""
+  if (direct && book?.issue?.(direct)) return direct
+  const number = Number(pr ?? 0)
+  if (number) {
+    for (const [key, rec] of Object.entries(book?.issues ?? {})) {
+      if ((rec?.prs ?? []).some((p) => String(p?.repo) === String(repo) && Number(p?.pr) === number)) return key
+    }
+  }
+  if (!direct && number) {
+    for (const [key, rec] of Object.entries(book?.issues ?? {})) {
+      if (Number(rec?.pr) === number && (!repo || String(key).startsWith(`${repo}#`))) return key
+    }
+  }
+  return direct
+}
+
 // 由 PR 反查工单：先看流程实例（own 流程的 run key 就是工单键，且 pr 落在 run 上），
-// 再看账本里 pr 对得上的工单记录。合并命令没给 --issue 时靠这条把关单节点接上。
+// 再看账本里 prs[] / pr 对得上的工单记录。合并命令没给 --issue 时靠这条把关单节点接上。
 export function resolveIssueKey({ runs = [], book = null, repo = "", pr = 0 } = {}) {
   const number = Number(pr ?? 0)
   if (!number) return ""
@@ -192,8 +243,11 @@ export function resolveIssueKey({ runs = [], book = null, repo = "", pr = 0 } = 
   }
   const issues = book?.issues ?? {}
   for (const [key, it] of Object.entries(issues)) {
+    if ((it?.prs ?? []).some((p) => String(p?.repo) === String(repo) && Number(p?.pr) === number)) return key
+  }
+  for (const [key, it] of Object.entries(issues)) {
     if (Number(it?.pr) !== number) continue
-    if (repo && !key.startsWith(`${repo}#`)) continue
+    if (repo && !String(key).startsWith(`${repo}#`)) continue
     return key
   }
   return ""

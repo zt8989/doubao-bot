@@ -1,6 +1,6 @@
 ---
 name: workflow
-description: 端到端接单工作流：派活、建工作区、开会话、监听、结论落账、合并由 foreman 串起来；只有**建 PR（`foreman pr open`）与合并（`foreman pr merge`）**必须经 foreman，opencli gitea 的读与建单/改单/评论/关单、herdr、dws 会话都直连。当用户说「走一遍工作流」「整条链路」「接单到出 PR 怎么串」「结论落在哪」「几个工具怎么分工」，或问某一环卡在哪（app_busy / 会话没开起来 / 验收不过 / 卡在 pr-open）时使用。
+description: 端到端接单工作流：派活、建工作区、开会话、监听、结论落账、合并由 foreman 串起来；只有**建 PR（`foreman pr open`）、合并（`foreman pr merge`）与补开工作区（`foreman ws add`）**必须经 foreman（都要写账本）；一工程一工作区，跨工程的单每个工程各一个 worktree、各一条 PR；opencli gitea 的读与建单/改单/评论/关单、herdr、dws 会话都直连。当用户说「走一遍工作流」「整条链路」「接单到出 PR 怎么串」「结论落在哪」「几个工具怎么分工」，或问某一环卡在哪（app_busy / 会话没开起来 / 验收不过 / 卡在 pr-open）时使用。
 ---
 
 # workflow：一条工单从接到收
@@ -73,13 +73,14 @@ foreman pr list   # 看 PR 监听账本
 
 ## 铁律
 
-- **只有两步必须经 foreman**：建 PR `foreman pr open`、合并 `foreman pr merge`。其余随便：读单读 PR `opencli gitea pr-view|issue-view|search`、建单/评论/改单/关单 `opencli gitea issue|issue-comment|issue-edit|close`、`herdr`、`dws` 都直连。
+- **只有两步必须经 foreman**：建 PR `foreman pr open`、合并 `foreman pr merge`。其余随便：读单读 PR `opencli gitea pr-view|issue-view|search`、建单/评论/改单/关单 `opencli gitea issue|issue-comment|issue-edit|close`、`herdr`、`dws` 都直连。**一工程一工作区**的补开工作区 `foreman ws add` 例外——它要写账本，也得经 foreman。
 - **基线与状态这类 foreman 自己的动作照旧走它**：接单 `foreman run`、看进度 `foreman tasks`、回炉 `foreman retry`、服务 `foreman ping|status|serve`。
 - **基线由配置 `repos[].base` 决定**（本工程当前 `sit-20261126`），不用 `dev`；`foreman pr open` 不写 `--base` 就取它。
 - **不 force merge**：冲突就停下、留记录、交人。
 - **会话自测通过就 push，再用 `foreman pr open` 开 PR，不合并**；`merge.enabled: true` 时由 foreman 合并。
 - **建 PR 必须走 foreman**；直接 `opencli gitea pr` 开的 PR 在账本里不存在，控制台统计断档。工单侧怎么写都不影响账本。
-- 一个工单一个会话名 `foreman-<仓库>-<单号>`，同名续会话、不会重开。
+- 一个工单一个会话名 `foreman-<工单所在仓库>-<单号>`，同名续会话、不会重开；跨工程时名字仍按工单所在仓库起。
+- **一工程一工作区、一工程一 PR**：不许把两个工程的改动塞进一个 worktree/一条 PR，也不许为了跨工程交 need_decision。
 - 改仓库文件只 `git add` 自己那几个文件，别 `git add -A`。
 
 ## 常见卡点
@@ -88,7 +89,8 @@ foreman pr list   # 看 PR 监听账本
 | --- | --- | --- |
 | `app_busy` /「豆包正在用你自己的 profile 运行」 | 用户自己开着豆包，占了单实例 | 让用户 ⌘Q 退出，别换 profile、别重试 |
 | 一条也捞不到 | `labelIds` 不是数字 id、被排除标签命中、或已处理过 | `foreman run --dry-run --once` 看「open N 条，可接 M 条」；`foreman tasks` 看状态 |
-| 卡在 `pr-open` | `merge.enabled=false` | 正常，等人验收；要自动合就改配置 |
+| 卡在 `pr-open` | `merge.enabled=false`；或一工程一工作区：还有别的工程的 PR 没合 | 正常，等人验收；跨工程时 `foreman ws list --issue <单号>` 看还差哪条，逐条 `foreman pr merge <N> --repo <该工程>` |
+| 跨工程单交 `need_decision`「要改另一个仓库」 | 首句只建了一个 worktree（老行为），或工程没认出来 | `foreman ws add --repo <工程> --issue <单号>` 补开工作区，再 `foreman retry` 放回；账本 `workspaces` 里能看到几条 |
 | 会话跑完没收到消息 | 通知停用期间本来就不发（notify 节点只落痕）；或服务没跑、登记被 `--no-notify` 跳过 | `foreman ping` → `foreman serve` → `foreman watch list` → `foreman watch poll` 补判一轮；结论看 `foreman tasks` |
 | 合并失败 | 分支冲突 / 无可合并 | 记录在 `mergeAsk`（`failed`），不重试；按提示人工处理或 `foreman retry` |
 | `skipped: locked` | 另一轮还在跑 | `~/.foreman/run.lock` 里的 pid 探活；进程死了下轮自动接管 |
@@ -97,7 +99,7 @@ foreman pr list   # 看 PR 监听账本
 
 ## 状态在哪
 
-- `~/.foreman/state.json`：工单状态机（`planned`/`working`/`done`/`pr-open`/`needs-human`/`blocked`/`escalated`/`failed`）、`sessions`、`watch`、`notified`、`prWatch`、`mergeAsk`
+- `~/.foreman/state.json`：工单状态机（`planned`/`working`/`done`/`pr-open`/`needs-human`/`blocked`/`escalated`/`failed`）、`sessions`、`watch`、`notified`、`prWatch`、`mergeAsk`；一工程一工作区时 `issues[].workspaces`（每个工程一条工作区）与 `issues[].prs`（每个工程一条 PR）
 - `~/.foreman/console.db`：SQLite 控制台（`tasks` 带 `agent`、`prs`、`polls`），唯一键 `<owner>/<repo>#<number>`
 - `~/.foreman/{service.port, foreman.pid, service.log, run.log, worktrees/}`
 

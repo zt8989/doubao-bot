@@ -16,6 +16,7 @@ import {
   worktreeRemove,
 } from "./gitx.mjs"
 import { doneComment, holdComment, issueBranch, kickoff, prBody, resume } from "./prompts.mjs"
+import { findWorkspace, reposForIssue, workspacePath } from "./workspaces.mjs"
 import { startOperation, finishOperation } from "./operations.mjs"
 
 export const issueKey = (repo, n) => `${repo}#${n}`
@@ -46,6 +47,12 @@ export function notifyText(issue = {}, out = {}) {
   const lines = [`【foreman】${head}`, `状态：${out.state ?? "unknown"}`]
   if (out.session) lines.push(`执行会话：${out.session}${out.sessionName && out.sessionName !== out.session ? `（${out.sessionName}）` : ""}`)
   if (out.branch) lines.push(`分支：${out.branch}`)
+  // 一工程一工作区：跨工程时先把这份清单摆出来，编排侧一眼看清这条单动了几处。
+  const workspaces = Array.isArray(out.workspaces) ? out.workspaces : []
+  if (workspaces.length > 1) {
+    lines.push(`工作区（${workspaces.length} 个工程）：`)
+    for (const w of workspaces) lines.push(`- ${w.repo} → ${w.branch ?? ""}${w.worktree ? `（${w.worktree}）` : ""}`)
+  }
   if (out.pr) lines.push(`PR：#${out.pr}${out.prUrl ? ` ${out.prUrl}` : ""}`)
   if (out.merged) lines.push(`合并：已合并 PR #${out.pr}`)
   else if (out.mergeError) lines.push(`合并失败：${String(out.mergeError).slice(0, 200)}`)
@@ -175,44 +182,66 @@ export async function handleIssue(ctx, repoCfg, summary) {
   issue.url ||= summary.url
 
   const branch = prev.branch || issueBranch(issue, issue.title)
-  const wtPath = path.join(cfg.worktreeDir, repoCfg.name, branch.replace(/\//g, "-"))
+
+  // 一工程一工作区：工单提到几个工程（本产品内），就各建一个工作区。
+  // 主仓库是工单所在仓库，永远排第一；别的工程从标题/正文里的 owner/name、<仓库名>/<子路径>
+  // 或仓库名认出来。认漏了不要紧：执行会话会用 `foreman ws add` 现开。
+  const targets = reposForIssue(issue, cfg.repos, repoCfg)
 
   // dry-run：只打印会建在哪、会发什么，零副作用。
   if (ctx.dryRun) {
+    const plan = targets.map((r) => {
+      const ws = findWorkspace(prev, r.repo)
+      const b = ws?.branch || issueBranch(issue, issue.title)
+      return { repo: r.repo, name: r.name, branch: b, base: r.base, worktree: workspacePath(cfg.worktreeDir, r, b) }
+    })
     const prompt = kickoff({
       repo: repoCfg.repo,
       issue,
-      worktree: wtPath,
-      branch,
       base: repoCfg.base,
+      workspaces: plan,
       attempt: (prev.attempts ?? 0) + 1,
       lastFailure: prev.lastFailure ?? "",
     })
-    log(`[dry-run] ${key}\n  工作区：${wtPath}\n  分支：${branch}（基线 origin/${repoCfg.base}）\n  会话：${name}\n  首句：\n${prompt}`)
-    return { repo: repoCfg.repo, number: issue.number, state: "planned", branch, worktree: wtPath, prompt }
+    log(
+      `[dry-run] ${key}\n  工程 ${plan.length} 个：${plan.map((w) => `${w.repo} → ${w.worktree}（${w.branch}）`).join("；")}\n  会话：${name}\n  首句：\n${prompt}`
+    )
+    return { repo: repoCfg.repo, number: issue.number, state: "planned", branch: plan[0]?.branch ?? branch, worktree: plan[0]?.worktree ?? "", workspaces: plan, prompt }
   }
 
-  let wt
-  try {
-    wt = await createWorktree({
-      repoDir: repoCfg.dir,
-      worktreeDir: path.join(cfg.worktreeDir, repoCfg.name),
-      branch,
-      base: repoCfg.base,
-      herdrBin: cfg.herdr?.bin ?? "herdr",
-      useHerdr: cfg.herdr?.enabled !== false,
-      log,
-    })
-    log(`${key}：工作区 ${wt.path}（${wt.reused ? "复用" : `新建·${wt.backend}`}）`)
-  } catch (e) {
-    await hold(ctx, repoCfg, issue, {
-      status: "blocked",
-      summary: `工作区准备失败：${e.message}`,
-      question: "",
-    }, wtPath, key)
-    return { repo: repoCfg.repo, number: issue.number, state: "blocked", reason: "workspace" }
+  // 逐个工程建工作区。主仓库失败就挂起整单；附加工程失败只记一条，写进首句让会话按需补开。
+  const workspaces = []
+  const failedWorkspaces = []
+  for (const r of targets) {
+    const ws = findWorkspace(prev, r.repo)
+    const b = ws?.branch || issueBranch(issue, issue.title)
+    try {
+      const wt = await createWorktree({
+        repoDir: r.dir,
+        worktreeDir: path.join(cfg.worktreeDir, r.name),
+        branch: b,
+        base: r.base,
+        herdrBin: cfg.herdr?.bin ?? "herdr",
+        useHerdr: cfg.herdr?.enabled !== false,
+        log,
+      })
+      workspaces.push({ repo: r.repo, name: r.name, branch: b, base: r.base, worktree: wt.path, backend: wt.backend, reused: !!wt.reused })
+      log(`${key}：工作区 ${wt.path}（${r.repo}·${wt.reused ? "复用" : `新建·${wt.backend}`}）`)
+    } catch (e) {
+      if (r.repo === repoCfg.repo) {
+        await hold(ctx, repoCfg, issue, {
+          status: "blocked",
+          summary: `工作区准备失败：${e.message}`,
+          question: "",
+        }, workspacePath(cfg.worktreeDir, r, b), key)
+        return { repo: repoCfg.repo, number: issue.number, state: "blocked", reason: "workspace" }
+      }
+      failedWorkspaces.push({ repo: r.repo, error: String(e?.message ?? e).slice(0, 200) })
+      log(`${key}：附加工程 ${r.repo} 的工作区没建成（${String(e?.message ?? e).slice(0, 200)}），留给会话按需 foreman ws add`)
+    }
   }
 
+  const primary = workspaces[0]
   const attempt = (prev.attempts ?? 0) + 1
   book.setIssue(key, {
     state: "working",
@@ -220,8 +249,10 @@ export async function handleIssue(ctx, repoCfg, summary) {
     issue: issue.number,
     title: issue.title,
     url: issue.url,
-    branch,
-    worktree: wt.path,
+    repo: repoCfg.repo,
+    branch: primary?.branch ?? branch,
+    worktree: primary?.worktree ?? "",
+    workspaces,
     attempts: attempt,
     lastFailure: "",
   })
@@ -231,7 +262,7 @@ export async function handleIssue(ctx, repoCfg, summary) {
   try {
     if (convId) {
       log(`${key}：续会话 ${name}（attempt ${attempt}）`)
-      await dws.send(name, resume({ issue, attempt, base: repoCfg.base, failure: prev.lastFailure ?? "" }))
+      await dws.send(name, resume({ issue, attempt, base: repoCfg.base, failure: prev.lastFailure ?? "", repo: repoCfg.repo, workspaces }))
     } else {
       log(`${key}：开新会话 ${name}（attempt ${attempt}）`)
       const opened = await dws.open({
@@ -240,9 +271,9 @@ export async function handleIssue(ctx, repoCfg, summary) {
         prompt: kickoff({
           repo: repoCfg.repo,
           issue,
-          worktree: wt.path,
-          branch,
           base: repoCfg.base,
+          workspaces,
+          failedWorkspaces,
           attempt,
           lastFailure: prev.lastFailure ?? "",
         }),
@@ -275,7 +306,15 @@ export async function handleIssue(ctx, repoCfg, summary) {
   }
 
   log(`${key}：已派活 → ${convId || name}${noNotify ? "（不登记监听）" : ""}`)
-  return { repo: repoCfg.repo, number: issue.number, state: "dispatched", branch, convId }
+  return {
+    repo: repoCfg.repo,
+    number: issue.number,
+    state: "dispatched",
+    branch: primary?.branch ?? branch,
+    worktree: primary?.worktree ?? "",
+    workspaces: workspaces.map((w) => ({ repo: w.repo, branch: w.branch, worktree: w.worktree })),
+    convId,
+  }
 }
 
 // 验收三条：工作区干净、分支有提交、配置里的 verify 命令全过。（保留能力，run 不再自动调用）
