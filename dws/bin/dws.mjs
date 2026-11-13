@@ -32,7 +32,7 @@ const HELP = `dws ${VERSION} —— 豆包会话 CLI（开启会话 / 会话状�
 公共参数：
   -c, --config <文件>   配置文件（默认 ./config.json，其次 ~/.dws/config.json）
 
-发消息的两个模式（dws msg / dws send 都认）：
+发消息的两个模式（只 dws msg / dws steer 认）：
   steer  插进当前这一轮，不等这一轮结束（不排队）
   queue  排到当前任务之后，这一轮跑完才轮到它
   键位跟着配置的默认模式走（messageMode，默认 steer）：

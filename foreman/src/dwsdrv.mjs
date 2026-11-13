@@ -104,12 +104,19 @@ export class DwsDriver {
     }
   }
 
-  // steer：往跑着（或刚收工）的会话里追加一条指令，不打断当前任务（dws 走 Command+Enter）。
+  // steer：往会话里插一条指令，不等这一轮结束（dws 的 msg --mode steer；按键由 dws 配置的
+  // messageMode 决定：默认 steer 时是 Enter，改成 queue 时对调成 Command+Enter）。
   // 编排会话的「工作会话更新」、失败后的「同一会话续跑」都走它——不再靠新开一条会话。
+  // 老版本 dws 没有 msg 命令，退回兼容别名 steer。
   async steer(name, text) {
     const tmp = writeTemp(text)
     try {
-      return await this.json(["steer", name, "--file", tmp], { timeout: 120000 })
+      try {
+        return await this.json(["msg", name, "--file", tmp, "--mode", "steer"], { timeout: 120000 })
+      } catch (e) {
+        if (!/未知命令/.test(e?.message ?? "")) throw e
+        return await this.json(["steer", name, "--file", tmp], { timeout: 120000 })
+      }
     } finally {
       fs.rmSync(tmp, { force: true })
     }
