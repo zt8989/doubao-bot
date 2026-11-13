@@ -4,10 +4,16 @@ import os from "node:os"
 import path from "node:path"
 import { expandHome } from "./util.mjs"
 
+export const MESSAGE_MODES = new Set(["steer", "queue"])
+
 export const DEFAULTS = {
   stateFile: ".dws/state.json",
   mode: "local",
   model: "auto",
+  // 发消息的默认模式（steer | queue）。Enter 永远对应默认模式，Command+Enter 对应另一个：
+  //   messageMode=steer（默认）→ Enter = steer（插进当前这一轮），Command+Enter = queue（排到这一轮之后）
+  //   messageMode=queue         → Enter = queue，Command+Enter = steer
+  messageMode: "steer",
   pollSeconds: 4,
   idleMinutes: 6,
   timeoutMinutes: 45,
@@ -52,7 +58,7 @@ export function loadConfig(explicit) {
 }
 
 // 只认会话相关的键：工单/PR/仓库那套配置已经不归 dws 管，出现也不读。
-const SESSION_KEYS = ["stateFile", "mode", "model", "pollSeconds", "idleMinutes", "timeoutMinutes"]
+const SESSION_KEYS = ["stateFile", "mode", "model", "messageMode", "pollSeconds", "idleMinutes", "timeoutMinutes"]
 
 function pick(raw) {
   const out = {}
@@ -74,6 +80,9 @@ function validate(config) {
     }
   }
   if (!config.stateFile) throw new ConfigError("stateFile 不能为空")
+  if (!MESSAGE_MODES.has(config.messageMode)) {
+    throw new ConfigError(`messageMode 只能是 steer / queue：${JSON.stringify(config.messageMode)}`)
+  }
 }
 
 export function repoConfig(config, key) {

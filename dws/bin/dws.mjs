@@ -6,7 +6,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { loadConfig, ConfigError } from "../src/config.mjs"
 import { SessionBook, SessionManager, transcript, matchTask } from "../src/sessions.mjs"
-import { Doubao } from "../src/doubao.mjs"
+import { Doubao, keyForMode } from "../src/doubao.mjs"
 import { isTruthy, log, parseArgs, printJson, selfConvIds } from "../src/util.mjs"
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -22,7 +22,7 @@ const HELP = `dws ${VERSION} —— 豆包会话 CLI（开启会话 / 会话状�
   dws use  <任务id|会话名>           把豆包窗口切到那条任务
   dws archive <任务id|会话名>        整段对话存到本地 archives/ 并把豆包侧边栏里的任务归档收起
   dws stop  <任务id|会话名>          中断正在跑的任务（双击 Esc；没在跑会如实说）
-  dws steer <任务id|会话名> <文字>   跑动中追加指令（Command+Enter，不打断当前任务）
+  dws msg  <任务id|会话名> <文字> | --file <文件> [--mode steer|queue]   给会话发一条消息（两个模式，见下）
   dws status [会话名|任务id] [--json]       看会话状态（是否还在跑 / 是否已跑完）
   dws info  [会话名|任务id] [--json] [--out <文件>]   取会话信息（整段对话）
   dws send  <会话名|任务id> <文字> | --file <文件>     在同一任务里续说；任务不在了就重开并带 handoff
@@ -31,6 +31,14 @@ const HELP = `dws ${VERSION} —— 豆包会话 CLI（开启会话 / 会话状�
 
 公共参数：
   -c, --config <文件>   配置文件（默认 ./config.json，其次 ~/.dws/config.json）
+
+发消息的两个模式（dws msg / dws send 都认）：
+  steer  插进当前这一轮，不等这一轮结束（不排队）
+  queue  排到当前任务之后，这一轮跑完才轮到它
+  键位跟着配置的默认模式走（messageMode，默认 steer）：
+    messageMode=steer → Enter = steer，Command+Enter = queue
+    messageMode=queue → Enter = queue，Command+Enter = steer
+  dws steer 是「dws msg --mode steer」的旧名字，保留兼容。
 
 会话名可以是本地记录的名字，也可以是豆包侧边栏里的任务标题：按标题精确匹配，
 其次唯一包含匹配；命中后命令输出里会写明实际操作的「任务 <id>」，多条重名则不猜、直接报错。
@@ -68,9 +76,13 @@ const HELP_BY_CMD = {
     "dws stop <任务id|会话名> [--force]",
     "中断正在跑的任务（双击 Esc）；没在跑会如实说。目标是发出命令的会话自己时会被拒绝，确认要这么做加 --force。",
   ],
+  msg: [
+    "dws msg <任务id|会话名> <文字> | --file <文件> [--mode steer|queue]",
+    "给会话发一条消息，只确认发出、不等回复。两个模式：steer = 插进当前这一轮（Enter），queue = 排到这一轮之后（Command+Enter）。键位跟着配置的 messageMode 走（默认 steer；改成 queue 则 Enter/Command+Enter 对调）。dws steer 是 --mode steer 的旧名字。",
+  ],
   steer: [
-    "dws steer <任务id|会话名> <文字>",
-    "跑动中追加指令（Command+Enter），不打断当前任务。",
+    "dws steer <任务id|会话名> <文字> | --file <文件>",
+    "等同于 dws msg --mode steer（兼容别名，新代码请用 dws msg --mode steer|queue）。",
   ],
   status: [
     "dws status [会话名|任务id] [--json]",
@@ -146,8 +158,10 @@ async function main() {
       return cmdArchive()
     case "stop":
       return cmdStop()
+    case "msg":
+      return cmdMessage()
     case "steer":
-      return cmdSteer()
+      return cmdMessage({ alias: "steer" })
     case "status":
       return cmdStatus()
     case "info":
@@ -181,8 +195,15 @@ function ctx({ needConfig = false } = {}) {
     idleMs: (cfg?.idleMinutes ?? 6) * 60000,
     totalMs: (cfg?.timeoutMinutes ?? 45) * 60000,
     poll: (cfg?.pollSeconds ?? 4) * 1000,
+    messageMode: cfg?.messageMode ?? "steer",
   })
-  const session = new SessionManager({ book, doubao, mode: cfg?.mode ?? "local", model: cfg?.model ?? "auto" })
+  const session = new SessionManager({
+    book,
+    doubao,
+    mode: cfg?.mode ?? "local",
+    model: cfg?.model ?? "auto",
+    messageMode: cfg?.messageMode ?? "steer",
+  })
   liveSession = session
   return { cfg, book, session, doubao }
 }
@@ -374,16 +395,32 @@ async function cmdStop() {
   say(r.stopped ? `任务 ${tgt.id} 已中断（点了「结束任务」）` : `任务 ${tgt.id} 没在跑，无需停止`)
 }
 
-async function cmdSteer() {
+// 发消息：两个模式（steer / queue），按键由配置的默认模式决定（见 client.message / keyForMode）。
+// steer 是旧名字，等价 --mode steer；msg 是新名字，可用 --mode 选模式。
+async function cmdMessage({ alias = "" } = {}) {
   const target = pos[0]
-  if (!target) throw Error("用法：dws steer <任务id|会话名> <文字>（或 --file）")
-  const { book, session } = ctx()
+  if (!target) throw Error("用法：dws msg <任务id|会话名> <文字>（或 --file）[--mode steer|queue]")
+  const { cfg, book, session } = ctx()
   const text = (await promptOf()) || pos.slice(1).join(" ")
-  if (!text) throw Error("要追加的内容为空")
+  if (!text) throw Error("要发送的内容为空")
+  const defaultMode = cfg?.messageMode === "queue" ? "queue" : "steer"
+  const want = String(flags.mode && flags.mode !== true ? flags.mode : "").trim() || alias || defaultMode
+  if (!["steer", "queue"].includes(want)) throw Error(`--mode 只能是 steer / queue：${want}`)
+  const key = keyForMode(want, defaultMode)
+  const where = key === "enter" ? "Enter" : "Command+Enter"
   const tgt = await resolveTarget({ book, session }, target)
-  log(`向任务 ${tgt.id}${whereFrom(tgt)} 追加指令（Command+Enter，不打断当前任务）……`)
-  const r = await session.convSteer(tgt.id, text)
-  printJson({ ok: true, convId: tgt.id, title: tgt.title || undefined, sends: r.sends, note: "已追加，任务继续跑" })
+  log(`向任务 ${tgt.id}${whereFrom(tgt)} 发消息（模式 ${want}，按键 ${where}）……`)
+  const r = await session.convMessage(tgt.id, text, { mode: want })
+  printJson({
+    ok: true,
+    convId: tgt.id,
+    title: tgt.title || undefined,
+    mode: want,
+    key,
+    queued: !!r.queued,
+    sends: r.sends,
+    note: want === "queue" ? "已排队，这一轮跑完才处理" : "已插进当前这一轮",
+  })
 }
 
 async function cmdStatus() {

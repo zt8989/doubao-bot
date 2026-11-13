@@ -264,6 +264,22 @@ export const RUNNING_STATE = js(`
   };
 `)
 
+// 输入框里还剩多少字（0 = 已经发出去清空了）。发消息的确认靠它，不靠消息条数
+// （排队模式下消息这一轮不会进列表）。
+export const INPUT_LEN = js(`
+  const ed = $(".ProseMirror") && $(".ProseMirror").editor;
+  if (!ed) return -1;
+  return ed.getText({ blockSeparator: "\\n" }).length;
+`)
+
+// 发消息的两个模式对应的按键：默认模式占 Enter，另一个占 Command+Enter。
+//   steer 是「插进当前这一轮」，queue 是「排到这一轮之后」。
+export function keyForMode(mode, defaultMode = "steer") {
+  const m = mode === "queue" ? "queue" : "steer"
+  const d = defaultMode === "queue" ? "queue" : "steer"
+  return m === d ? "enter" : "cmd-enter"
+}
+
 // NEW_TASK_IN_PROJECT 点项目行上的「新对话」，在该项目下新建工作任务。
 // 项目名按钮和「新对话」都带零宽字符，匹配前一律清洗。
 export const NEW_TASK_IN_PROJECT = (project) =>
@@ -362,13 +378,14 @@ export class Doubao {
     idleMs = 180000,
     totalMs = 1800000,
     modelsFile,
+    messageMode = "steer",
   } = {}) {
     if (!app) {
       const c = choose()
       app = new App({ binary: c.binary, dataDir: c.dataDir, owns })
     }
     this.app = app
-    Object.assign(this, { openPage, poll, idleMs, totalMs })
+    Object.assign(this, { openPage, poll, idleMs, totalMs, messageMode })
     this.modelsFile = modelsFile ?? (app.dataDir ? path.join(app.dataDir, "models.json") : "")
     this.page = null
   }
@@ -674,23 +691,52 @@ export class Doubao {
     return page.eval(READ)
   }
 
-  // steer 在任务跑动中追加指令：Command+Enter 发送，不打断当前任务
-  // （普通 Enter/点击发送会把在跑的任务打断）。只确认发出，不等回复。
-  async steer(text, { signal } = {}) {
+  // 发消息的两种模式，靠按键区分（豆包窗口语义）：
+  //   steer：Enter —— 插进当前这一轮，不等这一轮结束；
+  //   queue：Command+Enter —— 排到当前任务之后，这一轮跑完才轮到它。
+  // 哪个键给哪个模式由配置的默认模式决定：默认模式占 Enter，另一个占 Command+Enter。
+  //   messageMode=steer（默认）→ Enter = steer、Command+Enter = queue
+  //   messageMode=queue         → Enter = queue、Command+Enter = steer
+  // 只确认发出，不等回复（要等回复的用 send / sendAck）。
+  async message(text, { mode = "steer", defaultMode = this.messageMode, signal } = {}) {
+    const d = defaultMode === "queue" ? "queue" : "steer"
+    const m = mode === "queue" ? "queue" : "steer"
+    const key = keyForMode(m, d)
     const page = await this.connect(signal)
     const before = await page.eval(READ)
-    const baseline = before?.sends ?? 0
+    const baseline = { sends: before?.sends ?? 0 }
     const n = await page.eval(fill(text))
     if (n < 0) throw new DoubaoError("豆包的输入框没有找到。", "doubao_ui")
-    // modifiers: 4 = Meta/Command（CDP 键盘事件修饰位）
-    await page.key("Enter", { code: "Enter", keyCode: 13, text: "\r", modifiers: 4 })
+    signal?.throwIfAborted?.()
+    // modifiers: 4 = Meta/Command（CDP 键盘事件修饰位），只有 Command+Enter 带。
+    await page.key(
+      "Enter",
+      key === "enter" ? { keyCode: 13, text: "\r" } : { code: "Enter", keyCode: 13, text: "\r", modifiers: 4 }
+    )
     const until = Date.now() + 15000
     while (Date.now() < until) {
       await sleep(400, signal)
       const r = await page.eval(READ)
-      if ((r?.sends ?? 0) > baseline) return { ok: true, sends: r.sends }
+      if ((r?.sends ?? 0) > baseline.sends) return { ok: true, mode: m, key, sends: r.sends, queued: false }
+      // 排队时这一轮的消息数不会涨：输入框清空、且出现排队气泡，就算已经排上了。
+      let inputLen = -1
+      try {
+        inputLen = await page.eval(INPUT_LEN)
+      } catch {}
+      let running = {}
+      try {
+        running = await page.eval(RUNNING_STATE)
+      } catch {}
+      if (inputLen === 0 && (key === "cmd-enter" || running?.interrupt)) {
+        return { ok: true, mode: m, key, sends: r?.sends ?? baseline.sends, queued: !!running?.interrupt }
+      }
     }
-    throw new DoubaoError("豆包没有把这条追加指令发出去", "doubao_ui")
+    throw new DoubaoError(`豆包没有把这条消息发出去（模式 ${m}，按键 ${key}）`, "doubao_ui")
+  }
+
+  // steer 是「发消息 · steer 模式」的旧名字：保留给已有调用方，行为与 message(mode=steer) 一致。
+  async steer(text, { signal } = {}) {
+    return this.message(text, { mode: "steer", signal })
   }
 
   async convo(signal) {

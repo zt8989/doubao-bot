@@ -76,10 +76,11 @@ export function replySummary(reply) {
 }
 
 export class SessionManager {
-  constructor({ book, doubao = null, mode = "local", model = "auto" }) {
+  constructor({ book, doubao = null, mode = "local", model = "auto", messageMode = "steer" }) {
     this.book = book
     this.mode = mode
     this.model = model
+    this.messageMode = messageMode
     this.doubao = doubao
   }
 
@@ -286,10 +287,16 @@ export class SessionManager {
     return { convId, stopped }
   }
 
-  // convSteer 跑动中向目标任务追加指令（Command+Enter，不打断）。
-  async convSteer(convId, text, { signal } = {}) {
+  // convMessage 向目标任务发一条消息（steer / queue），只确认发出、不等回复。
+  // 模式与按键的对应关系见 client.message：默认模式用 Enter，另一个用 Command+Enter。
+  async convMessage(convId, text, { mode = "steer", signal } = {}) {
     await this.client.goto(convId, signal)
-    return this.client.steer(text, { signal })
+    return this.client.message(text, { mode, defaultMode: this.messageMode, signal })
+  }
+
+  // convSteer 是「发消息 · steer 模式」的旧名字（Command+Enter 的老行为已由 message 统一）。
+  async convSteer(convId, text, { signal } = {}) {
+    return this.convMessage(convId, text, { mode: "steer", signal })
   }
 
   // archive 归档一条任务：先把整段对话落到归档目录（给了 dir 才落盘），
