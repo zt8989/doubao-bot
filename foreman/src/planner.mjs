@@ -5,7 +5,8 @@ import { earliestCaller } from "./prwatch.mjs"
 
 // pr-open 也算在跑：PR 开着还没关单，这张单仍占一条「自有工单」流程的名额，
 // 不把 pr-open 算进来的话会出现第 3 条接单流程。
-export const RUNNING_STATES = new Set(["planned", "working", "pr-open"])
+// handed 是「已经交给编排会话、等它 dispatch」：同样占槽，否则每轮巡检都会再交一次。
+export const RUNNING_STATES = new Set(["handed", "planned", "working", "pr-open"])
 
 // 正在跑的单：派出去还没出结论的（派单失败的不占槽，等重试）。
 export function runningIssues(book) {

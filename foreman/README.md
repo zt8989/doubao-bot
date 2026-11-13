@@ -16,6 +16,37 @@ Gitea 侧一律走 opencli。
 （捞单 → 工作区 → 派活 → 监听 → 结论 → 合并 → 清理 → 归档 → 通知），豆包 / Gitea / herdr 的差异全部收在
 `src/workflow/adapters/` 里；换会话载体或工单系统时写个适配器即可。详见 `docs/workflow.md`。
 
+## 以编排会话为中心（默认）
+
+整条链路只有**一条编排智能体会话**（`foreman-编排`，账本顶层 `orchestrator`）：
+
+```
+捞到工单 → hand：steer 工单进编排会话（账本记 handed）
+              ↓（编排读工单，自己决定怎么派）
+         dispatch：建一工程一工作区 + 开工作会话，会话 id 绑回编排（issues[键].agentConvId / .orchestrator）
+              ↓
+         工作会话自己改、自测、push、开 PR；每次收工由服务把结论 steer 回编排（不再新建会话、不再 notify）
+              ↓
+         失败/卡住 → resume：在**同一条工作会话**里 steer 续跑，绝不新开
+              ↓
+         编排核对 → pr merge（合并即关单）→ clean：清 worktree、本地分支、工作会话与监听（幂等）
+```
+
+- **唯一性**：`ensureOrchestrator` 幂等——账本里已有 `convId` 就直接复用，绝不开第二条。PR 监听同样
+  steer 这条会话，不再新建「合并会话」。
+- **绑定**：`dispatch` 把工作会话写进账本（`agent` / `agentConvId` / `orchestrator`，会话记录 `kind: "worker"`、`parent: <编排 id>`）。
+- **失败不新开**：`foreman resume` 找到这条单绑定的工作会话，用 `dws steer` 把「接着跑」插进去；
+  续跑计数与 `lastFailure` 都写账本。
+- **收尾两步**：`pr merge` 合并关单 → `foreman clean <键>` 清残留 worktree / 分支 / 会话（worktree 有未提交改动就保留，不删别人正在写的东西）。
+- **降级**：`sessionFlow.enabled: false`（或 `foreman run --direct`）退回老的多会话模型：run 自己建工作区派活、收工只落痕、PR 监听按 `deliver.mode` 投递。
+
+配置（默认已开，不用写也能用）：
+
+```json
+"sessionFlow": { "enabled": true, "name": "", "promptFile": "", "projectDir": "", "waitFirstReply": false },
+"pickup": { "handToOrchestrator": true }
+```
+
 ## 一轮做什么
 
 ```
@@ -241,11 +272,19 @@ foreman status                   # 带 prWatch.lastPollAt / pollCount / notified
 ## 命令
 
 ```bash
-foreman run --dry-run --once     # 只打印会捞哪条、建在哪、发什么；零副作用
-foreman run --once               # 真跑一轮（每仓库 perRepoPerRound 条）
+foreman run --dry-run --once     # 只打印会捞哪条、交给谁；零副作用
+foreman run --once               # 跑一轮：捞到单交给编排会话（hand）
+foreman run --direct --once      # 这一轮自己派活（老行为，不交给编排）
 foreman run --every 1800         # 常驻，每 1800s 一轮
 foreman run --notify <会话id|标题>  # 这一轮派出的会话，登记监听时通知目标写谁
 foreman run --no-notify          # 这一轮不登记监听，因此不会有通知（连同其它参数一起用）
+foreman orch start               # 起/复用唯一编排会话（幂等；不开第二条）
+foreman orch show                 # 编排会话、绑了哪些工作会话、最近 steer 了什么
+foreman hand <owner/name>#N      # 把工单交给编排会话（不建工作区、不开工作会话）
+foreman dispatch <owner/name>#N  # 编排调用：建工作区 + 开工作会话，会话 id 绑回编排；已派过就 steer 续跑
+foreman resume <owner/name>#N    # 失败/卡住：在同一条工作会话里 steer（不新开）
+foreman clean <owner/name>#N     # 合并关单后清 worktree / 分支 / 工作会话（幂等）
+foreman clean --all              # 清所有终端态工单的残留（worktree / 分支 / 会话）
 foreman pickup                   # 手动催服务跑一轮自动巡检（不用等下一个间隔）
 foreman tasks                    # 每条工单到哪一步、卡在哪
 foreman pr poll                  # 立刻扫一轮 PR（别人的单报给最早登记的调用方）

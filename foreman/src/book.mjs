@@ -116,6 +116,39 @@ export class Book {
     return this.mergeJudge[k]
   }
 
+  // 唯一编排会话：{ convId, name, at }。全程只有这一条，工作会话都绑在它身上。
+  // 不是数组、不按产品分——需要第二条的时候是设计错了，不是配置少了。
+  get orchestrator() {
+    return this.data.orchestrator ?? (this.data.orchestrator = { convId: "", name: "", at: "" })
+  }
+
+  setOrchestrator(info = {}) {
+    this.reload()
+    const prev = this.data.orchestrator ?? {}
+    this.data.orchestrator = {
+      convId: String(info.convId ?? prev.convId ?? ""),
+      name: String(info.name ?? prev.name ?? ""),
+      at: nowIso(),
+    }
+    this.save()
+    return this.data.orchestrator
+  }
+
+  // steer 留痕：{ "<编排会话id>": [{ at, kind, chars }] }，只留最近 50 条，够排查不必留全量。
+  get steers() {
+    return this.data.steers ?? (this.data.steers = {})
+  }
+
+  markSteer(target, info = {}) {
+    this.reload()
+    const k = String(target ?? "")
+    const list = Array.isArray(this.steers[k]) ? this.steers[k] : []
+    list.push({ at: nowIso(), kind: String(info.kind ?? ""), chars: Number(info.chars ?? 0) || 0 })
+    this.steers[k] = list.slice(-50)
+    this.save()
+    return this.steers[k]
+  }
+
   issue(key) {
     return this.issues[key] ?? null
   }

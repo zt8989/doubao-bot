@@ -32,7 +32,14 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman ws list --issue <owner/name>#<单号>
   foreman issue comment <N> --repo R --body <正文>
   foreman issue close <N> --repo R
-  foreman run   [--once] [--dry-run] [--repo <名字|owner/name>] [--every <秒>] [--notify <会话id|标题>] [--no-notify] [-c <配置>]
+  foreman run   [--once] [--dry-run] [--direct] [--repo <名字|owner/name>] [--every <秒>] [--notify <会话id|标题>] [--no-notify] [-c <配置>]
+  foreman orch start [--name <会话名>]   起/复用唯一编排会话（幂等，全程只有这一条）
+  foreman orch show                    看编排会话、绑了哪些工作会话、最近 steer 了什么
+  foreman hand <owner/name>#<单号>      把工单交给编排会话（它再自己调 dispatch）
+  foreman dispatch <owner/name>#<单号>  编排调用：建工作区 + 开工作会话，会话 id 绑回编排
+  foreman resume <owner/name>#<单号>    失败/卡住：在同一条工作会话里 steer 续跑（不新开）
+  foreman clean <owner/name>#<单号>     合并关单后清 worktree、本地分支、工作会话（幂等）
+  foreman clean --all                  清所有终端态工单残留的工作区与会话
   foreman pickup [-c <配置>]        手动催一轮自动巡检（服务按 pickup 配置捞一轮单）
   foreman tasks [--json]
   foreman retry <仓库名|owner/name> <工单号> [-c <配置>]
@@ -46,8 +53,8 @@ const HELP = `foreman — 接单编排 + 常驻服务
   watch list/rm/poll   看登记 / 删一条 / 立刻跑一轮（取证排障用）
   pr list     看 PR 监听账本（哪些 PR 见过/已通知）
   pr poll     立刻扫一轮 PR（作者不是自己的（pickup.me）交编排处理）
-  deliver     通知投递：deliver.mode=new（默认）每次新建一条会话，首句=deliver.promptFile 固定提示词 +
-              监控项目（deliver.projectDir）+ 正文；existing 才塞回已有会话。路径与项目只从配置读。
+  deliver     通知投递（老模型）：deliver.mode=new 每次新建一条会话；existing 才塞回已有会话。
+              会话中心（默认 sessionFlow.enabled）不走这条：更新一律 steer 进唯一编排会话。
   pr open     建 PR（唯一入口：agent 也走它，账本/控制台才记得到）
   pr merge <N> --repo R [--issue <单号>]   合并 PR（唯一入口：先核对关联工单再合；失败回理由）
   ws add      一工程一工作区：工单跨工程时现开一个工作区（幂等），执行会话不许跨目录改
@@ -57,8 +64,9 @@ const HELP = `foreman — 接单编排 + 常驻服务
   issue comment|close   评论/关单（可选：用它才会记账，直接 opencli gitea 也行）
   --no-service  跳过自动握手与拉起（逃生口）
 
-run 现在只派活：建 worktree → dws 开会话派活 → 记账 → 登记监听 → 返回 dispatched。
-不等回复、不验收、不 push/PR、不发通知；跑完由服务异步通知。
+run 以编排会话为中心：捞到单先交给唯一编排会话（dws steer），由它调 foreman dispatch 分配工作；
+工作会话的每次状态更新都 steer 回这条编排会话，失败也用 foreman resume 在同一会话里续跑。
+合并关单后由编排调 foreman clean 清 worktree 与会话。--direct 退回老行为（run 自己派活）。
 --notify <id|标题>：本轮派出去的会话通知给该目标；--no-notify：本轮不登记监听。
 `
 
@@ -340,6 +348,8 @@ async function cmdRun(pos, flags) {
     only: flags.repo && flags.repo !== true ? String(flags.repo) : "",
     notifyTo,
     noNotify,
+    // --direct：这一轮自己派（老行为），不交给编排会话。
+    ...(truthy(flags.direct) ? { hand: false } : {}),
   })
 
   if (!dryRun) {
@@ -481,6 +491,58 @@ async function cmdDoctor(pos, flags) {
   if (!ok) process.exitCode = 1
 }
 
+async function cmdOrch(pos, flags) {
+  const cfg = loadConfig(flags.config)
+  const action = String(pos[0] ?? "show")
+  if (!["start", "show"].includes(action)) throw new Error("用法：foreman orch start|show")
+  const port = await resolvePort(cfg)
+  const r = await callRaw(port, { id: "cli", cmd: `orch ${action}`, name: flags.name && flags.name !== true ? String(flags.name) : "" }, 600000)
+  if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
+  return out({ ok: true, ...r })
+}
+
+async function cmdHand(pos, flags) {
+  const ref = String(pos[0] ?? flags.issue ?? "").trim()
+  if (!ref) throw new Error("用法：foreman hand <owner/name>#<单号>")
+  const cfg = loadConfig(flags.config)
+  const port = await resolvePort(cfg)
+  const r = await callRaw(port, { id: "cli", cmd: "hand", issue: ref }, 600000)
+  if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
+  return out({ ok: true, ...r })
+}
+
+async function cmdDispatch(pos, flags) {
+  const ref = String(pos[0] ?? flags.issue ?? "").trim()
+  if (!ref) throw new Error("用法：foreman dispatch <owner/name>#<单号>")
+  const cfg = loadConfig(flags.config)
+  const port = await resolvePort(cfg)
+  // 派活要建 worktree、开工作会话（no-wait）；窗口忙时可能等一会儿，给足时间。
+  const r = await callRaw(port, { id: "cli", cmd: "dispatch", issue: ref }, 900000)
+  if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
+  return out({ ok: true, ...r })
+}
+
+async function cmdResume(pos, flags) {
+  const ref = String(pos[0] ?? flags.issue ?? "").trim()
+  if (!ref) throw new Error("用法：foreman resume <owner/name>#<单号>（在已有工作会话里 steer 续跑）")
+  const cfg = loadConfig(flags.config)
+  const port = await resolvePort(cfg)
+  const r = await callRaw(port, { id: "cli", cmd: "resume", issue: ref }, 600000)
+  if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
+  return out({ ok: true, ...r })
+}
+
+async function cmdClean(pos, flags) {
+  const cfg = loadConfig(flags.config)
+  const ref = String(pos[0] ?? flags.issue ?? "").trim()
+  const all = truthy(flags.all)
+  if (!ref && !all) throw new Error("用法：foreman clean <owner/name>#<单号>（或 --all）")
+  const port = await resolvePort(cfg)
+  const r = await callRaw(port, { id: "cli", cmd: "clean", issue: ref, all }, 900000)
+  if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
+  return out({ ok: true, ...r })
+}
+
 async function main() {
   const argv = process.argv.slice(2)
   if (!argv.length || ["-h", "--help", "help"].includes(argv[0])) return process.stdout.write(HELP)
@@ -522,6 +584,16 @@ async function main() {
       return cmdIssue(pos, flags)
     case "run":
       return cmdRun(pos, flags)
+    case "orch":
+      return cmdOrch(pos, flags)
+    case "hand":
+      return cmdHand(pos, flags)
+    case "dispatch":
+      return cmdDispatch(pos, flags)
+    case "resume":
+      return cmdResume(pos, flags)
+    case "clean":
+      return cmdClean(pos, flags)
     case "pickup":
       return cmdPickup(pos, flags)
     case "tasks":

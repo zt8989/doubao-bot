@@ -104,6 +104,17 @@ export class DwsDriver {
     }
   }
 
+  // steer：往跑着（或刚收工）的会话里追加一条指令，不打断当前任务（dws 走 Command+Enter）。
+  // 编排会话的「工作会话更新」、失败后的「同一会话续跑」都走它——不再靠新开一条会话。
+  async steer(name, text) {
+    const tmp = writeTemp(text)
+    try {
+      return await this.json(["steer", name, "--file", tmp], { timeout: 120000 })
+    } finally {
+      fs.rmSync(tmp, { force: true })
+    }
+  }
+
   // runningMap：只读侧边栏（dws list --json），**不切窗口**。
   // 逐条 dws status 会把窗口 goto 到被监听的会话——服务每 20s 轮询时用户窗口就被拽走。
   // 返回 { <会话id>: { running, title, active } }；读不到时抛错，由调用方退化回老行为。

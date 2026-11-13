@@ -53,6 +53,11 @@ export class DoubaoSessionAdapter {
     return this.driver.notify(target, text)
   }
 
+  // steer：往编排会话里插工作会话的状态更新 / 失败续跑指令，不打断它当前那一轮。
+  steer(target, text) {
+    return this.driver.steer(target, text)
+  }
+
   runningMap() {
     return this.driver.runningMap()
   }

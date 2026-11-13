@@ -13,10 +13,15 @@ export function earliestCaller(book) {
 }
 
 // 通知目标：显式写死的 id/标题优先；earliest（默认）/auto 都取最早登记的调用方。
+// 会话中心（sessionFlow.enabled）下固定取唯一编排会话——所有更新都归这一条。
 // 账本里一个调用方都没有时返回空串，由调用方（服务层）决定要不要退回环境里的会话 id。
 export function prWatchTarget(cfg, book) {
   const raw = String(cfg?.prWatch?.notifyTarget ?? "earliest").trim()
   if (raw && raw !== "earliest" && raw !== "auto") return raw
+  if (cfg?.sessionFlow?.enabled === true) {
+    const orch = String(book?.data?.orchestrator?.convId ?? "").trim()
+    if (orch) return orch
+  }
   return earliestCaller(book)
 }
 
@@ -91,9 +96,9 @@ export function isConflicting(view) {
 }
 
 // 跑一轮 PR 扫描：列 open PR → 过滤作者 → 账本去重 → 查冲突（冲突的过滤掉）→ 交给编排 agent 去合并。
-// deliver 给了就每次新建一条会话投递（首句带固定提示词），否则塞回 target 那条已有会话。
-// 只有发成功才记账；发送失败下一轮重试。
-export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: overrideTarget, deliver = null }) {
+// push 给了就 steer 进唯一编排会话（会话中心，默认）；deliver 给了才每次新建一条会话；
+// 都没有就塞回 target 那条已有会话。只有发成功才记账；发送失败下一轮重试。
+export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: overrideTarget, deliver = null, push = null }) {
   const pw = cfg?.prWatch ?? {}
   if (pw.enabled === false) return { ok: true, skipped: "disabled" }
 
@@ -159,8 +164,9 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
   }
 
   if (!fresh.length) return { ok: true, checked, notified: 0, conflicting, target }
-  const useNew = typeof deliver === "function"
-  if (!useNew && !target) {
+  const usePush = typeof push === "function"
+  const useNew = !usePush && typeof deliver === "function"
+  if (!usePush && !useNew && !target) {
     log("PR 扫描：有候选但找不到通知目标（账本里没有调用方会话），这轮不发，等有了再报")
     return { ok: true, checked, notified: 0, target: "", pending: fresh.length }
   }
@@ -168,7 +174,10 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
   let sentTo = target
   let convId = ""
   try {
-    if (useNew) {
+    if (usePush) {
+      // 会话中心：同一条编排会话读所有待合并 PR，不新建、不起第二条会话。
+      sentTo = (await push(prNotifyText(fresh))) || target
+    } else if (useNew) {
       // 一轮可能跨多个仓库：全部来自同一个仓库才按产品取提示词，否则回落全局 deliver。
       const repo = fresh.every((pr) => pr.repo === fresh[0].repo) ? fresh[0].repo : ""
       const out = await deliver({ text: prNotifyText(fresh), kind: "PR待合并", repo, lane: "merge" })
@@ -182,12 +191,13 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
     return { ok: true, checked, notified: 0, conflicting, target, failedNotify: true, pending: fresh.length }
   }
   const book2 = new Book(cfg.stateFile)
-  for (const pr of fresh) book2.markPrSeen(pr.key, { ...pr, notifiedTo: sentTo, via: useNew ? "new-session" : "existing" })
+  for (const pr of fresh) book2.markPrSeen(pr.key, { ...pr, notifiedTo: sentTo, via: usePush ? "steer-orchestrator" : useNew ? "new-session" : "existing" })
   // 新建的投递会话登记进 notices：它报过的 PR 全合完之后由服务自动归档，
   // 不然这些「PR待合并」会话会一条条留在侧边栏里（既没人读、也没人收）。
+  // steer 进编排会话不新建会话，不登记 notices。
   if (useNew && sentTo) {
     book2.markNotice(sentTo, { name: sentTo, convId, kind: "PR待合并", prs: fresh.map((p) => p.key) })
   }
-  log(`PR 扫描：${fresh.length} 条新 PR 已交给 ${sentTo || "新会话"} 合并（${fresh.map((p) => `${p.repo}#${p.number}`).join("、")}）`)
-  return { ok: true, checked, notified: fresh.length, conflicting, target, via: useNew ? "new-session" : "existing", prs: fresh.map((p) => p.key), at: nowIso() }
+  log(`PR 扫描：${fresh.length} 条新 PR 已交给 ${sentTo || "编排会话"} 合并（${fresh.map((p) => `${p.repo}#${p.number}`).join("、")}）`)
+  return { ok: true, checked, notified: fresh.length, conflicting, target, via: usePush ? "steer-orchestrator" : useNew ? "new-session" : "existing", prs: fresh.map((p) => p.key), at: nowIso() }
 }

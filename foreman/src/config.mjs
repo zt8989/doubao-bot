@@ -37,6 +37,23 @@ export const DEFAULTS = {
     // 保守开关：有被监听会话在跑时不派新会话（老行为）。默认关，
     // 关掉才能同时有 2 张单在跑；豆包窗口互相抢时再打开。
     pauseWhileRunning: false,
+    // 以编排会话为中心：捞到单先交给唯一编排会话（steer），由它调 foreman dispatch 分配工作。
+    // 设 false（或 CLI 带 --direct）退回老行为：run 自己建工作区、开工作会话。
+    handToOrchestrator: true,
+  },
+  // 以编排会话为中心：全程只起一条编排会话（不再每次收工新建派单/合并会话）。
+  // 工作会话 id 绑在它身上，状态更新走 dws steer；失败也 steer 续跑同一条工作会话；
+  // 合并关单后 foreman clean 清 worktree 与会话。enabled:false 退回老的多会话模型。
+  sessionFlow: {
+    enabled: true,
+    // 会话名；留空用 `<deliver.namePrefix>-编排`。
+    name: "",
+    // 提示词：留空用内置 src/builtin/orchestrator-prompt.md；给了路径读不到直接报错。
+    promptFile: "",
+    // 写进首句的监控项目根目录；留空回落 deliver.projectDir。
+    projectDir: "",
+    // 只确认首句送达、不等回复（等回复会把服务轮询拖死）。
+    waitFirstReply: false,
   },
   // 合并通道：与派单通道独立排队，默认一次只合一条（合并要写账本，不能并发）。
   merge: {
@@ -221,6 +238,8 @@ export function loadConfig(explicit) {
   // 自动接单巡检：开关只认 true，间隔、每轮条数与在跑上限都要正数。
   cfg.pickup.auto = cfg.pickup.auto === true
   cfg.pickup.pauseWhileRunning = cfg.pickup.pauseWhileRunning === true
+  // 默认把捞到的单交给编排会话（以会话为中心）；显式 false 才自己派。
+  cfg.pickup.handToOrchestrator = cfg.pickup.handToOrchestrator !== false
   for (const key of ["intervalSeconds", "maxPerRound", "maxRunning"]) {
     const n = Number(cfg.pickup[key])
     if (!Number.isFinite(n) || n <= 0) throw new Error(`配置项 pickup.${key} 要是正数，现在是：${cfg.pickup[key]}`)
@@ -258,6 +277,19 @@ export function loadConfig(explicit) {
   }
   cfg.deliver.namePrefix = String(cfg.deliver.namePrefix ?? "").trim() || "foreman"
   cfg.deliver.waitFirstReply = cfg.deliver.waitFirstReply === true
+
+  // 编排会话：路径按 stateFile 的规则展开；提示词给了就要存在（不悄悄退回内置）。
+  cfg.sessionFlow = cfg.sessionFlow && typeof cfg.sessionFlow === "object" ? cfg.sessionFlow : {}
+  cfg.sessionFlow.enabled = cfg.sessionFlow.enabled !== false
+  cfg.sessionFlow.name = String(cfg.sessionFlow.name ?? "").trim()
+  cfg.sessionFlow.waitFirstReply = cfg.sessionFlow.waitFirstReply === true
+  for (const key of ["promptFile", "projectDir"]) {
+    const raw = expandHome(String(cfg.sessionFlow[key] ?? "").trim())
+    cfg.sessionFlow[key] = raw ? (path.isAbsolute(raw) ? raw : path.resolve(baseDir, raw)) : ""
+  }
+  if (cfg.sessionFlow.promptFile && !fs.existsSync(cfg.sessionFlow.promptFile)) {
+    throw new Error(`配置项 sessionFlow.promptFile 指向的编排提示词不存在：${cfg.sessionFlow.promptFile}`)
+  }
 
   // dws 可执行文件：常驻服务的 PATH 不一定有 dws，建议在配置里写绝对路径（支持 ~）。
   cfg.dws = cfg.dws && typeof cfg.dws === "object" ? cfg.dws : {}

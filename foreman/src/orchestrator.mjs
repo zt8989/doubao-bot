@@ -18,6 +18,7 @@ import {
 import { doneComment, holdComment, issueBranch, kickoff, prBody, resume } from "./prompts.mjs"
 import { findWorkspace, reposForIssue, workspacePath } from "./workspaces.mjs"
 import { startOperation, finishOperation } from "./operations.mjs"
+import { bindWorker, ensureOrchestrator, handToOrchestrator, sessionFlowEnabled, workerOf } from "./sessionflow.mjs"
 
 export const issueKey = (repo, n) => `${repo}#${n}`
 
@@ -94,6 +95,8 @@ export function eligible(issues, repoCfg, cfg, book) {
     if (cfg.pickup.onlyUnassigned && (it.assignees ?? []).length) return false
     const rec = book.issue(issueKey(repoCfg.repo, it.number))
     if (rec && CLOSED_STATES.has(rec.state)) return false
+    // 已经交给编排会话、等它 dispatch 的单不再捞：再交一次会让编排重复派活。
+    if (rec && rec.state === "handed") return false
     // 在飞（working 且不是派单失败）不再捞：续跑是编排 AI / 人工 foreman retry 的决定。
     // 否则每轮巡检都会给同一张单再发一次「继续处理」（#268 被连派两次就是这么来的）。
     if (rec && rec.state === "working" && !rec.lastFailure) return false
@@ -119,9 +122,12 @@ export function sortIssues(issues, order = "oldest", { me = "", priority = ["min
 }
 
 // 一轮：每个仓库各自捞、各自做，做完一条接一条。只派活，不等结果。
+// 会话中心模式（默认，sessionFlow.enabled）下捞到单先交给唯一编排会话，
+// 由它调 foreman dispatch 分配工作；ctx.hand=false 或 pickup.handToOrchestrator=false 才自己派。
 export async function runRound(ctx) {
   const { cfg, book, log } = ctx
   const gitea = ctx.gitea ?? realGitea
+  const hand = ctx.hand ?? (sessionFlowEnabled(cfg) && cfg.pickup?.handToOrchestrator === true)
   const handled = []
   for (const repoCfg of cfg.repos) {
     if (ctx.only && ![repoCfg.name, repoCfg.repo].includes(ctx.only)) continue
@@ -146,14 +152,32 @@ export async function runRound(ctx) {
       count++
       let out
       const key = issueKey(repoCfg.repo, it.number)
-      const op = ctx.dryRun ? 0 : startOperation(ctx, "dispatch", `派单 ${key}`, {
+      const op = ctx.dryRun ? 0 : startOperation(ctx, "dispatch", `${hand ? "交给编排" : "派单"} ${key}`, {
         key,
-        detail: it.title || "读工单、准备工作区并启动执行会话",
+        detail: hand ? "把工单交给编排会话，由它调 foreman dispatch" : it.title || "读工单、准备工作区并启动执行会话",
       })
       try {
-        out = await handleIssue(ctx, repoCfg, it)
-        const success = out.state === "dispatched" || out.state === "planned"
-        finishOperation(ctx, op, success ? "success" : "failed", out.convId ? `已派出到执行会话 · 分支 ${out.branch || "-"}` : out.reason || out.state)
+        if (hand && ctx.dryRun) {
+          // dry-run 不许有副作用：只打印「会交给谁」，不 ensure、不 steer。
+          const target = String(book?.data?.orchestrator?.convId ?? "").trim()
+          log(`[dry-run] ${key}：会交给编排会话 ${target || "（还没起，会先起一条编排会话再 steer）"}，由它调 foreman dispatch`)
+          out = { repo: repoCfg.repo, number: it.number, state: "planned", hand: true, orchestrator: target }
+        } else {
+          out = hand
+            ? await handToOrchestrator({ ...ctx, gitea }, { repoCfg, issue: it })
+            : await handleIssue(ctx, repoCfg, it)
+        }
+        const success = out.state === "dispatched" || out.state === "planned" || out.state === "handed"
+        finishOperation(
+          ctx,
+          op,
+          success ? "success" : "failed",
+          out.state === "handed"
+            ? `已交给编排会话${out.convId ? ` · ${out.convId}` : ""}`
+            : out.convId
+              ? `已派出到执行会话 · 分支 ${out.branch || "-"}`
+              : out.reason || out.state
+        )
       } catch (e) {
         finishOperation(ctx, op, "failed", e.message)
         if (e.code === "app_unavailable") throw e
@@ -243,9 +267,20 @@ export async function handleIssue(ctx, repoCfg, summary) {
 
   const primary = workspaces[0]
   const attempt = (prev.attempts ?? 0) + 1
+  const flowOn = sessionFlowEnabled(cfg)
+  // 编排会话只起一次（幂等）。起不来不阻断派单：这条单先不绑，日志里写清，
+  // 之后 foreman orch start 起来再 dispatch 一次就会绑上。
+  let orchConvId = flowOn ? String(prev.orchestrator ?? "").trim() : ""
+  if (flowOn && !orchConvId) {
+    try {
+      orchConvId = (await ensureOrchestrator(ctx)).convId
+    } catch (e) {
+      log(`${key}：编排会话没起来（${e.message}），这条单先不绑定`)
+    }
+  }
+
   book.setIssue(key, {
     state: "working",
-    agent: name,
     issue: issue.number,
     title: issue.title,
     url: issue.url,
@@ -255,14 +290,41 @@ export async function handleIssue(ctx, repoCfg, summary) {
     workspaces,
     attempts: attempt,
     lastFailure: "",
+    ...(orchConvId ? { orchestrator: orchConvId } : {}),
   })
 
-  // 派活：有 convId 就 send 续会话，否则 open 新开。dws 自身会等第一轮回复，那是 dws 的语义。
-  let convId = book.session(name)?.convId ?? ""
+  // 派活：这条单已经有工作会话就 **steer 续跑同一条**（失败重试也不新开第二条），
+  // 没有才开新的。会话中心模式下用 openNew（只确认送达），更新由服务 steer 回编排。
+  const bound = workerOf(book, key)
+  const agentName = bound.name || name
+  const boundTarget = bound.convId || bound.name || book.session(name)?.convId || ""
+  let convId = bound.convId || book.session(name)?.convId || ""
+  const resumeText = resume({ issue, attempt, base: repoCfg.base, failure: prev.lastFailure ?? "", repo: repoCfg.repo, workspaces })
   try {
-    if (convId) {
-      log(`${key}：续会话 ${name}（attempt ${attempt}）`)
-      await dws.send(name, resume({ issue, attempt, base: repoCfg.base, failure: prev.lastFailure ?? "", repo: repoCfg.repo, workspaces }))
+    if (boundTarget) {
+      if (flowOn && typeof dws.steer === "function") {
+        log(`${key}：steer 已有工作会话 ${boundTarget}（attempt ${attempt}，不新开）`)
+        await dws.steer(boundTarget, resumeText)
+      } else {
+        log(`${key}：续会话 ${agentName}（attempt ${attempt}）`)
+        await dws.send(agentName, resumeText)
+      }
+    } else if (flowOn && typeof dws.openNew === "function") {
+      log(`${key}：开工作会话 ${agentName}（attempt ${attempt}，只确认送达）`)
+      const opened = await dws.openNew({
+        name: agentName,
+        prompt: kickoff({
+          repo: repoCfg.repo,
+          issue,
+          base: repoCfg.base,
+          workspaces,
+          failedWorkspaces,
+          attempt,
+          lastFailure: prev.lastFailure ?? "",
+        }),
+        noWait: true,
+      })
+      convId = String(opened?.convId ?? "").trim()
     } else {
       log(`${key}：开新会话 ${name}（attempt ${attempt}）`)
       const opened = await dws.open({
@@ -290,14 +352,21 @@ export async function handleIssue(ctx, repoCfg, summary) {
     return { repo: repoCfg.repo, number: issue.number, state: "failed", reason: e.message }
   }
 
-  // --no-notify：不登记监听，同时 book.record 标 notify:false，免得被 sessions 自动纳入规则捞回来。
+  // --no-notify：不登记监听，同时账本标 notify:false，免得被 sessions 自动纳入规则捞回来。
   const noNotify = !!ctx.noNotify
-  book.record(name, { convId, issue: issue.number, notify: noNotify ? false : true })
+  // 工作会话 id 绑到编排会话：后面任何状态更新都按这条绑定的会话 steer 回编排。
+  bindWorker(book, {
+    issueKey: key,
+    name: agentName,
+    convId,
+    orchestrator: orchConvId,
+    notify: !noNotify,
+  })
 
   if (!noNotify && convId) {
     book.setWatch({
       target: convId,
-      name,
+      name: agentName,
       issueKey: key,
       repo: repoCfg.repo,
       number: issue.number,
@@ -305,7 +374,7 @@ export async function handleIssue(ctx, repoCfg, summary) {
     })
   }
 
-  log(`${key}：已派活 → ${convId || name}${noNotify ? "（不登记监听）" : ""}`)
+  log(`${key}：已${boundTarget ? "steer" : "派活"} → ${convId || agentName}${noNotify ? "（不登记监听）" : ""}${orchConvId ? `，绑定编排会话 ${orchConvId}` : ""}`)
   return {
     repo: repoCfg.repo,
     number: issue.number,
@@ -314,6 +383,9 @@ export async function handleIssue(ctx, repoCfg, summary) {
     worktree: primary?.worktree ?? "",
     workspaces: workspaces.map((w) => ({ repo: w.repo, branch: w.branch, worktree: w.worktree })),
     convId,
+    agent: agentName,
+    orchestrator: orchConvId,
+    resumed: !!boundTarget,
   }
 }
 
