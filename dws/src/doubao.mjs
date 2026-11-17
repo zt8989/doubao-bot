@@ -561,22 +561,29 @@ export class Doubao {
     // 通知类新会话要的就是这个——等回复会把调用方的轮询拖到超时。
     if (noWait) {
       const sent = await this.confirmSent(page, baseline, { signal })
-      // 主证据：侧边栏里多出来的那条任务。命中就以它为准，不看窗口 id。
-      const located = await this.locateNewTask(page, beforeTasks, { signal })
-      if (located?.id) return { convId: located.id, reply: null, sent: true, locatedBy: "sidebar" }
+      // 主证据改成窗口回读的 convId：confirmSent 时窗口已被 waitConvSwitch 切到新会话，
+      // 这个 id 才是本次新建的那条。原先先看侧边栏差集，差集可能命中「还没渲染进
+      // beforeTasks 的旧会话」——38454515298487298 被 15:34 / 15:49 两次"新建"复用就是
+      // 这么来的：第一次的会话没进 before 快照，第二次差集把它当新任务返回了。
       let convId = String(sent?.convId ?? "").trim()
       if (!/^\d{8,}$/.test(convId) || convId === String(beforeConvId ?? "").trim()) {
         convId = await this.waitNewConvId(beforeConvId, { timeoutMs: 20000, signal })
       }
-      if (!isFreshTask(beforeConvId, convId, { requireNewId: true })) {
-        throw new DoubaoError(
-          `新建工作任务失败：首句发出去了，但窗口回读的会话 id 是 ${convId || "(空)"}，` +
-            `与新建前所在的 ${beforeConvId || "(空)"} 相同，侧边栏里也没有多出新任务；` +
-            `无法确认本次新会话落点，请 dws list 核对。`,
-          "doubao_new_task"
-        )
+      if (isFreshTask(beforeConvId, convId, { requireNewId: true })) {
+        return { convId, reply: null, sent: true, locatedBy: "window" }
       }
-      return { convId, reply: null, sent: true }
+      // 窗口拿不到新 id 才退回侧边栏差集，且必须用首句校验它确实是本次新建的——
+      // 光凭差集不能区分「我建的」和「别人刚建 / 之前没渲染出来的」。
+      const located = await this.locateNewTask(page, beforeTasks, { signal })
+      if (located?.id && (await this.convHasPrompt(located.id, prompt, { signal }))) {
+        return { convId: located.id, reply: null, sent: true, locatedBy: "sidebar" }
+      }
+      throw new DoubaoError(
+        `新建工作任务失败：首句发出去了，但窗口回读的会话 id 是 ${convId || "(空)"}，` +
+          `与新建前所在的 ${beforeConvId || "(空)"} 相同，侧边栏差集里也没有通过首句校验的新任务；` +
+          `无法确认本次新会话落点，请 dws list 核对。`,
+        "doubao_new_task"
+      )
     }
     let reply
     try {
