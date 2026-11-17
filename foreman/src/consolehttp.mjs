@@ -220,6 +220,28 @@ export function startConsoleHttp({ store, ctx, dir, host = "127.0.0.1", port = 7
         }
       }
 
+      if (pathname === "/api/candidates") {
+        // 首页「待分配任务」：open + 接单标签、账本里还没处理过的单。只读，不派活。
+        if (typeof ctx.candidates !== "function") return sendJson(res, 501, { ok: false, error: "candidates_not_supported" })
+        const r = await ctx.candidates({ refresh: url.searchParams.get("refresh") === "1" })
+        return sendJson(res, 200, r)
+      }
+
+      if (pathname === "/api/pick") {
+        // 手动接单：只派页面点中的那一条，不看自动接单开关。
+        if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
+        if (typeof ctx.pickIssue !== "function") return sendJson(res, 501, { ok: false, error: "pick_not_supported" })
+        let body
+        try {
+          body = await readBody(req)
+        } catch (e) {
+          return sendJson(res, 400, { ok: false, error: e.code || "bad_request", message: e.message })
+        }
+        const r = await ctx.pickIssue({ repo: body?.repo, number: body?.number })
+        const conflict = new Set(["already-handled", "already-handed", "running", "node-paused", "locked"])
+        return sendJson(res, r?.ok ? 200 : conflict.has(r?.error) ? 409 : 400, r)
+      }
+
       if (pathname === "/api/pickup") {
         if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
         if (typeof ctx.pickup !== "function") return sendJson(res, 501, { ok: false, error: "pickup_not_supported" })

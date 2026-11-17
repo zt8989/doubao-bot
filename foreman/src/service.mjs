@@ -8,7 +8,7 @@ import { nowIso, sleep, inWorkHours } from "./util.mjs"
 import { Book } from "./book.mjs"
 import { parseResult, deliverPrompt, noticeSessionName, issueBranch } from "./prompts.mjs"
 import { builtinPrompt } from "./builtin-prompts.mjs"
-import { notifyTarget, shouldNotify, notifyText, runRound, acquireLock, releaseLock, handleIssue } from "./orchestrator.mjs"
+import { notifyTarget, shouldNotify, notifyText, runRound, acquireLock, releaseLock, handleIssue, eligible, sortIssues, bucketOf, CLOSED_STATES } from "./orchestrator.mjs"
 import {
   cleanIssue,
   cleanableIssues,
@@ -465,6 +465,143 @@ export async function pickupOnce(ctx, { run = runRound, force = false } = {}) {
   }
 }
 
+// 「待分配任务」列表：和自动接单同一套口径（接单标签 + 排除标签 + 账本去重），只读不派。
+// gitea 列一遍要打三条命令，页面刷新会太吵：这里带 45s 缓存，refresh=true 才强拉。
+const CANDIDATE_TTL_MS = 45_000
+let candidateCache = { at: 0, payload: null }
+
+export function forgetCandidates() {
+  candidateCache = { at: 0, payload: null }
+}
+
+export async function candidatesOnce(ctx, { refresh = false } = {}) {
+  const { cfg } = ctx
+  const now = Date.now()
+  if (!refresh && candidateCache.payload && now - candidateCache.at < CANDIDATE_TTL_MS) {
+    return { ...candidateCache.payload, cached: true }
+  }
+
+  const book = new Book(cfg.stateFile)
+  const base = String(cfg?.gitea?.baseUrl ?? "http://106.54.199.229:3000").replace(/\/+$/, "")
+  const items = []
+  const errors = []
+
+  for (const repoCfg of cfg.repos ?? []) {
+    const labelQuery = (repoCfg.labelIds ?? cfg.pickup?.labelIds ?? []).join(",")
+    let list = []
+    try {
+      list = await ctx.gitea.listIssues(repoCfg.repo, { label: labelQuery })
+    } catch (e) {
+      errors.push({ repo: repoCfg.repo, message: e.message })
+      continue
+    }
+    const pool = sortIssues(eligible(list, repoCfg, cfg, book), cfg.pickup?.order, {
+      me: cfg.pickup?.me,
+      priority: cfg.pickup?.priority,
+    })
+    for (const it of pool) {
+      items.push({
+        repo: repoCfg.repo,
+        name: repoCfg.name,
+        number: it.number,
+        title: it.title || "",
+        url: it.url || `${base}/${repoCfg.repo}/issues/${it.number}`,
+        labels: it.labels ?? [],
+        assignees: it.assignees ?? [],
+        author: it.author || "",
+        bucket: bucketOf(it, cfg.pickup?.me),
+        createdAt: it.createdAt || "",
+      })
+    }
+  }
+
+  const runningOwn = ctx.engine?.active?.("own")?.length ?? 0
+  const inflight = Math.max(inflightIssues(book).length, runningOwn)
+  const payload = {
+    ok: true,
+    at: nowIso(),
+    items,
+    errors,
+    capacity: { inflight, maxRunning: Number(cfg.pickup?.maxRunning) || 2 },
+    pickup: { auto: cfg.pickup?.auto === true, inWorkHours: inWorkHours(cfg) },
+  }
+  candidateCache = { at: now, payload }
+  return { ...payload, cached: false }
+}
+
+// 控制台手动接单：只派点中的这一条，不看自动接单开关与工作时间；
+// 查重、run.lock、节点暂停照旧守着，避免和 CLI / 自动巡检把同一张单派两遍。
+export async function pickIssue(ctx, { repo = "", number = 0 } = {}) {
+  const { cfg, log = () => {} } = ctx
+  const repoCfg = findRepoCfg(cfg, String(repo ?? "").trim())
+  if (!repoCfg) return { ok: false, error: "unknown-repo", message: `配置里没有这个工程：${repo || "（空）"}` }
+  const n = Number(number) || 0
+  if (!n) return { ok: false, error: "bad-request", message: "缺工单号" }
+
+  const key = `${repoCfg.repo}#${n}`
+  const book = new Book(cfg.stateFile)
+  const prev = book.issue(key)
+  if (prev) {
+    if (CLOSED_STATES.has(prev.state)) {
+      return { ok: false, error: "already-handled", message: `${key} 已经处理过（${prev.state}），不重复派` }
+    }
+    if (prev.state === "handed") {
+      return { ok: false, error: "already-handed", message: `${key} 已交给编排会话，等它 dispatch` }
+    }
+    if (prev.state === "working" && !prev.lastFailure) {
+      return { ok: false, error: "running", message: `${key} 正在跑，先看它的会话` }
+    }
+  }
+  if (ctx.engine?.paused?.("pickup")) {
+    return { ok: false, error: "node-paused", message: "接单节点已暂停，先在控制台把它继续" }
+  }
+
+  // 和 CLI / 自动巡检抢同一把锁：两边同时捞会把同一条单派两次。
+  const lockFile = path.join(path.dirname(cfg.stateFile), "run.lock")
+  const lock = acquireLock(lockFile)
+  if (!lock) return { ok: false, error: "locked", message: "另一轮派单正在跑（run.lock），等它结束再点" }
+
+  const op = startOperation(ctx, "dispatch", `手动接单 ${key}`, { key, detail: "控制台「待分配任务」点接单" })
+  try {
+    let issue
+    try {
+      issue = await ctx.gitea.viewIssue(repoCfg.repo, n)
+    } catch (e) {
+      finishOperation(ctx, op, "failed", e.message)
+      return { ok: false, error: "gitea-error", message: `读不到工单 ${key}：${e.message}` }
+    }
+    issue.number = n
+
+    const hand = sessionFlowEnabled(cfg) && cfg.pickup?.handToOrchestrator === true
+    let out
+    try {
+      out = hand
+        ? await handToOrchestrator({ ...ctx, book }, { repoCfg, issue })
+        : await handleIssue({ ...ctx, book }, repoCfg, issue)
+    } catch (e) {
+      finishOperation(ctx, op, "failed", e.message)
+      const code = e.code === "app_unavailable" ? "app_unavailable" : "dispatch-failed"
+      return { ok: false, error: code, message: e.message }
+    }
+
+    // 和工作流引擎对齐：捞到单推 issue.picked，真开出工作会话再推 session.dispatched。
+    await ctx.engine?.emit("issue.picked", { issueKey: key, workflow: "own" })
+    if (out.state === "dispatched") {
+      await ctx.engine?.emit("session.dispatched", { issueKey: key, target: out.convId ?? out.agent ?? "", workflow: "own" })
+    }
+    finishOperation(ctx, op, "success", out.convId ? `已派出 · ${out.convId}` : out.reason || out.state)
+    try {
+      ctx.consoleStore?.sync(new Book(cfg.stateFile))
+      forgetCandidates()
+    } catch {}
+    log(`手动接单 ${key}：${out.state}${out.convId ? ` · ${out.convId}` : ""}`)
+    return { ok: true, ...out }
+  } finally {
+    releaseLock(lockFile)
+  }
+}
+
+
 // 起服务：HTTP 单通道（CLI 的 RPC + 控制台页面同一个端口），端口写到文件里给 CLI 读。
 // book 参数只用于初始加载，poll/write 时一律 new Book 重开。
 // gitea 只在 PR 监听里用，测试可直接注入假的 { listPulls }。
@@ -605,6 +742,9 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   ctx.prPoll = doPrPoll
   const doPickup = async () => pickupOnce(ctx)
   ctx.pickup = doPickup
+  // 控制台「待分配任务」：列候选（只读，带 45s 缓存）与手动接单（只派点中的那一条）。
+  ctx.candidates = (opts) => candidatesOnce(ctx, opts)
+  ctx.pickIssue = (args) => pickIssue(ctx, args)
   // 页面上的「立即执行」：不看开关和 cron 现在是什么状态，立刻跑一轮这类任务。
   // 只 bypass「没开 / 不在工作时间」；容量、busy、锁、节点暂停这些保护仍然生效。
   ctx.runSchedule = async (id) => {

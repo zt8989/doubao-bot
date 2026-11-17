@@ -156,6 +156,12 @@ foreman status                # 在不在 + 监听明细 + lastPollAt / pollCoun
   重复同步只更新状态与 `last_seen_at`，`first_seen_at` 保留第一次发现，**按工单去重、不重复出行**。
 - 接口：`GET /api/snapshot`（当天任务 + PR）、`GET /api/polls`（最近扫描记录）、
   `GET /api/history?days=N&day=YYYY-MM-DD`（事件流水）、`POST /api/sync`（立刻扫一轮 PR 并落库）。
+  「分配任务」卡片另有两个：`GET /api/candidates`（待分配队列，服务端缓存 45s，`?refresh=1` 强拉）、
+  `POST /api/pick`（`{"repo":"<owner/name>","number":N}` 手动接单，只派这一条）。
+- 「分配任务」卡片分两个页签：**「今日任务」/「待分配任务」**。待分配只列 open + 接单标签（`pickup.labelIds`）、
+  账本里还没处理过的单（`done` / `pr-open` / `handed` / 在跑的都排除），按归属分「我的 / 无人认领 / 他人认领」；
+  点行尾「接单」= 建工作区 + 开执行会话，**不看 `pickup.auto` 与工作时间**，但 `run.lock`、节点暂停、账本查重照旧守着，
+  不会和 CLI / 自动巡检把同一张单派两遍。页脚显示「在跑 n/上限」。
 - 顶栏有「看哪天」日期选择（原生日历）：换一天，指标卡 / 任务表全部切成那天的口径（状态从 `events` 回放，标题写 `2026-11-11 分配任务`），非今天时出现「回到今天」；`/?day=YYYY-MM-DD` 也能直接打开那天。没有单独的「历史」面板。表格里的 `仓库#号` 是链接，点开就是 Gitea 的工单/PR 页面（新标签页）。
   事件表 `events` 跟账本同库，记 `task_new` / `task_state` / `task_attempt` / `pr_new` / `pr_state` /
   `pr_open` / `pr_merge` / `issue_comment` / `issue_close`。`sync` 比对上一行状态自动记（同一状态不重复），

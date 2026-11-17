@@ -215,6 +215,12 @@ class FmTasks extends LitElement {
     runs: { attribute: false },
     workflows: { attribute: false },
     scope: { type: String },
+    // tab：today（今日/某天已分配）| pending（待分配，可点接单）
+    tab: { type: String },
+    candidates: { attribute: false },
+    candInfo: { attribute: false },
+    candBusy: { type: String },
+    candError: { type: String },
   }
   createRenderRoot() {
     return this
@@ -298,18 +304,98 @@ class FmTasks extends LitElement {
         </td>
       </tr>`
   }
+  // 待分配：open + 接单标签、账本里还没处理过的单。每行一个「接单」，点了就派这一条。
+  pendingView() {
+    const items = this.candidates || []
+    const info = this.candInfo || {}
+    const cap = info.capacity || {}
+    const busy = this.candBusy || ""
+    const BUCKET = {
+      mine: ["done", "我的"],
+      unassigned: ["working", "无人认领"],
+      others: ["self", "他人认领"],
+    }
+    const note = this.candError
+      ? html`<div class="panel-note is-error">${this.candError}</div>`
+      : ""
+    if (!items.length) {
+      return html`${note}
+        <div class="empty">
+          <div class="empty-title">${busy === "loading" ? "正在拉待分配队列…" : "队列里没有待分配的任务"}</div>
+          <div class="empty-sub">只列 open 且带接单标签的单；账本里已处理、在跑、已出 PR 的自动排除</div>
+        </div>`
+    }
+    return html`${note}
+      <div class="table-wrap">
+        <table class="tasks">
+          <thead>
+            <tr>
+              <th class="col-id">工单</th>
+              <th>标题</th>
+              <th class="col-state">归属</th>
+              <th class="col-branch">作者</th>
+              <th class="col-time">创建</th>
+              <th class="col-detail">接单</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${items.map((c) => {
+              const key = `${c.repo}#${c.number}`
+              const [cls, label] = BUCKET[c.bucket] || ["self", "他人认领"]
+              return html`
+                <tr>
+                  <td class="id-cell">
+                    <a class="id-link" href=${c.url} target="_blank" rel="noopener"
+                      ><span class="repo">${c.repo}#</span><span>${c.number}</span></a>
+                  </td>
+                  <td class="title-cell" title=${c.title || ""}>${c.title || "（无标题）"}</td>
+                  <td><span class=${"badge " + cls}>${label}</span></td>
+                  <td class="branch-cell" title=${c.author || ""}>${c.author || "—"}</td>
+                  <td class="time-cell">${stampText(c.createdAt) || "—"}</td>
+                  <td class="detail-cell">
+                    <button class="ghost" ?disabled=${busy === key} @click=${() => emit(this, "candidate-pick", { repo: c.repo, number: c.number })}>
+                      ${busy === key ? "接单中…" : "接单"}
+                    </button>
+                  </td>
+                </tr>`
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div class="panel-foot">在跑 ${cap.inflight ?? 0}/${cap.maxRunning ?? "?"} · 手动接单不看自动接单开关 · 接单会建工作区并开执行会话</div>`
+  }
   render() {
     const rows = this.tasks || []
     const scope = this.scope || "今日"
+    const tab = this.tab === "pending" ? "pending" : "today"
+    const pending = (this.candidates || []).length
     return html`
       <section class="panel">
         <div class="panel-head">
-          <h2>${scope} 分配任务</h2>
+          <h2>分配任务</h2>
+          <div class="tabs" role="tablist">
+            <button
+              class=${"tab" + (tab === "today" ? " is-active" : "")}
+              role="tab"
+              aria-selected=${tab === "today" ? "true" : "false"}
+              @click=${() => emit(this, "task-tab", { tab: "today" })}
+            >${scope}任务</button>
+            <button
+              class=${"tab" + (tab === "pending" ? " is-active" : "")}
+              role="tab"
+              aria-selected=${tab === "pending" ? "true" : "false"}
+              @click=${() => emit(this, "task-tab", { tab: "pending" })}
+            >待分配任务${pending ? ` ${pending}` : ""}</button>
+          </div>
           <div class="panel-side">
-            <span class="hint">${rows.length ? `${rows.length} 条 · 点「详情」看每个节点` : "暂无"}</span>
+            ${tab === "pending"
+              ? html`<button class="ghost" ?disabled=${this.candBusy === "loading"} @click=${() => emit(this, "candidates-refresh")}>
+                  ${this.candBusy === "loading" ? "刷新中…" : "刷新"}
+                </button>`
+              : html`<span class="hint">${rows.length ? `${rows.length} 条 · 点「详情」看每个节点` : "暂无"}</span>`}
           </div>
         </div>
-        ${rows.length
+        ${tab === "pending" ? this.pendingView() : rows.length
           ? html`
               <div class="table-wrap">
                 <table class="tasks">
@@ -555,6 +641,11 @@ class FmConsole extends LitElement {
     operations: { attribute: false },
     workflow: { attribute: false },
     nodeBusy: { type: String },
+    taskTab: { type: String },
+    candidates: { attribute: false },
+    candInfo: { attribute: false },
+    candBusy: { type: String },
+    candError: { type: String },
     opFilter: { type: String },
     schedBusy: { type: String },
     schedError: { type: String },
@@ -577,6 +668,12 @@ class FmConsole extends LitElement {
     this.operations = []
     this.workflow = null
     this.nodeBusy = ""
+    // 分配任务卡片的两页：today（已分配）/ pending（待分配，可点接单）
+    this.taskTab = "today"
+    this.candidates = []
+    this.candInfo = null
+    this.candBusy = ""
+    this.candError = ""
     this.opFilter = "all"
     this.schedBusy = ""
     this.schedError = ""
@@ -654,10 +751,22 @@ class FmConsole extends LitElement {
     this._onNodeToggle = (e) => this.toggleNode(e.detail)
     this.addEventListener("node-toggle", this._onNodeToggle)
     this.addEventListener("operation-filter", this._onOpFilter)
+    this._onTaskTab = (e) => {
+      const tab = e.detail.tab === "pending" ? "pending" : "today"
+      if (this.taskTab === tab) return
+      this.taskTab = tab
+      if (tab === "pending") this.loadCandidates()
+    }
+    this._onCandRefresh = () => this.loadCandidates({ refresh: true })
+    this._onCandidatePick = (e) => this.pickCandidate(e.detail)
+    this.addEventListener("task-tab", this._onTaskTab)
+    this.addEventListener("candidates-refresh", this._onCandRefresh)
+    this.addEventListener("candidate-pick", this._onCandidatePick)
 
     this._onFocus = () => {
       this.load()
       this.loadWorkflow()
+      if (this.taskTab === "pending") this.loadCandidates()
       if (this.view === "schedules") this.loadSchedules()
       if (this.view === "operations") this.loadOperations()
     }
@@ -693,6 +802,9 @@ class FmConsole extends LitElement {
     this.removeEventListener("schedule-run", this._onScheduleRun)
     this.removeEventListener("node-toggle", this._onNodeToggle)
     this.removeEventListener("operation-filter", this._onOpFilter)
+    this.removeEventListener("task-tab", this._onTaskTab)
+    this.removeEventListener("candidates-refresh", this._onCandRefresh)
+    this.removeEventListener("candidate-pick", this._onCandidatePick)
     super.disconnectedCallback()
   }
 
@@ -748,8 +860,50 @@ class FmConsole extends LitElement {
     }
   }
 
-  async loadWorkflow() {
+  // 待分配队列：只读接口，服务端带 45s 缓存，点「刷新」才强拉。
+  async loadCandidates({ refresh = false } = {}) {
+    if (this.candBusy === "loading") return
+    this.candBusy = "loading"
     try {
+      const res = await fetch(`/api/candidates${refresh ? "?refresh=1" : ""}`, { cache: "no-store" })
+      const body = await res.json()
+      if (!res.ok || body.ok === false) throw new Error(body.message || `HTTP ${res.status}`)
+      this.candidates = body.items || []
+      this.candInfo = body
+      this.candError = (body.errors || []).length
+        ? `有仓库拉不到工单：${body.errors.map((e) => `${e.repo}（${e.message}）`).join("；")}`
+        : ""
+    } catch (e) {
+      this.candError = `拿不到待分配队列：${e.message}`
+    } finally {
+      this.candBusy = ""
+    }
+  }
+
+  // 手动接单：只派这一条。派完立刻刷新今日任务与队列，让结果当场可见。
+  async pickCandidate({ repo, number } = {}) {
+    const key = `${repo}#${number}`
+    if (!repo || !number || this.candBusy) return
+    this.candBusy = key
+    this.candError = ""
+    try {
+      const res = await fetch("/api/pick", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ repo, number }),
+      })
+      const body = await res.json()
+      if (!res.ok || body.ok === false) throw new Error(body.message || `HTTP ${res.status}`)
+      this.candError = ""
+      await Promise.all([this.load(), this.loadCandidates({ refresh: true }), this.loadWorkflow()])
+    } catch (e) {
+      this.candError = `接单失败（${key}）：${e.message}`
+    } finally {
+      this.candBusy = ""
+    }
+  }
+
+  async loadWorkflow() {    try {
       const res = await fetch("/api/workflow", { cache: "no-store" })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const body = await res.json()
@@ -882,6 +1036,11 @@ class FmConsole extends LitElement {
                 .runs=${this.workflow?.runs || []}
                 .workflows=${this.workflow?.workflows || []}
                 .scope=${this.data.isToday === false ? this.data.day : "今日"}
+                .tab=${this.taskTab}
+                .candidates=${this.candidates}
+                .candInfo=${this.candInfo}
+                .candBusy=${this.candBusy}
+                .candError=${this.candError}
               ></fm-tasks>`
           : html`
               <section class="panel">
