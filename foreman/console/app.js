@@ -221,6 +221,7 @@ class FmTasks extends LitElement {
     candInfo: { attribute: false },
     candBusy: { type: String },
     candError: { type: String },
+    candNote: { type: String },
   }
   createRenderRoot() {
     return this
@@ -317,12 +318,14 @@ class FmTasks extends LitElement {
     }
     const note = this.candError
       ? html`<div class="panel-note is-error">${this.candError}</div>`
-      : ""
+      : this.candNote
+        ? html`<div class="panel-note is-ok">${this.candNote}</div>`
+        : ""
     if (!items.length) {
       return html`${note}
         <div class="empty">
           <div class="empty-title">${busy === "loading" ? "正在拉待分配队列…" : "队列里没有待分配的任务"}</div>
-          <div class="empty-sub">只列 open 且带接单标签的单；账本里已处理、在跑、已出 PR 的自动排除</div>
+          <div class="empty-sub">列出配置仓库里所有 open 工单；账本里已处理、在跑、已交编排的自动排除</div>
         </div>`
     }
     return html`${note}
@@ -365,7 +368,7 @@ class FmTasks extends LitElement {
       <div class="panel-foot">
         ${(info.total || items.length) > items.length
           ? `共 ${info.total} 条待分配 · 按「我的 → 无人认领 → 他人认领」只显示前 ${items.length} 条 · `
-          : ""}在跑 ${cap.inflight ?? 0}/${cap.maxRunning ?? "?"} · 手动接单不看自动接单开关 · 接单会建工作区并开执行会话
+          : ""}在跑 ${cap.inflight ?? 0}/${cap.maxRunning ?? "?"} · 手动接单不看自动接单开关 · 带 needs-info 类标签的走决策单（不监听）
       </div>`
   }
   render() {
@@ -650,6 +653,7 @@ class FmConsole extends LitElement {
     candInfo: { attribute: false },
     candBusy: { type: String },
     candError: { type: String },
+    candNote: { type: String },
     opFilter: { type: String },
     schedBusy: { type: String },
     schedError: { type: String },
@@ -678,6 +682,7 @@ class FmConsole extends LitElement {
     this.candInfo = null
     this.candBusy = ""
     this.candError = ""
+    this.candNote = ""
     this.opFilter = "all"
     this.schedBusy = ""
     this.schedError = ""
@@ -890,6 +895,7 @@ class FmConsole extends LitElement {
     if (!repo || !number || this.candBusy) return
     this.candBusy = key
     this.candError = ""
+    this.candNote = ""
     try {
       const res = await fetch("/api/pick", {
         method: "POST",
@@ -899,6 +905,9 @@ class FmConsole extends LitElement {
       const body = await res.json()
       if (!res.ok || body.ok === false) throw new Error(body.message || `HTTP ${res.status}`)
       this.candError = ""
+      this.candNote = body.decision
+        ? `已接下 ${key}（决策单）：换了一套提示词让 agent 自己判断要不要做，不登记监听`
+        : `已接下 ${key}，工作会话已开`
       await Promise.all([this.load(), this.loadCandidates({ refresh: true }), this.loadWorkflow()])
     } catch (e) {
       this.candError = `接单失败（${key}）：${e.message}`
@@ -1045,6 +1054,7 @@ class FmConsole extends LitElement {
                 .candInfo=${this.candInfo}
                 .candBusy=${this.candBusy}
                 .candError=${this.candError}
+                .candNote=${this.candNote}
               ></fm-tasks>`
           : html`
               <section class="panel">

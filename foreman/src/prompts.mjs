@@ -67,8 +67,48 @@ export function kickoff({ repo, issue, worktree, branch, base, workspaces, faile
   return lines.join("\n")
 }
 
-export function resume({ issue, attempt, base = "", failure = "", repo = "", workspaces }) {
-  const list = normalizeWorkspaces({ repo, workspaces })
+// 「决策单」提示词：带 needs-info / needs-human / ready-for-human / wontfix / agent-blocked 这类标签的工单，
+// 手动接单时不按「改完 commit」派，而是让 agent 自己判断该不该做、怎么做。
+// 这类单不登记监听、不绑编排会话：没有人在它跑完后接结果，所以结论必须在会话里写完整。
+export function decisionKickoff({ repo, issue, base, workspaces = [], labels = [], attempt = 1 }) {
+  const list = normalizeWorkspaces({ repo, base, workspaces })
+  const key = `${repo}#${issue.number}`
+  const lines = [
+    `【决策会话 · ${repo} #${issue.number} · 第 ${attempt} 次】`,
+    ``,
+    `工单：#${issue.number} ${issue.title}`,
+  ]
+  if (issue.url) lines.push(`工单链接：${issue.url}`)
+  lines.push(`工单键：${key}`)
+  if (labels.length) lines.push(`当前标签：${labels.join("、")}`)
+  lines.push(
+    ``,
+    `工单正文：`,
+    (issue.body ?? "").trim() || "（正文为空，按标题理解）",
+    ``,
+    `这张单带着「需要人参与 / 信息不足」类标签，所以这次不是直接派活，是请你先判断再决定动不动手：`,
+    `1. 先读工单与评论（opencli gitea issue-view --repo ${repo} ${issue.number}），必要时翻代码，弄清它到底要什么。`,
+    `2. 信息不够、或有多种合理做法：不要猜、不要硬做。写清缺什么信息、有哪些方案、你推荐哪个；需要人回答的，用 opencli gitea issue-comment 回到工单上。`,
+    `3. 判断下来确实能做、做法也明确：可以直接做。只在自己那条工作区里改，改完自己跑相关测试并 commit；不要 push、不要开 PR、不要合并、不要关工单。`,
+    `4. 判断下来不该做（重复、已解决、方向不对）：说明理由并给出建议，但不要自己关单、不要自己改标签。`,
+    `5. 这次没有人监听你跑完后的状态：结论、疑问、建议都要在会话里写完整，别只丢一个 RESULT 块。`
+  )
+  if (list.length) {
+    lines.push(
+      ``,
+      `工作区（一工程一个，别跨目录、别动各仓库主 checkout）：`,
+      ...list.flatMap((w, i) => [
+        `${i + 1}. ${w.repo}`,
+        `   工作区：${w.worktree}`,
+        `   分支：${w.branch}（基线 origin/${w.base || base}）`,
+      ])
+    )
+  }
+  lines.push(``, RESULT_SPEC)
+  return lines.join("\n")
+}
+
+export function resume({ issue, attempt, base = "", failure = "", repo = "", workspaces }) {  const list = normalizeWorkspaces({ repo, workspaces })
   const where = list.length
     ? `一个工程一个工作区：${list.map((w) => `${w.repo} → ${w.worktree}（${w.branch}）`).join("；")}`
     : "一工程一工作区：每个工程只在自己的工作区里改"
@@ -109,7 +149,7 @@ export function deliverPrompt({ fixed = "", projectDir = "", product = "", kind 
   if (kind) online.push(`触发：${String(kind).trim()}`)
   if (lane === "merge") online.push("通道：合并（1 并发，只管合 PR）")
   else if (lane === "dispatch" && Number.isFinite(running)) {
-    online.push(`通道：派单（在跑 ${running}${Number.isFinite(maxRunning) ? ` / 上限 ${maxRunning}` : ""}）`)
+    online.push(`通道：派单（agent 主动派单不限在跑上限；当前在跑 ${running}${Number.isFinite(maxRunning) ? `；定时巡检上限 ${maxRunning}` : ""}）`)
   }
   return [
     head,

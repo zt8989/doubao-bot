@@ -78,6 +78,8 @@ test("编排会话幂等：账本里已有 convId 就复用，绝不开第二条
     assert.equal(first.created, true)
     assert.equal(dws.calls.openNew.length, 1)
     assert.match(dws.calls.openNew[0].name, /编排/)
+    assert.match(dws.calls.openNew[0].prompt, /agent 主动 dispatch 不限在跑上限/)
+    assert.ok(!dws.calls.openNew[0].prompt.includes("同时在跑最多"))
     assert.equal(dws.calls.openNew[0].noWait, true)
 
     const second = await ensureOrchestrator(ctx)

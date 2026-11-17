@@ -313,11 +313,19 @@ test("notifyDecision：无 RESULT 时正文带执行会话 id 与最后回复；
 
 // 服务级 ctx 不带账本（只有 state/cfg/dws/engine），dispatch 这条 RPC 必须自己兜底开 Book，
 // 否则 handleIssue 一进来读 book.issue(key) 就崩：Cannot read properties of undefined (reading 'issue')。
-test("dispatch RPC：ctx 不带 book 也能派（dry-run 走完不崩在 book.issue）", async () => {
+// pickup.maxRunning 只约束定时巡检；即使已经达到上限，agent 主动 dispatch 也必须能派。
+test("dispatch RPC：达到定时巡检上限后，agent 仍能派且 ctx 不带 book 也不崩", async () => {
   const dir = tmpDir()
   try {
     const repo = { repo: "yyzl/demo", name: "demo", dir, base: "sit-20261126", product: "demo" }
-    const cfg = mkCfg(dir, { worktreeDir: path.join(dir, "worktrees"), repos: [repo], sessionFlow: { enabled: true } })
+    const cfg = mkCfg(dir, {
+      worktreeDir: path.join(dir, "worktrees"),
+      repos: [repo],
+      sessionFlow: { enabled: true },
+      pickup: { maxRunning: 1, maxPerRound: 1 },
+    })
+    const book = new Book(cfg.stateFile)
+    book.setIssue("yyzl/demo#1", { state: "working" })
     const ctx = {
       ...mkCtx(cfg),
       dryRun: true,

@@ -53,7 +53,7 @@ const fakeGitea = (list) => ({
   viewIssue: async (repo, n) => ({ ...issue(n), number: n, body: "正文" }),
 })
 
-test("待分配列表：只列账本里还没处理过的单，并按归属分档", async () => {
+test("待分配列表：列出全部 open 工单（不看接单标签），只按账本去重", async () => {
   forgetCandidates()
   const stateFile = tmpState()
   const book = new Book(stateFile)
@@ -71,7 +71,11 @@ test("待分配列表：只列账本里还没处理过的单，并按归属分�
 
   const r = await candidatesOnce(ctx)
   assert.equal(r.ok, true)
-  assert.deepEqual(r.items.map((i) => i.number), [1, 4], "done/handed/排除标签的单都不进队列")
+  assert.deepEqual(
+    r.items.map((i) => i.number),
+    [1, 5, 4],
+    "done/handed 的不列；没打接单标签的、带 needs-human 的都列（排序：我的 → 他人）"
+  )
   assert.equal(r.items.find((i) => i.number === 1).bucket, "mine")
   assert.equal(r.items.find((i) => i.number === 4).bucket, "others")
   assert.equal(r.items[0].url, "http://gitea.test/yyzl/win-ai-harness/issues/1", "库里没有 url 时按仓库拼")
@@ -186,4 +190,53 @@ test("手动接单：run.lock 被别人占着就拒绝，不硬派", async () =>
   assert.equal(r.ok, false)
   assert.equal(r.error, "locked")
   fs.rmSync(lockFile, { force: true })
+})
+
+test("决策单提示词：先判断再决定动不动手，并说明这次没人监听", async () => {
+  const { decisionKickoff } = await import("../src/prompts.mjs")
+  const p = decisionKickoff({
+    repo: repoCfg.repo,
+    issue: issue(30, { title: "这个要不要做", body: "正文" }),
+    base: "sit-20261126",
+    labels: ["needs-info"],
+    workspaces: [{ repo: repoCfg.repo, branch: "fix/issue-30", worktree: "/tmp/wt", base: "sit-20261126" }],
+  })
+  assert.match(p, /决策会话/)
+  assert.match(p, /needs-info/)
+  assert.match(p, /不要猜、不要硬做/)
+  assert.match(p, /没有人监听/)
+  assert.match(p, /RESULT/)
+  assert.match(p, /\/tmp\/wt/, "仍给工作区：判断下来能做就能直接改")
+})
+
+test("手动接单：带 needs-info 标签走决策单（dry-run 验证提示词与标记）", async () => {
+  const stateFile = tmpState()
+  const ctx = {
+    cfg: cfg({ stateFile }),
+    dryRun: true,
+    log: () => {},
+    gitea: {
+      viewIssue: async () => ({ ...issue(31), title: "信息不足的单", labels: ["needs-info"], body: "正文" }),
+    },
+  }
+  const r = await pickIssue(ctx, { repo: repoCfg.repo, number: 31 })
+  assert.equal(r.ok, true)
+  assert.equal(r.decision, true)
+  assert.match(r.prompt, /决策会话/, "换了一套提示词")
+  assert.match(r.prompt, /没有人监听/)
+})
+
+test("手动接单：普通工单仍走标准派单提示词", async () => {
+  const stateFile = tmpState()
+  const ctx = {
+    cfg: cfg({ stateFile }),
+    dryRun: true,
+    log: () => {},
+    gitea: { viewIssue: async () => ({ ...issue(32), title: "普通单", labels: [], body: "正文" }) },
+  }
+  const r = await pickIssue(ctx, { repo: repoCfg.repo, number: 32 })
+  assert.equal(r.ok, true)
+  assert.equal(r.decision, false)
+  assert.match(r.prompt, /工作会话 · yyzl\/win-ai-harness #32/)
+  assert.doesNotMatch(r.prompt, /决策会话/)
 })

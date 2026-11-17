@@ -8,7 +8,7 @@ import { nowIso, sleep, inWorkHours } from "./util.mjs"
 import { Book } from "./book.mjs"
 import { parseResult, deliverPrompt, noticeSessionName, issueBranch } from "./prompts.mjs"
 import { builtinPrompt } from "./builtin-prompts.mjs"
-import { notifyTarget, shouldNotify, notifyText, runRound, acquireLock, releaseLock, handleIssue, eligible, sortIssues, bucketOf, CLOSED_STATES } from "./orchestrator.mjs"
+import { notifyTarget, shouldNotify, notifyText, runRound, acquireLock, releaseLock, handleIssue, bucketOf, CLOSED_STATES } from "./orchestrator.mjs"
 import {
   cleanIssue,
   cleanableIssues,
@@ -194,7 +194,7 @@ export async function deliverNewSession(ctx, { text = "", kind = "", repo = "", 
   const laneName = lane === "merge" ? "merge" : "dispatch"
   const dc = deliverContextFor(cfg, repo || watcher?.repo || "")
   const fixed = readFixedPrompt(cfg, repo || watcher?.repo || "", { lane: laneName })
-  // 把「在跑几条 / 上限几条」喂给派单会话：它据此决定续跑还是继续接单。
+  // 只报当前在跑数；pickup.maxRunning 是定时巡检上限，不约束 agent 主动派单。
   const running = inflightIssues(new Book(cfg.stateFile)).length
   const maxRunning = Number(cfg?.pickup?.maxRunning) || 2
   const prompt = deliverPrompt({
@@ -465,7 +465,7 @@ export async function pickupOnce(ctx, { run = runRound, force = false } = {}) {
   }
 }
 
-// 「待分配任务」列表：和自动接单同一套口径（接单标签 + 排除标签 + 账本去重），只读不派。
+// 「待分配任务」列表：配置仓库里的**全部 open 工单**，只做账本去重；接单标签过滤只留给自动巡检。
 // gitea 列一遍要打三条命令，页面刷新会太吵：这里带 45s 缓存，refresh=true 才强拉。
 const CANDIDATE_TTL_MS = 45_000
 let candidateCache = { at: 0, payload: null }
@@ -487,17 +487,25 @@ export async function candidatesOnce(ctx, { refresh = false } = {}) {
   const errors = []
 
   for (const repoCfg of cfg.repos ?? []) {
-    const labelQuery = (repoCfg.labelIds ?? cfg.pickup?.labelIds ?? []).join(",")
     let list = []
     try {
-      list = await ctx.gitea.listIssues(repoCfg.repo, { label: labelQuery })
+      // 手动接单列的是**全部 open 工单**，不看接单标签：标签过滤只留给自动巡检。
+      // needs-info 这类单也列出来，点接单时换决策提示词（见 pickIssue）。
+      list = await ctx.gitea.listIssues(repoCfg.repo, {})
     } catch (e) {
       errors.push({ repo: repoCfg.repo, message: e.message })
       continue
     }
-    const pool = sortIssues(eligible(list, repoCfg, cfg, book), cfg.pickup?.order, {
-      me: cfg.pickup?.me,
-      priority: cfg.pickup?.priority,
+    // 只做账本去重，不做标签过滤：已处理 / 已交编排 / 在飞 / 试到上限的不再列。
+    const pool = list.filter((it) => {
+      if (!it?.number) return false
+      const rec = book.issue(`${repoCfg.repo}#${it.number}`)
+      if (!rec) return true
+      if (CLOSED_STATES.has(rec.state)) return false
+      if (rec.state === "handed") return false
+      if (rec.state === "working" && !rec.lastFailure) return false
+      if (rec.state === "working" && (rec.attempts ?? 0) >= (cfg.maxAttempts ?? 3)) return false
+      return true
     })
     for (const it of pool) {
       items.push({
@@ -585,12 +593,18 @@ export async function pickIssue(ctx, { repo = "", number = 0 } = {}) {
     }
     issue.number = n
 
-    const hand = sessionFlowEnabled(cfg) && cfg.pickup?.handToOrchestrator === true
+    // 带「需要人参与 / 信息不足」类标签的单：不按「改完 commit」派，换决策提示词让 agent 自己判断，
+    // 不交给编排会话、不登记监听（decision → handleIssue 里 noNotify + 不绑 orchestrator）。
+    const labels = (issue.labels ?? []).map((l) => String(l).toLowerCase())
+    const exclude = new Set((cfg.pickup?.excludeLabels ?? []).map((l) => String(l).toLowerCase()))
+    const decision = labels.some((l) => exclude.has(l))
+
+    const hand = !decision && sessionFlowEnabled(cfg) && cfg.pickup?.handToOrchestrator === true
     let out
     try {
       out = hand
         ? await handToOrchestrator({ ...ctx, book }, { repoCfg, issue })
-        : await handleIssue({ ...ctx, book }, repoCfg, issue)
+        : await handleIssue({ ...ctx, book, decision, noNotify: decision || ctx.noNotify }, repoCfg, issue)
     } catch (e) {
       finishOperation(ctx, op, "failed", e.message)
       const code = e.code === "app_unavailable" ? "app_unavailable" : "dispatch-failed"
@@ -598,17 +612,18 @@ export async function pickIssue(ctx, { repo = "", number = 0 } = {}) {
     }
 
     // 和工作流引擎对齐：捞到单推 issue.picked，真开出工作会话再推 session.dispatched。
+    // 决策单不推 session.dispatched：它不进 workflow 的「跑完 → 验收 → 出 PR」那条链。
     await ctx.engine?.emit("issue.picked", { issueKey: key, workflow: "own" })
-    if (out.state === "dispatched") {
+    if (out.state === "dispatched" && !decision) {
       await ctx.engine?.emit("session.dispatched", { issueKey: key, target: out.convId ?? out.agent ?? "", workflow: "own" })
     }
-    finishOperation(ctx, op, "success", out.convId ? `已派出 · ${out.convId}` : out.reason || out.state)
+    finishOperation(ctx, op, "success", `${decision ? "决策单 · " : ""}${out.convId ? `已派出 · ${out.convId}` : out.reason || out.state}`)
     try {
       ctx.consoleStore?.sync(new Book(cfg.stateFile))
       forgetCandidates()
     } catch {}
-    log(`手动接单 ${key}：${out.state}${out.convId ? ` · ${out.convId}` : ""}`)
-    return { ok: true, ...out }
+    log(`手动接单 ${key}：${out.state}${decision ? "（决策单，不监听）" : ""}${out.convId ? ` · ${out.convId}` : ""}`)
+    return { ok: true, decision, ...out }
   } finally {
     releaseLock(lockFile)
   }
@@ -1971,6 +1986,7 @@ export async function handleRequest(ctx, req) {  const id = req?.id
 
   // dispatch：编排会话调它分配工作——建一工程一工作区、开工作会话、把会话 id 绑回编排会话。
   // 已经派过就 steer 同一条工作会话续跑（不新开）。
+  // 这是 agent 主动派发入口：不读取 pickup.maxRunning / maxPerRound；这两个上限只约束 pickupOnce 定时巡检。
   if (cmd === "dispatch") {
     if (!sessionFlowEnabled(ctx.cfg)) return fail("disabled", "sessionFlow.enabled=false，不走编排会话；用 foreman run --direct")
     const ref = String(req.issue ?? "").trim()

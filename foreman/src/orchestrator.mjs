@@ -15,7 +15,7 @@ import {
   statusPorcelain,
   worktreeRemove,
 } from "./gitx.mjs"
-import { doneComment, holdComment, issueBranch, kickoff, prBody, resume } from "./prompts.mjs"
+import { decisionKickoff, doneComment, holdComment, issueBranch, kickoff, prBody, resume } from "./prompts.mjs"
 import { findWorkspace, reposForIssue, workspacePath } from "./workspaces.mjs"
 import { Book } from "./book.mjs"
 import { startOperation, finishOperation } from "./operations.mjs"
@@ -224,14 +224,16 @@ export async function handleIssue(ctx, repoCfg, summary) {
       const b = ws?.branch || issueBranch(issue, issue.title)
       return { repo: r.repo, name: r.name, branch: b, base: r.base, worktree: workspacePath(cfg.worktreeDir, r, b) }
     })
-    const prompt = kickoff({
-      repo: repoCfg.repo,
-      issue,
-      base: repoCfg.base,
-      workspaces: plan,
-      attempt: (prev.attempts ?? 0) + 1,
-      lastFailure: prev.lastFailure ?? "",
-    })
+    const prompt = ctx.decision
+      ? decisionKickoff({ repo: repoCfg.repo, issue, base: repoCfg.base, workspaces: plan, labels: issue.labels ?? [], attempt: (prev.attempts ?? 0) + 1 })
+      : kickoff({
+          repo: repoCfg.repo,
+          issue,
+          base: repoCfg.base,
+          workspaces: plan,
+          attempt: (prev.attempts ?? 0) + 1,
+          lastFailure: prev.lastFailure ?? "",
+        })
     log(
       `[dry-run] ${key}\n  工程 ${plan.length} 个：${plan.map((w) => `${w.repo} → ${w.worktree}（${w.branch}）`).join("；")}\n  会话：${name}\n  首句：\n${prompt}`
     )
@@ -272,20 +274,24 @@ export async function handleIssue(ctx, repoCfg, summary) {
 
   const primary = workspaces[0]
   const attempt = (prev.attempts ?? 0) + 1
+  // 决策单（needs-info 这类标签的手动接单）：提示词换成「先判断再决定动不动手」，不绑编排会话。
+  // 注意会话仍走 openNew（只确认送达）：dws.open 会等第一轮跑完，会把 HTTP 请求拖到超时。
+  const decision = ctx.decision === true
   const flowOn = sessionFlowEnabled(cfg)
+  const orchOn = flowOn && !decision
   // 编排会话有两种来源，都写进 issues[键].orchestrator，后续更新一律 steer 到它：
   //   1) 定时任务自动接单：由 foreman 起的那条**唯一**编排会话（ensureOrchestrator 幂等）；
   //   2) 用户自主发起的会话调 dispatch：直接把调用方会话 id 绑成这张单的编排（--orchestrator / MCP_VM_CONVERSATION_ID）。
   const caller = String(ctx.orchestrator ?? "").trim()
-  let orchConvId = flowOn ? caller || String(prev.orchestrator ?? "").trim() : ""
-  if (flowOn && !orchConvId) {
+  let orchConvId = orchOn ? caller || String(prev.orchestrator ?? "").trim() : ""
+  if (orchOn && !orchConvId) {
     // 起不来不阻断派单：这条单先不绑，日志里写清，之后 orch start 起来再 dispatch 一次就会绑上。
     try {
       orchConvId = (await ensureOrchestrator(ctx)).convId
     } catch (e) {
       log(`${key}：编排会话没起来（${e.message}），这条单先不绑定`)
     }
-  } else if (flowOn && caller) {
+  } else if (orchOn && caller) {
     log(`${key}：绑定调用方会话 ${caller} 为这张单的编排（用户自主发起）`)
   }
 
@@ -300,6 +306,7 @@ export async function handleIssue(ctx, repoCfg, summary) {
     workspaces,
     attempts: attempt,
     lastFailure: "",
+    ...(decision ? { decision: true } : {}),
     ...(orchConvId ? { orchestrator: orchConvId } : {}),
   })
 
@@ -310,28 +317,34 @@ export async function handleIssue(ctx, repoCfg, summary) {
   const boundTarget = bound.convId || bound.name || book.session(name)?.convId || ""
   let convId = bound.convId || book.session(name)?.convId || ""
   const resumeText = resume({ issue, attempt, base: repoCfg.base, failure: prev.lastFailure ?? "", repo: repoCfg.repo, workspaces })
+  // 决策单首句：走另一套提示词，让 agent 自己判断要不要做、缺什么信息。
+  const kickoffText = decision
+    ? decisionKickoff({ repo: repoCfg.repo, issue, base: repoCfg.base, workspaces, labels: issue.labels ?? [], attempt })
+    : kickoff({
+        repo: repoCfg.repo,
+        issue,
+        base: repoCfg.base,
+        workspaces,
+        failedWorkspaces,
+        attempt,
+        lastFailure: prev.lastFailure ?? "",
+      })
   try {
     if (boundTarget) {
+      // 决策单续跑也发决策提示词：上一次的「继续改」口径会把 agent 又推回去直接写代码。
+      const again = decision ? kickoffText : resumeText
       if (flowOn && typeof dws.steer === "function") {
         log(`${key}：steer 已有工作会话 ${boundTarget}（attempt ${attempt}，不新开）`)
-        await dws.steer(boundTarget, resumeText)
+        await dws.steer(boundTarget, again)
       } else {
         log(`${key}：续会话 ${agentName}（attempt ${attempt}）`)
-        await dws.send(agentName, resumeText)
+        await dws.send(agentName, again)
       }
     } else if (flowOn && typeof dws.openNew === "function") {
       log(`${key}：开工作会话 ${agentName}（attempt ${attempt}，只确认送达）`)
       const opened = await dws.openNew({
         name: agentName,
-        prompt: kickoff({
-          repo: repoCfg.repo,
-          issue,
-          base: repoCfg.base,
-          workspaces,
-          failedWorkspaces,
-          attempt,
-          lastFailure: prev.lastFailure ?? "",
-        }),
+        prompt: kickoffText,
         noWait: true,
       })
       convId = String(opened?.convId ?? "").trim()
@@ -340,15 +353,7 @@ export async function handleIssue(ctx, repoCfg, summary) {
       const opened = await dws.open({
         name,
         repo: repoCfg.repo,
-        prompt: kickoff({
-          repo: repoCfg.repo,
-          issue,
-          base: repoCfg.base,
-          workspaces,
-          failedWorkspaces,
-          attempt,
-          lastFailure: prev.lastFailure ?? "",
-        }),
+        prompt: kickoffText,
       })
       convId = opened.convId ?? ""
     }
@@ -363,7 +368,8 @@ export async function handleIssue(ctx, repoCfg, summary) {
   }
 
   // --no-notify：不登记监听，同时账本标 notify:false，免得被 sessions 自动纳入规则捞回来。
-  const noNotify = !!ctx.noNotify
+  // 决策单一律不监听：它要的是 agent 的判断与提问，不是「跑完了吗 / 出 PR 了吗」。
+  const noNotify = !!ctx.noNotify || decision
   // 工作会话 id 绑到编排会话：后面任何状态更新都按这条绑定的会话 steer 回编排。
   bindWorker(book, {
     issueKey: key,

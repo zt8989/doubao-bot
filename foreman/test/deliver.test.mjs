@@ -64,8 +64,8 @@ test("deliverPrompt：编排提示词原文在前，只给编排决策，不派�
   assert.match(out, /1\. 不阻塞/)
   assert.match(out, /监控项目：\/w\/win-ai-stack/)
   assert.match(out, /触发：工单结论/)
-  // 派单会话带通道与在跑数；合并会话走另一条通道，只有并发说明、不带在跑数。
-  assert.match(out, /通道：派单（在跑 1 \/ 上限 2）/)
+  // 派单会话能看到在跑数，但上限只约束定时巡检；合并会话走另一条通道，不带在跑数。
+  assert.match(out, /通道：派单（agent 主动派单不限在跑上限；当前在跑 1；定时巡检上限 2）/)
   assert.match(deliverPrompt({ fixed, kind: "合并完成", text, lane: "merge" }), /通道：合并（1 并发，只管合 PR）/)
   assert.ok(!deliverPrompt({ fixed, kind: "合并完成", text, lane: "merge" }).includes("在上限"))
   assert.match(out, /【foreman】demo\/demo#2 状态：done/)
@@ -106,7 +106,7 @@ test("deliverNewSession：新建一条会话投递，记账留痕但不进监听
     assert.match(calls[0].name, /^foreman-派单-/)
     assert.match(calls[0].prompt, /# 固定提示词/)
     assert.match(calls[0].prompt, /监控项目：\/w\/win-ai-stack/)
-    assert.match(calls[0].prompt, /通道：派单（在跑 0 \/ 上限 2）/)
+    assert.match(calls[0].prompt, /通道：派单（agent 主动派单不限在跑上限；当前在跑 0；定时巡检上限 2）/)
     assert.match(calls[0].prompt, /【foreman】结论/)
     assert.equal(out.convId, "conv-new")
     assert.equal(out.lane, "dispatch")

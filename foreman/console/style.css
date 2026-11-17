@@ -281,6 +281,11 @@ main {
   background: color-mix(in srgb, var(--warn) 7%, transparent);
 }
 
+.panel-note.is-ok {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 7%, transparent);
+}
+
 .hint { font-size: 12px; color: var(--dim); }
 
 /* ---------- 表格 ---------- */

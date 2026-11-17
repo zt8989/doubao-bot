@@ -47,11 +47,10 @@ function orchestratorBasePrompt(cfg) {
 export function orchestratorPrompt(ctx = {}) {
   const cfg = ctx.cfg ?? {}
   const projectDir = String(cfg.sessionFlow?.projectDir ?? cfg.deliver?.projectDir ?? "").trim()
-  const maxRunning = Number(cfg.pickup?.maxRunning) || 2
   const base = String((cfg.repos ?? [])[0]?.base ?? "").trim()
   const lines = [orchestratorBasePrompt(cfg).trim(), "", "---", ""]
   if (projectDir) lines.push(`监控项目：${projectDir}`)
-  lines.push(`通道：派单（同时在跑最多 ${maxRunning} 条工作会话）`)
+  lines.push("通道：派单（agent 主动 dispatch 不限在跑上限；pickup.maxRunning 只约束定时巡检）")
   if (base) lines.push(`基线：origin/${base}`)
   lines.push("工单会 steer 进这条会话（正文带「工单键」）；实现只在工作会话里，你不写代码。")
   return lines.join("\n")

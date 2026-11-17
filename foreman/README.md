@@ -91,9 +91,10 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
   `mergeable=true` 就走 `runMergeTask`（与 CLI 共用 `ctx.mergeChain`）合并并收尾；
   `need_decision` / `blocked` 只记账 `mergeJudge` + 写控制台 `pr_judge` 事件，交给人。
   `merge.verdictAutoMerge: false` 就只判断、不合。
-- **`pickup.maxRunning`（默认 2）** 是「同时有几条自有工单流程在跑」：`engine.active("own").length` 到顶就 `skipped: "slots-full"`；
+- **`pickup.maxRunning`（默认 2）** 只限制定时巡检的「自有工单流程在跑数」：`engine.active("own").length` 到顶就 `skipped: "slots-full"`；
   账本 `planned`/`working` 的单数只作兜底，服务重启时 `engine.restore(book)` 会把在跑的实例补回来。
   每轮补单数 = `min(maxRunning - 在跑数, maxPerRound)`，所以 `maxPerRound` 默认也跟着变成 2（空着两个槽就一轮补两条）。
+  **agent 主动调 `foreman dispatch` 不读这个上限**，即使定时巡检已经 `slots-full` 也仍可派单。
 - 派单侧仍靠 `run.lock`（含 CLI `foreman run`）；合并不在定时器里跑，所以「正在合 PR」不会挡「正在派单」。
 - 会话层也分开：**派单会话**（`foreman-派单-<时间戳>`，读派单提示词，只做续跑/接单）与**合并会话**
   （`foreman-合并-<时间戳>`，读合并提示词，判断可合性 + 解冲突，不自己合）。账本 `sessions.kind` 记 `deliver:dispatch` / `deliver:merge`，
@@ -158,12 +159,18 @@ foreman status                # 在不在 + 监听明细 + lastPollAt / pollCoun
   `GET /api/history?days=N&day=YYYY-MM-DD`（事件流水）、`POST /api/sync`（立刻扫一轮 PR 并落库）。
   「分配任务」卡片另有两个：`GET /api/candidates`（待分配队列，服务端缓存 45s，`?refresh=1` 强拉）、
   `POST /api/pick`（`{"repo":"<owner/name>","number":N}` 手动接单，只派这一条）。
-- 「分配任务」卡片分两个页签：**「今日任务」/「待分配任务」**。待分配只列 open + 接单标签（`pickup.labelIds`）、
-  账本里还没处理过的单（`done` / `pr-open` / `handed` / 在跑的都排除），按归属分「我的 / 无人认领 / 他人认领」；
+- 「分配任务」卡片分两个页签：**「今日任务」/「待分配任务」**。待分配列出配置仓库里**所有 open 工单**
+  （接单标签 `pickup.labelIds` 只管自动巡检，不管这里），账本里已处理（`done` / `pr-open`）、已交编排（`handed`）、
+  在飞（`working` 且无失败）、试到 `maxAttempts` 上限的不列；按归属分「我的 / 无人认领 / 他人认领」；
   **按归属排序（我的 → 无人认领 → 他人认领），同档按创建时间老的在前，最多显示 10 条**，响应里 `total` 是全量条数，
   超过 10 条时页脚会写明「共 N 条待分配 · 只显示前 10 条」；
   点行尾「接单」= 建工作区 + 开执行会话，**不看 `pickup.auto` 与工作时间**，但 `run.lock`、节点暂停、账本查重照旧守着，
   不会和 CLI / 自动巡检把同一张单派两遍。页脚显示「在跑 n/上限」。
+  - **决策单**：工单带着 `pickup.excludeLabels` 里的标签（`needs-info` / `needs-human` / `ready-for-human` / `wontfix` / `agent-blocked`）
+    时，接单走另一套提示词（`decisionKickoff`）：让 agent 先读懂工单、自己判断该不该做——信息不够就把缺的和方案写清、
+    需要人答的回工单评论，判断能做才动手，不该做就说明理由（不许自己关单/改标签）。
+    这类单**不交给编排会话、不登记监听、不推 `session.dispatched`**，账本记 `decision:true`、`notify:false`，
+    结论由 agent 在会话里写完整；接口返回 `decision:true`，页面顶部会提示「已接下（决策单）」。
 - 顶栏有「看哪天」日期选择（原生日历）：换一天，指标卡 / 任务表全部切成那天的口径（状态从 `events` 回放，标题写 `2026-11-11 分配任务`），非今天时出现「回到今天」；`/?day=YYYY-MM-DD` 也能直接打开那天。没有单独的「历史」面板。表格里的 `仓库#号` 是链接，点开就是 Gitea 的工单/PR 页面（新标签页）。
   事件表 `events` 跟账本同库，记 `task_new` / `task_state` / `task_attempt` / `pr_new` / `pr_state` /
   `pr_open` / `pr_merge` / `issue_comment` / `issue_close`。`sync` 比对上一行状态自动记（同一状态不重复），
