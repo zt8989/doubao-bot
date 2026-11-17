@@ -27,7 +27,7 @@ Gitea 侧一律走 opencli。
               ↓
          工作会话自己改、自测、push、开 PR；每次收工由服务把结论 steer 回编排（不再新建会话、不再 notify）
               ↓
-         失败/卡住 → resume：在**同一条工作会话**里 steer 续跑，绝不新开
+         失败/卡住 → 编排先归因：原会话能修正才 resume <执行会话id>；需要协作就补派并在完成后 steer 回原会话
               ↓
          编排核对 → pr merge（合并即关单）→ clean：清 worktree、本地分支、工作会话与监听（幂等）
 ```
@@ -40,9 +40,11 @@ Gitea 侧一律走 opencli。
      发起方会话 id（`--orchestrator <id>`，不传则取 `MCP_VM_CONVERSATION_ID`）直接绑成这张单的编排，
      工作会话的更新都 steer 回那条发起方会话，不会再另起编排会话。
 - **绑定**：`dispatch` 把工作会话写进账本（`agent` / `agentConvId` / `orchestrator`，会话记录 `kind: "worker"`、`parent: <编排 id>`）。
-- **失败不新开**：`foreman resume` 找到这条单绑定的工作会话，用 `dws steer` 把「接着跑」插进去；
+- **失败先归因**：原会话能修正时，`foreman resume <执行会话id>` 用 `dws steer` 把「接着跑」插进指定会话，命令不收工单号；需要其他智能体时由编排补派并登记监听，完成后再 steer 回等待结果的原会话。
   续跑计数与 `lastFailure` 都写账本。
-- **收尾两步**：`pr merge` 合并关单 → `foreman clean <键>` 清残留 worktree / 分支 / 会话（worktree 有未提交改动就保留，不删别人正在写的东西）。
+- **收尾两步**：`pr merge` 合并关单 → `foreman clean <键>` 清残留 worktree / 分支 / 工作会话，并归档**这张单自己的编排会话**（worktree 有未提交改动就保留，不删别人正在写的东西）。
+  clean 只认 `book.sessions` 里 `kind: "orchestrator"` 且带这张单 `issueKey` 的会话：全局编排和「用户发起方就是编排」的会话不归档。
+  编排会话万一没被 clean 收掉（比如它没跑完、或 clean 时正是命令发起方），服务每轮巡检会把**已收口（done/cleaned）**工单的编排会话补归档一次（还在跑的不动，下一轮再收）。
 - **降级**：`sessionFlow.enabled: false`（或 `foreman run --direct`）退回老的多会话模型：run 自己建工作区派活、收工只落痕、PR 监听按 `deliver.mode` 投递。
 
 配置（默认已开，不用写也能用）：
@@ -221,7 +223,7 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 - `running` 假、还没处理过 → 收工这轮读一次 `dws status` 判结论，该通知就通知，然后落 `idle`；
 - 侧边栏再把它报成 `running` 时清掉 `idle`，等下一次收工重新判一轮。
 
-读不到侧边栏（`dws list` 失败）才退化为每轮逐条 `dws status`，不因此漏通知。
+读不到侧边栏（`dws list` 失败）时，尚未消费的会话仍退化为逐条 `dws status`；一旦 RESULT 已消费就同样落 `idle`，不再每轮重读。后续由侧边栏重新出现 `running`，或 `resume` / 重派 steer 显式清掉 `idle`，再读取下一次结果。
 
 自动巡检也先读侧边栏，但**默认不因此停派**（派单通道要并行 2 张单）：只有在配置里显式打开 `pickup.pauseWhileRunning: true`（想回到「豆包单实例一次只跑一条」的老行为）时，才有在跑会话就跳过本轮（`window-busy`）。
 
@@ -301,8 +303,9 @@ foreman run --no-notify          # 这一轮不登记监听，因此不会有通
 foreman orch start               # 手工兼容入口：起/复用顶层全局编排（自动巡检不用它）
 foreman orch show                 # 每条编排会话绑了哪些工作会话、最近 steer 了什么
 foreman hand <owner/name>#N      # 把工单交给编排会话（不建工作区、不开工作会话）
-foreman dispatch <owner/name>#N  # 编排调用：建工作区 + 开工作会话，会话 id 绑回编排；已派过就 steer 续跑
-foreman resume <owner/name>#N    # 失败/卡住：在同一条工作会话里 steer（不新开）
+foreman dispatch <owner/name>#N (--prompt <编排指令> | --file <指令文件>)
+                                 # 提示词必填：编排分析、任务范围与验收随首句注入，头部带完整工单 ID 和 URL；重派随 steer 发送
+foreman resume <执行会话id>   # 原会话可修正时：按会话 id steer 续跑（不新开、不传工单号）
                                  # 上面三条都支持 --orchestrator <会话id>：绑到发起方会话（不传取 MCP_VM_CONVERSATION_ID）
 foreman clean <owner/name>#N     # 合并关单后清 worktree / 分支 / 工作会话（幂等）
 foreman clean --all              # 清所有终端态工单的残留（worktree / 分支 / 会话）

@@ -101,6 +101,8 @@ workflow 面板能看到两条流程的全部节点。
 - 单实例窗口：`busyWatchers(ids)` 用侧边栏判断哪些被监听会话还在跑（window-busy 护栏）；
 - 读状态会切窗口：优先 `runningMap()`，只有没在跑的才逐条 `status`；
 - `pr.merged` 时归档执行会话（`workflow.archiveAfterMerge: false` 可关，默认开）；
+- 工单收口（`done`/`cleaned`）后归档**这张单自己的编排会话**：`clean` 里收一次，服务每轮巡检
+  再兜一次底（只认账本里 `kind: "orchestrator"` 且带该单 `issueKey` 的会话，全局编排与用户自己的会话不动；还在跑的先跳过）；
 - 保留旧调用面 `open/send/openNew`，所以 orchestrator 与既有测试不需要改。
 
 **GiteaTrackerAdapter**：`listIssues/listPulls/mergePr/closeIssue/createPr/commentIssue`。

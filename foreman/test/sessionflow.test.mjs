@@ -9,6 +9,7 @@ import { Book } from "../src/book.mjs"
 import { runRound } from "../src/orchestrator.mjs"
 import {
   cleanIssue,
+  cleanableIssues,
   ensureOrchestrator,
   handToOrchestrator,
   nextStepLine,
@@ -113,7 +114,8 @@ test("hand：编排职责与工单合进首句一次发出，不 steer，账本�
     assert.match(dws.calls.openNew[0].prompt, /绑定工单：yyzl\/demo#7/)
     assert.match(dws.calls.openNew[0].prompt, /工单键：yyzl\/demo#7/)
     assert.match(dws.calls.openNew[0].prompt, /改 demo 的镜像页/)
-    assert.match(dws.calls.openNew[0].prompt, /foreman dispatch --issue yyzl\/demo#7/)
+    assert.match(dws.calls.openNew[0].prompt, /foreman resume <执行会话id>/)
+    assert.ok(!dws.calls.openNew[0].prompt.includes("resume --issue"), "首句不能教编排按工单号续跑")
 
     const rec = new Book(cfg.stateFile).issue("yyzl/demo#7")
     assert.equal(rec.state, "handed")
@@ -178,6 +180,7 @@ test("dispatch：工作会话 id 绑到编排会话（账本 + 会话记录都�
       log: () => {},
       once: true,
       dryRun: false,
+      dispatchPrompt: "本单只需改 demo 的镜像页；不要改接口，完成后跑页面单测。",
       gitea: {
         listIssues: async () => [issue],
         viewIssue: async (r, n) => ({ ...issue, number: n }),
@@ -200,6 +203,9 @@ test("dispatch：工作会话 id 绑到编排会话（账本 + 会话记录都�
     assert.equal(dws.calls.openNew.length, 2, "1 条工单编排 + 1 条工作会话")
     assert.match(dws.calls.openNew[0].name, /demo-7-编排/)
     assert.ok(!dws.calls.openNew[0].prompt.includes("【foreman · 编排会话 · 收到工单】"), "直接 dispatch 不能再让编排重复派单")
+    assert.match(dws.calls.openNew[1].prompt, /编排智能体补充指令/)
+    assert.match(dws.calls.openNew[1].prompt, /本单只需改 demo 的镜像页；不要改接口，完成后跑页面单测。/)
+    assert.equal(dws.calls.steer.length, 0, "首次派单的编排指令要随首句进入，不能再补 steer")
     assert.equal(orchestratorTarget(book), "", "直接派单也不该创建全局编排")
     assert.deepEqual(workerOf(book, key).convId, out[0].convId)
   } finally {
@@ -239,18 +245,20 @@ test("再派一次同一张单：steer 同一条工作会话，不新开第二�
     // 第二轮：同一张单（账本把 state 放回 reset，模拟失败后重派）
     new Book(cfg.stateFile).setIssue("yyzl/demo#7", { state: "reset", lastFailure: "单测没过" })
     cfg.pickup.excludeLabels = []
-    const second = await runRound({ ...ctx, book: new Book(cfg.stateFile) })
+    const second = await runRound({ ...ctx, book: new Book(cfg.stateFile), dispatchPrompt: "只修复失败单测暴露的问题，不要扩大改动范围。" })
     assert.equal(dws.calls.openNew.length, openedAfterFirst, "重派不该新开工作会话")
     assert.equal(dws.calls.steer.length, 1, "要用 steer 接着跑")
     assert.equal(dws.calls.steer[0].target, first[0].convId)
     assert.match(dws.calls.steer[0].text, /单测没过/)
+    assert.match(dws.calls.steer[0].text, /编排智能体补充指令/)
+    assert.match(dws.calls.steer[0].text, /只修复失败单测暴露的问题，不要扩大改动范围。/)
     assert.equal(second[0].resumed, true)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test("resume：在同一条工作会话里 steer 续跑，绝不新开", async () => {
+test("resume：只按工作会话 id 定位并 steer 续跑，绝不新开", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-resume-"))
   try {
     const cfg = mkCfg(dir)
@@ -267,22 +275,27 @@ test("resume：在同一条工作会话里 steer 续跑，绝不新开", async (
       workspaces: [{ repo: "yyzl/demo", branch: "fix/issue-7", worktree: "/w/demo/fix-issue-7" }],
     })
     const dws = mkDws()
-    const out = await resumeWorker({ cfg, dws, log: () => {} }, { issueKey: "yyzl/demo#7" })
+    book.markIdle("conv-worker-1")
+    const out = await resumeWorker({ cfg, dws, log: () => {} }, { sessionId: "conv-worker-1" })
     assert.equal(out.ok, true)
     assert.equal(dws.calls.openNew.length, 0, "resume 不许开新会话")
     assert.equal(dws.calls.steer.length, 1)
     assert.equal(dws.calls.steer[0].target, "conv-worker-1")
     assert.match(dws.calls.steer[0].text, /单测没过/)
+    assert.equal(new Book(cfg.stateFile).notified["conv-worker-1"].idle, false, "resume 必须唤醒监听，允许读取下一次 RESULT")
     assert.equal(new Book(cfg.stateFile).issue("yyzl/demo#7").state, "working")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test("失败续跑提示：blocked/failed 都指向 resume（不是新开会话）", () => {
-  const blocked = nextStepLine({ issueKey: "yyzl/demo#7", result: { status: "failed" } })
-  assert.match(blocked, /foreman resume --issue yyzl\/demo#7/)
-  assert.match(blocked, /不要新开工作会话/)
+test("失败处理提示：带会话 id，由编排归因选择补派、续跑或问人", () => {
+  const blocked = nextStepLine({ issueKey: "yyzl/demo#7", result: { status: "failed" }, sessionId: "conv-worker-1" })
+  assert.match(blocked, /先根据上面的原因选择处理动作/)
+  assert.match(blocked, /foreman resume conv-worker-1/)
+  assert.match(blocked, /需要其他智能体协作/)
+  assert.match(blocked, /dws msg --mode steer conv-worker-1/)
+  assert.ok(!blocked.includes("resume --issue"), "续跑入口不能退回工单号")
   const done = nextStepLine({
     issueKey: "yyzl/demo#7",
     result: { status: "done", prs: [{ repo: "yyzl/demo", pr: 12 }] },
@@ -392,23 +405,93 @@ test("clean：合并关单后归档工作会话、摘监听、清账本会话字
       workspaces: [{ repo: "yyzl/demo", branch: "fix/issue-7", worktree: path.join(dir, "gone") }],
     })
     book.record("foreman-demo-7", { convId: "conv-worker-1", issue: 7, notify: true })
+    // 这张单自己的编排会话（foreman 建的）：收口后没人再用，clean 要一并归档。
+    book.record("foreman-demo-7-编排", { convId: "conv-orch", kind: "orchestrator", role: "orchestrator", issueKey: "yyzl/demo#7", issue: 7 })
     book.setWatch({ target: "conv-worker-1", name: "foreman-demo-7", issueKey: "yyzl/demo#7", repo: "yyzl/demo", number: 7 })
 
     const dws = mkDws()
     const out = await cleanIssue({ cfg, dws, log: () => {} }, { issueKey: "yyzl/demo#7" })
     assert.equal(out.ok, true)
     assert.ok(out.notes.some((n) => /worktree 已不在/.test(n)))
-    assert.deepEqual(dws.calls.archive, ["conv-worker-1"])
+    assert.ok(out.notes.some((n) => /编排会话已归档/.test(n)), "编排会话要一起归档")
+    assert.deepEqual(dws.calls.archive, ["conv-worker-1", "conv-orch"])
     const after = new Book(cfg.stateFile)
     assert.equal(after.issue("yyzl/demo#7").agentConvId, "")
+    assert.equal(after.issue("yyzl/demo#7").orchestrator, "", "归档后编排绑定要清掉")
     assert.equal(after.issue("yyzl/demo#7").state, "done")
     assert.equal(after.watch.some((w) => w.target === "conv-worker-1"), false, "监听要摘掉")
     assert.equal(after.session("foreman-demo-7"), null)
+    assert.equal(after.session("foreman-demo-7-编排"), null, "编排会话记录也要摘掉")
 
     // 幂等：第二次没有可归档的，也不报错
     const again = await cleanIssue({ cfg, dws, log: () => {} }, { issueKey: "yyzl/demo#7" })
     assert.equal(again.ok, true)
-    assert.equal(dws.calls.archive.length, 1)
+    assert.equal(dws.calls.archive.length, 2)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("clean：编排会话是调用方自己的会话时不归档（只留一条说明）", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-clean-caller-"))
+  try {
+    const cfg = mkCfg(dir)
+    cfg.repos = [mkRepo(dir, "demo")]
+    const book = new Book(cfg.stateFile)
+    // 用户在自己的会话里发起，那条会话被绑成这张单的编排：账本里没有 orchestrator 记录。
+    book.setIssue("yyzl/demo#9", {
+      state: "done",
+      repo: "yyzl/demo",
+      agent: "",
+      agentConvId: "",
+      orchestrator: "conv-user-9",
+    })
+    const dws = mkDws()
+    const out = await cleanIssue({ cfg, dws, log: () => {} }, { issueKey: "yyzl/demo#9" })
+    assert.equal(out.ok, true)
+    assert.deepEqual(dws.calls.archive, [], "用户自己的会话绝不能被归档")
+    const after = new Book(cfg.stateFile)
+    assert.equal(after.issue("yyzl/demo#9").orchestrator, "conv-user-9", "绑定留着，别把用户会话的线索抹掉")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("clean：这条单只剩下自己的编排会话时，仍算可清（clean --all 能扫到）", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-clean-all-"))
+  try {
+    const cfg = mkCfg(dir)
+    const book = new Book(cfg.stateFile)
+    book.setIssue("yyzl/demo#11", { state: "done", repo: "yyzl/demo", agent: "", agentConvId: "" })
+    book.record("foreman-demo-11-编排", { convId: "conv-orch-11", kind: "orchestrator", issueKey: "yyzl/demo#11", issue: 11 })
+    book.setIssue("yyzl/demo#12", { state: "done", repo: "yyzl/demo", agent: "", agentConvId: "" })
+    book.setIssue("yyzl/demo#13", { state: "pr-open", repo: "yyzl/demo", agent: "foreman-demo-13", agentConvId: "conv-w-13" })
+
+    assert.deepEqual(cleanableIssues(new Book(cfg.stateFile)), ["yyzl/demo#11"])
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("clean：currentConv 就是编排会话本身时不归档（dws 不允许归档命令发起方）", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-clean-self-"))
+  try {
+    const cfg = mkCfg(dir)
+    const book = new Book(cfg.stateFile)
+    book.setIssue("yyzl/demo#15", {
+      state: "done",
+      repo: "yyzl/demo",
+      orchestrator: "conv-self",
+      agent: "",
+      agentConvId: "",
+    })
+    book.record("foreman-demo-15-编排", { convId: "conv-self", kind: "orchestrator", issueKey: "yyzl/demo#15", issue: 15 })
+
+    const dws = mkDws()
+    const out = await cleanIssue({ cfg, dws, log: () => {} }, { issueKey: "yyzl/demo#15", currentConv: "conv-self" })
+    assert.deepEqual(dws.calls.archive, [], "自己不能归档自己")
+    assert.ok(out.notes.some((n) => /就是当前会话/.test(n)))
+    assert.equal(new Book(cfg.stateFile).issue("yyzl/demo#15").orchestrator, "conv-self", "留给服务下一轮收")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -540,7 +623,9 @@ test("pollOnce：更新 steer 到单上绑的发起方会话，不是全局编�
     const r = await pollOnce(ctx)
     assert.equal(r.steered, 1)
     assert.equal(steered[0].target, "conv-user", "发起方会话才是这条单的编排")
-    assert.match(steered[0].text, /foreman resume --issue demo\/demo#1/)
+    assert.match(steered[0].text, /foreman resume conv-a/)
+    assert.match(steered[0].text, /需要其他智能体协作/)
+    assert.ok(!steered[0].text.includes("resume --issue"), "工作会话更新里的 resume 只能用会话 id")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

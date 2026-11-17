@@ -18,9 +18,11 @@ import {
   orchestratorOf,
   orchestratorInfo,
   orchestratorTarget,
+  ownedIssueOrchestrator,
   resumeWorker,
   sessionFlowEnabled,
   steerOrchestrator,
+  TERMINAL_ISSUE_STATES,
 } from "./sessionflow.mjs"
 import { openPrsForIssue } from "./prflow.mjs"
 import { findWorkspace, mergeWorkspace, upsertPr } from "./workspaces.mjs"
@@ -844,7 +846,12 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
 
   // 页面上启停定时任务：改内存 cfg → 落盘 config.json → 立刻重排定时器。
   const schedulesView = () => listSchedules(cfg, state)
+  const workHoursView = () => ({
+    start: String(cfg.workHours?.start ?? "08:30"),
+    end: String(cfg.workHours?.end ?? "18:30"),
+  })
   ctx.schedules = schedulesView
+  ctx.workHours = workHoursView
   ctx.applySchedules = (patch = {}) => {
     applySchedules(cfg, patch)
     try {
@@ -976,9 +983,10 @@ export async function pollOnce(ctx) {
       const side = sidebar?.[key]
       // 监听的主判据就是侧边栏的 running：
       // - 在跑 → 只记一笔，不读 status/info（这两个都要 goto，会一遍遍把用户窗口拽到这条会话上）；
-      // - 没在跑、且这次收工已经处理过 → 直接跳过，一个字节都不读；
+      // - 这次收工已经处理过 → 直接跳过，一个字节都不读；
       // - 没在跑、还没处理过 → 收工这轮读一次 status 判结论，该通知就通知。
-      // 侧边栏再把它报成 running 时才清掉 idle，等下一次收工。
+      // 侧边栏再把它报成 running，或 resume/重派显式 steer 时才清掉 idle，等下一次收工。
+      // 即使 runningMap 暂时不可用，也不能为了确认同一份 RESULT 每轮重复 status。
       book.reload()
       const led = book.notified[key] ?? {}
       if (side?.running) {
@@ -999,14 +1007,15 @@ export async function pollOnce(ctx) {
       // 又回到侧边栏里了：清 gone，这一轮重新判一次（中间可能又跑完过一轮）。
       if (side && led.gone) {
         book.clearGone(key)
-      } else if (side && led.idle) {
+      }
+      if (led.idle) {
         rec.lastPhase = "idle"
         rec.lastPollAt = nowIso()
         continue
       }
-      // 收工处理完（无论通知了还是没什么可通知）就把这条落成 idle，下一轮只看 running。
-      // 读不到侧边栏时（side 空的退化路径）不落：没有 running 可看，还得靠 status 兜着。
-      const park = () => { if (side) new Book(cfg.stateFile).markIdle(key) }
+      // 收工处理完（无论通知了还是没什么可通知）就落成 idle。
+      // 后续只有侧边栏 running 或 resume/重派 steer 才唤醒；runningMap 失败也不能重复读旧 RESULT。
+      const park = () => new Book(cfg.stateFile).markIdle(key)
       let status
       try {
         status = await dws.status(w.target)
@@ -1138,7 +1147,7 @@ export async function pollOnce(ctx) {
       // 工单进展不再新建派单会话，也不 dws.notify——每张单的编排读自己的更新。
       const orchId = orchestratorOf(new Book(cfg.stateFile), issKey)
       if (sessionFlowEnabled(cfg) && orchId && typeof dws?.steer === "function") {
-        const body = [nd.text, nextStepLine({ issueKey: issKey, result: resultOut })].filter(Boolean).join("\n")
+        const body = [nd.text, nextStepLine({ issueKey: issKey, result: resultOut, sessionId: w.target })].filter(Boolean).join("\n")
         const head = `【工作会话更新】${issKey ? `${issKey} · ` : ""}${w.name || w.target}`
         try {
           await steerOrchestrator(ctx, `${head}\n${body}`, { kind: nd.event || "session-done", target: orchId })
@@ -1177,6 +1186,14 @@ export async function pollOnce(ctx) {
       out.verdict = await mergeVerdictOnce(ctx, { sidebar })
     } catch (e) {
       log(`合并判断失败：${e.message}`)
+    }
+    // 收口工单的编排会话也在这轮收：工单 done 之后它没有下一件事了，
+    // 不收就会每张单在侧边栏留一条「工单编排」，越积越多。复用同一份侧边栏判断在不在跑。
+    try {
+      const orchNotes = await archiveFinishedOrchestrators({ dws, stateFile: cfg.stateFile, log, sidebar })
+      if (orchNotes.length) out.orchestratorArchive = orchNotes
+    } catch (e) {
+      log(`归档收口工单的编排会话失败：${e.message}`)
     }
     state.lastPollAt = nowIso()
     state.pollCount++
@@ -1236,7 +1253,7 @@ export async function runMergeTask(ctx, task = {}) {
   const where = `工程 ${repo}${worktree ? ` · worktree ${worktree}` : " · 无 worktree"}`
   if (!worktree) log(`合并 ${repo}#${pr}：账本里没有工作区记录（可能是别人的 PR，或工作区已经清掉）`)
 
-  if (book0.mergeAsk?.[key]?.status === "merged") {
+  if (book0.mergeAsk?.[key]?.status === "merged" && task.alreadyMerged !== true) {
     book0.markMergeTask(key, { status: "merged", detail: "账本里已是合并状态" })
     return { ok: true, skipped: "already-merged" }
   }
@@ -1245,28 +1262,31 @@ export async function runMergeTask(ctx, task = {}) {
     key,
     detail: `${style} · 并发 ${cfg.merge?.concurrency ?? 1} · 不 force merge · ${where}`,
   })
-  let alreadyMerged = false
+  let alreadyMerged = task.alreadyMerged === true
   // 「他人 PR」流程：动手合之前先记一笔「核对完、决定合」。
   if (workflow === "review") {
     await ctx.engine?.emit("pr.reviewed", { key, pr, repo, target: task.target ?? "", workflow })
   }
-  try {
-    await ctx.gitea.mergePr(repo, pr, { style, deleteBranch })
-  } catch (e) {
-    const msg = String(e?.message ?? e ?? "")
-    // 「已经合并」不算失败：opencli 对已合的 PR 回 EMPTY_RESULT + 提示无需重复合并。
-    if (/无需重复合并|已经合并|已合并/.test(msg)) {
-      alreadyMerged = true
-      log(`${repo}#${pr} 已经是合并状态，按已合并收尾（${key}）`)
-    } else {
-      const reason = await mergeFailureReason({ gitea: ctx.gitea, repo, pr, error: e })
-      const b = new Book(cfg.stateFile)
-      b.markMergeAsked(key, { pr, url: task.url ?? "", status: "failed", error: reason })
-      b.markMergeTask(key, { status: "failed", error: reason, repo, worktree, branch })
-      log(`合并失败 ${repo}#${pr}（${where}）：${reason}`)
-      finishOperation(ctx, op, "failed", reason)
-      // 失败也只记账：通知暂停期间不回执给任何人，负责合并的一方从控制台/账本看原因。
-      return { ok: false, reason }
+  // 手动完成已经先核对过远端 merged，只补本地收尾，不能再发一次合并请求。
+  if (!alreadyMerged) {
+    try {
+      await ctx.gitea.mergePr(repo, pr, { style, deleteBranch })
+    } catch (e) {
+      const msg = String(e?.message ?? e ?? "")
+      // 「已经合并」不算失败：opencli 对已合的 PR 回 EMPTY_RESULT + 提示无需重复合并。
+      if (/无需重复合并|已经合并|已合并/.test(msg)) {
+        alreadyMerged = true
+        log(`${repo}#${pr} 已经是合并状态，按已合并收尾（${key}）`)
+      } else {
+        const reason = await mergeFailureReason({ gitea: ctx.gitea, repo, pr, error: e })
+        const b = new Book(cfg.stateFile)
+        b.markMergeAsked(key, { pr, url: task.url ?? "", status: "failed", error: reason })
+        b.markMergeTask(key, { status: "failed", error: reason, repo, worktree, branch })
+        log(`合并失败 ${repo}#${pr}（${where}）：${reason}`)
+        finishOperation(ctx, op, "failed", reason)
+        // 失败也只记账：通知暂停期间不回执给任何人，负责合并的一方从控制台/账本看原因。
+        return { ok: false, reason }
+      }
     }
   }
 
@@ -1344,6 +1364,87 @@ export async function runMergeTask(ctx, task = {}) {
   }
   // 结果只落账本 + 控制台；编排会话拿到的就是上面那条 steer。
   return { ok: true, alreadyMerged, notes, repo, issueKey: resolvedKey, worktree, branch }
+}
+
+// 控制台「手动完成」：只处理“远端已经合并、foreman 还没收尾”的工单。
+// 先逐条核对 PR 的远端状态，再复用合并后的关单/清理链路；不重复合并，也不把 open PR 直接标 done。
+export async function completeIssue(ctx, { repo = "", number = 0 } = {}) {
+  const issueRepo = String(repo ?? "").trim()
+  const issueNo = Number(number ?? 0) || 0
+  const issueKey = `${issueRepo}#${issueNo}`
+  if (!issueRepo || !issueNo) return { ok: false, error: "bad-request", message: "手动完成需要 repo / number" }
+
+  const book = new Book(ctx.cfg.stateFile)
+  const rec = book.issue?.(issueKey)
+  if (!rec) return { ok: false, error: "unknown-issue", message: `账本里没有这条工单：${issueKey}` }
+  if (rec.state === "done") {
+    const cleaned = await cleanIssue(ctx, { issueKey })
+    return { ok: true, skipped: "already-done", repo: issueRepo, number: issueNo, notes: cleaned.notes ?? [] }
+  }
+
+  const prs = (Array.isArray(rec.prs) && rec.prs.length
+    ? rec.prs
+    : [{ repo: issueRepo, pr: rec.pr, prUrl: rec.prUrl ?? "", branch: rec.branch ?? "" }]
+  ).map((p) => ({
+    repo: String(p?.repo ?? issueRepo).trim(),
+    pr: Number(p?.pr ?? p?.number ?? 0) || 0,
+    url: String(p?.prUrl ?? p?.url ?? ""),
+    branch: String(p?.branch ?? ""),
+  })).filter((p) => p.repo && p.pr)
+  if (!prs.length) return { ok: false, error: "no-pr", message: `${issueKey} 还没有关联 PR，不能按已合并收尾` }
+
+  const views = []
+  for (const p of prs) {
+    let raw
+    try {
+      raw = await ctx.gitea.viewPr(p.repo, p.pr)
+    } catch (e) {
+      return { ok: false, error: "pr-view-failed", message: `读取 ${p.repo}#${p.pr} 失败：${e.message}` }
+    }
+    const view = Array.isArray(raw) ? raw[0] : raw
+    const state = String(view?.state ?? "").trim().toLowerCase()
+    if (state !== "merged") {
+      return {
+        ok: false,
+        error: "pr-not-merged",
+        message: `${p.repo}#${p.pr} 当前是 ${state || "未知"}，只有已合并的 PR 才能手动完成`,
+        repo: p.repo,
+        pr: p.pr,
+        state,
+      }
+    }
+    views.push({ ...p, view })
+  }
+
+  const notes = []
+  for (const p of views) {
+    // 与 CLI 合并共用串行链，避免页面连点或别的合并请求同时写账本。
+    const prev = ctx.mergeChain ?? Promise.resolve()
+    const run = () => runMergeTask(ctx, {
+      key: `${p.repo}#${p.pr}`,
+      repo: p.repo,
+      pr: p.pr,
+      issue: issueNo,
+      url: p.url,
+      branch: p.branch,
+      alreadyMerged: true,
+      source: "manual-complete",
+      notify: false,
+      workflow: "own",
+    })
+    const mine = prev.then(run, run)
+    ctx.mergeChain = mine.then(() => {}, () => {})
+    const result = await mine
+    if (!result?.ok) return { ok: false, error: "complete-failed", message: result?.reason ?? `${p.repo}#${p.pr} 收尾失败` }
+    notes.push(...(result.notes ?? []))
+  }
+  // afterMerge 的 cleanup 节点只收流程产物；手动完成还要复用 `foreman clean` 的全量幂等清理，
+  // 覆盖 worktree、本地分支、执行会话与 watch，避免旧账本只变成 done 却留下残留。
+  const cleaned = await cleanIssue(ctx, { issueKey })
+  if (!cleaned.ok) return { ok: false, error: "cleanup-failed", message: cleaned.reason ?? `${issueKey} 清理失败`, notes }
+  notes.push(...(cleaned.notes ?? []))
+  try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
+  return { ok: true, repo: issueRepo, number: issueNo, completed: true, prs: views.map((p) => ({ repo: p.repo, pr: p.pr })), notes }
 }
 
 // ---- 合并判断：合并助手交 RESULT → workflow 合并 ----
@@ -1717,6 +1818,39 @@ export async function archiveMergedNotices({ dws, stateFile, log = () => {} } = 
   return notes
 }
 
+// archiveFinishedOrchestrators：工单收口（已合并/已关单）后，把 foreman 自己为它建的那条编排会话归档。
+// 早先 clean 只收工作会话与监听，没人管编排会话：每张单都在侧边栏留一条
+// 「foreman-<仓库>-<单号>-编排」，一天几条，越积越多，而且点进去全是已经收尾的对话。
+// 只动账本里 kind=orchestrator 且带这张单 issueKey 的会话：全局编排（book.orchestrator）
+// 与用户自己发起后被绑成编排的会话一律不碰。还在跑的不收（它可能正拿着「下一步 clean」这一轮），
+// 这一轮跳过、下一轮再试；dws 归档失败也留着账，不推翻工单状态。
+export async function archiveFinishedOrchestrators({ dws, stateFile, log = () => {}, sidebar = null } = {}) {
+  const notes = []
+  if (!dws || typeof dws.archive !== "function" || !stateFile) return notes
+  for (const [key, rec] of Object.entries(new Book(stateFile).issues ?? {})) {
+    if (!TERMINAL_ISSUE_STATES.includes(String(rec?.state ?? ""))) continue
+    const book = new Book(stateFile)
+    const own = ownedIssueOrchestrator(book, key)
+    if (!own) continue
+    const target = own.convId || own.name
+    // 侧边栏说还在跑：这一轮不动它（编排可能正拿着 clean 收尾）。
+    if (sidebar && (sidebar[target]?.running || sidebar[String(own.convId ?? "")]?.running)) continue
+    try {
+      await dws.archive(target)
+      const after = new Book(stateFile)
+      after.delSession(own.name)
+      after.setIssue(key, { orchestrator: "", orchestratorArchivedAt: nowIso() })
+      notes.push(`编排会话 ${own.name || target} 已归档（${key}）`)
+      log(`已归档收口工单的编排会话：${own.name || target}（${key}）`)
+    } catch (e) {
+      const msg = String(e?.message ?? e ?? "")
+      notes.push(`编排会话 ${own.name || target} 归档失败：${msg.slice(0, 120)}`)
+      log(`归档编排会话 ${own.name || target} 失败：${msg}`)
+    }
+  }
+  return notes
+}
+
 // 按 repo（owner/name）或 name（工程短名）找配置：命令行的 --repo 两种写法都认。
 function findRepoCfg(cfg, ref) {
   const raw = String(ref ?? "").trim()
@@ -1985,6 +2119,10 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     const repoCfg = findRepoCfg(ctx.cfg, m[1])
     if (!repoCfg) return fail("bad-request", `配置里没有这个工程：${m[1]}`)
     const number = Number(m[2])
+    const dispatchPrompt = String(req.prompt ?? "").trim()
+    if (!dispatchPrompt) {
+      return fail("bad-request", "dispatch 必须提供非空编排指令：--prompt <工单分析、任务范围与验收要求>，或 --file <指令文件>")
+    }
     // 用户自主发起：调用方会话就是这张单的编排，工作会话的更新都 steer 回它。
     // 不传调用方时，由 handleIssue 新建/复用这张单自己的编排会话。
     const orchestrator = String(req.orchestrator ?? "").trim()
@@ -1995,7 +2133,7 @@ export async function handleRequest(ctx, req) {  const id = req?.id
       return fail("gitea-error", `读不到工单 ${repoCfg.repo}#${number}：${e.message}`)
     }
     try {
-      const out = await handleIssue({ ...ctx, orchestrator }, repoCfg, issue)
+      const out = await handleIssue({ ...ctx, orchestrator, dispatchPrompt }, repoCfg, issue)
       // 派活这一步补推 session.dispatched：hand 时只推了 issue.picked。
       await ctx.engine?.emit("session.dispatched", {
         issueKey: `${repoCfg.repo}#${number}`,
@@ -2008,21 +2146,18 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     }
   }
 
-  // resume：失败/卡住时在**同一条**工作会话里 steer 续跑——不新开工作会话（这是编排的硬约束）。
-  // orchestrator 传了就把这条单改绑到它（用户自主发起时重新认领），后续更新 steer 到那条。
+  // resume：入口只认工作会话 id。由会话绑定/监听反查工单，再 steer 指定会话，不新开。
   if (cmd === "resume") {
-    const key = String(req.issue ?? "").trim()
-    const orchestrator = String(req.orchestrator ?? "").trim()
-    if (orchestrator) {
-      const b = new Book(ctx.cfg.stateFile)
-      if (b.issue(key)) b.setIssue(key, { orchestrator })
+    const sessionId = String(req.sessionId ?? "").trim()
+    const out = await resumeWorker(ctx, { sessionId })
+    if (out.ok && String(req.orchestrator ?? "").trim()) {
+      new Book(ctx.cfg.stateFile).setIssue(out.issueKey, { orchestrator: String(req.orchestrator).trim() })
     }
-    const out = await resumeWorker(ctx, { issueKey: key })
     if (!out.ok) {
       const msg =
-        out.reason === "no-worker" ? "这条单还没有工作会话，先 foreman dispatch"
-        : out.reason === "unknown-issue" ? "账本里没有这条单（先 hand / dispatch）"
-        : out.reason === "bad-issue" ? "resume 的 --issue 要写成 <owner/name>#<工单号>"
+        out.reason === "unknown-session" ? `账本里找不到这个工作会话：${sessionId || "（空）"}（先 foreman orch show / watch list 核对会话 id）`
+        : out.reason === "bad-session" ? "resume 需要执行会话 id：foreman resume <执行会话id>"
+        : out.reason === "no-worker" ? "这个会话没有可续跑的目标"
         : `resume 失败：${out.reason}`
       return fail("bad-request", msg)
     }
@@ -2031,11 +2166,14 @@ export async function handleRequest(ctx, req) {  const id = req?.id
 
   // clean：合并关单之后清残留 worktree、本地分支、工作会话与监听（幂等，重复调没副作用）。
   if (cmd === "clean") {
+    // 调用方会话 id（编排会话自己就是发起方）：clean 要归档这张单的编排会话，
+    // 但绝不能归档正在执行这条命令的那条——那种情况留给服务的下一轮收。
+    const currentConv = String(req.orchestrator ?? "").trim()
     if (req.all === true && !String(req.issue ?? "").trim()) {
       const keys = cleanableIssues(new Book(ctx.cfg.stateFile))
       const notes = []
       for (const key of keys) {
-        const r = await cleanIssue(ctx, { issueKey: key })
+        const r = await cleanIssue(ctx, { issueKey: key, currentConv })
         if (r.notes?.length) notes.push(`[${key}] ${r.notes.join("；")}`)
       }
       try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
@@ -2045,7 +2183,7 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     const ref = String(req.issue ?? "").trim()
     const m = ref.match(/([^#\s]+)#([0-9]+)$/)
     if (!m) return fail("bad-request", "clean 需要 --issue <owner/name>#<工单号>（或 --all）")
-    const out = await cleanIssue(ctx, { issueKey: `${m[1]}#${Number(m[2])}` })
+    const out = await cleanIssue(ctx, { issueKey: `${m[1]}#${Number(m[2])}`, currentConv })
     if (!out.ok) return fail("bad-request", `账本里没有这条单：${m[1]}#${m[2]}`)
     ctx.log?.(`clean ${out.issueKey}：${out.notes.join("；") || "没有要清的"}`)
     return ok(out)
@@ -2104,6 +2242,14 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     })
     try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
     return ok({ repo, number, commented: true })
+  }
+
+  if (cmd === "issue complete") {
+    const repo = String(req.repo ?? "").trim()
+    const number = Number(req.number ?? 0)
+    const out = await completeIssue(ctx, { repo, number })
+    if (!out.ok) return fail(out.error ?? "complete-failed", out.message ?? "手动完成失败")
+    return ok(out)
   }
 
   if (cmd === "issue close") {

@@ -36,9 +36,10 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman orch start [--name <会话名>]   起/复用全局编排会话（幂等；只有自动接单用这条）
   foreman orch show                    看每条编排会话绑了哪些工作会话、最近 steer 了什么
   foreman hand <owner/name>#<单号> [--orchestrator <id>]      把工单交给编排会话（它再自己调 dispatch）
-  foreman dispatch <owner/name>#<单号> [--orchestrator <id>]  编排调用：建工作区 + 开工作会话，会话 id 绑回编排
-  foreman resume <owner/name>#<单号> [--orchestrator <id>]    失败/卡住：在同一条工作会话里 steer 续跑（不新开）
-  foreman clean <owner/name>#<单号>     合并关单后清 worktree、本地分支、工作会话（幂等）
+  foreman dispatch <owner/name>#<单号> (--prompt <编排指令> | --file <指令文件>) [--orchestrator <id>]
+                                      提示词必填：编排分析、任务范围与验收要求随首句注入，头部带工单 ID 和 URL
+  foreman resume <执行会话id> [--orchestrator <id>]          失败/卡住：在指定工作会话里 steer 续跑（不新开）
+  foreman clean <owner/name>#<单号>     合并关单后清 worktree、本地分支、工作会话与这张单的编排会话（幂等）
   foreman clean --all                  清所有终端态工单残留的工作区与会话
   foreman pickup [-c <配置>]        手动催一轮自动巡检（服务按 pickup 配置捞一轮单）
   foreman tasks [--json]
@@ -65,7 +66,8 @@ const HELP = `foreman — 接单编排 + 常驻服务
   --no-service  跳过自动握手与拉起（逃生口）
 
 run 以编排会话为中心：捞到单先交给编排会话（dws steer），由它调 foreman dispatch 分配工作；
-工作会话的每次状态更新都 steer 回这条编排会话，失败也用 foreman resume 在同一会话里续跑。
+工作会话的每次状态更新都 steer 回这条编排会话；失败先由编排归因，原会话可修正时 foreman resume <执行会话id>，
+需要其他智能体协作时补派并登记监听，完成后再 steer 回等待结果的原会话。
 合并关单后由编排调 foreman clean 清 worktree 与会话。--direct 退回老行为（run 自己派活）。
 
 编排会话从哪来（工作会话与更新都绑它）：
@@ -538,21 +540,28 @@ async function cmdHand(pos, flags) {
 
 async function cmdDispatch(pos, flags) {
   const ref = String(pos[0] ?? flags.issue ?? "").trim()
-  if (!ref) throw new Error("用法：foreman dispatch <owner/name>#<单号>")
+  if (!ref) throw new Error("用法：foreman dispatch <owner/name>#<单号> (--prompt <编排指令> | --file <指令文件>)")
+  const inlinePrompt = strFlag(flags.prompt).trim()
+  const promptFile = strFlag(flags.file || flags["prompt-file"]).trim()
+  const filePrompt = promptFile ? fs.readFileSync(expandHome(promptFile), "utf8").trim() : ""
+  const prompt = [inlinePrompt, filePrompt].filter(Boolean).join("\n\n")
+  if (!prompt) throw new Error("dispatch 必须提供非空编排指令：--prompt <工单分析、任务范围与验收要求>，或 --file <指令文件>")
   const cfg = loadConfig(flags.config)
   const port = await resolvePort(cfg)
   // 派活要建 worktree、开工作会话（no-wait）；窗口忙时可能等一会儿，给足时间。
-  const r = await callRaw(port, { id: "cli", cmd: "dispatch", issue: ref, ...orchestratorArg(flags) }, 900000)
+  const r = await callRaw(port, {
+    id: "cli", cmd: "dispatch", issue: ref, prompt, ...orchestratorArg(flags),
+  }, 900000)
   if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
   return out({ ok: true, ...r })
 }
 
 async function cmdResume(pos, flags) {
-  const ref = String(pos[0] ?? flags.issue ?? "").trim()
-  if (!ref) throw new Error("用法：foreman resume <owner/name>#<单号>（在已有工作会话里 steer 续跑）")
+  const sessionId = String(pos[0] ?? flags.session ?? "").trim()
+  if (!sessionId) throw new Error("用法：foreman resume <执行会话id>（在指定工作会话里 steer 续跑，不传工单号）")
   const cfg = loadConfig(flags.config)
   const port = await resolvePort(cfg)
-  const r = await callRaw(port, { id: "cli", cmd: "resume", issue: ref, ...orchestratorArg(flags) }, 600000)
+  const r = await callRaw(port, { id: "cli", cmd: "resume", sessionId, ...orchestratorArg(flags) }, 600000)
   if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
   return out({ ok: true, ...r })
 }
@@ -563,9 +572,16 @@ async function cmdClean(pos, flags) {
   const all = truthy(flags.all)
   if (!ref && !all) throw new Error("用法：foreman clean <owner/name>#<单号>（或 --all）")
   const port = await resolvePort(cfg)
-  const r = await callRaw(port, { id: "cli", cmd: "clean", issue: ref, all }, 900000)
+  // 带上调用方会话 id：clean 会顺手归档这张单的编排会话，但要放过正在执行这条命令的那条。
+  const r = await callRaw(port, { id: "cli", cmd: "clean", issue: ref, all, ...callerOrchestratorArg(flags) }, 900000)
   if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
   return out({ ok: true, ...r })
+}
+
+// clean 只要 id、不打印「更新会 steer 到这里」那行提示，所以不复用 orchestratorArg。
+function callerOrchestratorArg(flags = {}) {
+  const who = callerOrchestrator(flags)
+  return who ? { orchestrator: who } : {}
 }
 
 async function main() {

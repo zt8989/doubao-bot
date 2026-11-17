@@ -13,6 +13,7 @@ import {
   watchersFor,
   notifyDecision,
   handleRequest,
+  archiveFinishedOrchestrators,
 } from "../src/service.mjs"
 import { Book } from "../src/book.mjs"
 
@@ -311,6 +312,36 @@ test("notifyDecision：无 RESULT 时正文带执行会话 id 与最后回复；
   assert.ok(!done.text.includes("原文不该出现"))
 })
 
+test("resume RPC：只收会话 id，并 steer 这条会话而不是按工单续跑", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = mkCfg(dir, { repos: [{ repo: "yyzl/demo", base: "sit-20261126" }] })
+    new Book(cfg.stateFile).setIssue("yyzl/demo#7", {
+      state: "blocked",
+      title: "统一路由",
+      branch: "fix/issue-7",
+      agent: "worker-7",
+      agentConvId: "conv-worker-7",
+      lastFailure: "缺少依赖工程",
+      workspaces: [{ repo: "yyzl/demo", branch: "fix/issue-7", worktree: "/w/demo" }],
+    })
+    const steered = []
+    const ctx = mkCtx(cfg, { dws: { steer: async (target, text) => steered.push({ target, text }) } })
+    const r = await handleRequest(ctx, { id: "r1", cmd: "resume", sessionId: "conv-worker-7" })
+    assert.equal(r.ok, true)
+    assert.equal(r.issueKey, "yyzl/demo#7")
+    assert.equal(steered.length, 1)
+    assert.equal(steered[0].target, "conv-worker-7")
+
+    const legacy = await handleRequest(ctx, { id: "r2", cmd: "resume", issue: "yyzl/demo#7" })
+    assert.equal(legacy.ok, false)
+    assert.match(legacy.message, /foreman resume <执行会话id>/)
+    assert.equal(steered.length, 1, "工单号入口不得触发续跑")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 // 服务级 ctx 不带账本（只有 state/cfg/dws/engine），dispatch 这条 RPC 必须自己兜底开 Book，
 // 否则 handleIssue 一进来读 book.issue(key) 就崩：Cannot read properties of undefined (reading 'issue')。
 // pickup.maxRunning 只约束定时巡检；即使已经达到上限，agent 主动 dispatch 也必须能派。
@@ -329,13 +360,100 @@ test("dispatch RPC：达到定时巡检上限后，agent 仍能派且 ctx 不带
     const ctx = {
       ...mkCtx(cfg),
       dryRun: true,
-      gitea: { viewIssue: async (repoArg, n) => ({ number: n, title: "登录改造", body: "", labels: [], assignees: [], url: "" }) },
+      gitea: { viewIssue: async (repoArg, n) => ({ number: n, title: "登录改造", body: "", labels: [], assignees: [], url: `http://gitea/yyzl/demo/issues/${n}` }) },
     }
     assert.equal(ctx.book, undefined, "这条 RPC 的 ctx 就是服务级 ctx，本身没有 book")
-    const r = await handleRequest(ctx, { id: "t", cmd: "dispatch", issue: "yyzl/demo#7" })
+    const missing = await handleRequest(ctx, { id: "t0", cmd: "dispatch", issue: "yyzl/demo#7" })
+    assert.equal(missing.ok, false)
+    assert.match(missing.message, /必须提供非空编排指令/)
+    const r = await handleRequest(ctx, {
+      id: "t", cmd: "dispatch", issue: "yyzl/demo#7",
+      prompt: "只负责登录页前端；先复用现有请求封装，完成后跑前端单测。",
+    })
     assert.equal(r.ok, true)
     assert.equal(r.state, "planned")
     assert.equal(r.workspaces.length, 1)
+    assert.ok(r.prompt.startsWith("【工作会话 · yyzl/demo#7 ·"), "头部必须带完整工单 ID")
+    assert.match(r.prompt.split("\n").slice(0, 4).join("\n"), /工单链接：http:\/\/gitea\/yyzl\/demo\/issues\/7/)
+    assert.match(r.prompt, /编排智能体补充指令/)
+    assert.match(r.prompt, /只负责登录页前端；先复用现有请求封装，完成后跑前端单测。/)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ---- 收口工单的编排会话自动归档 ----
+// 每张单一条独立编排会话：工单 done 之后它没有下一件事，但早先没人收，侧边栏越积越多。
+test("archiveFinishedOrchestrators：收口的单归档自己的编排会话；在跑/pr-open/用户会话/全局编排都不动", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = mkCfg(dir)
+    const book = new Book(cfg.stateFile)
+    const rec = (name, issueKey, convId) =>
+      book.record(name, { convId, kind: "orchestrator", role: "orchestrator", issueKey, notify: false })
+
+    // 1) done + foreman 建的编排会话 → 收
+    book.setIssue("yyzl/demo#1", { state: "done", orchestrator: "conv-o1" })
+    rec("foreman-demo-1-编排", "yyzl/demo#1", "conv-o1")
+    // 2) done 但编排会话还在跑 → 这轮跳过
+    book.setIssue("yyzl/demo#2", { state: "done", orchestrator: "conv-o2" })
+    rec("foreman-demo-2-编排", "yyzl/demo#2", "conv-o2")
+    // 3) done 但编排是用户自己的会话（账本里没有 orchestrator 记录）→ 不动
+    book.setIssue("yyzl/demo#3", { state: "done", orchestrator: "conv-user" })
+    // 4) pr-open 还没合完 → 不动
+    book.setIssue("yyzl/demo#4", { state: "pr-open", orchestrator: "conv-o4" })
+    rec("foreman-demo-4-编排", "yyzl/demo#4", "conv-o4")
+    // 5) 全局编排（没有 issueKey）挂了多张单 → 绝不动
+    book.setOrchestrator({ convId: "conv-global", name: "foreman-编排" })
+    book.record("foreman-编排", { convId: "conv-global", kind: "orchestrator", role: "orchestrator", notify: false })
+    book.setIssue("yyzl/demo#5", { state: "done", orchestrator: "conv-global" })
+
+    const archived = []
+    const dws = { archive: async (t) => { archived.push(t) } }
+    const notes = await archiveFinishedOrchestrators({
+      dws,
+      stateFile: cfg.stateFile,
+      log: () => {},
+      sidebar: { "conv-o2": { running: true } },
+    })
+    assert.deepEqual(archived, ["conv-o1"], "只归档收口且已经停下来的那张单自己的编排会话")
+    assert.match(notes.join("；"), /foreman-demo-1-编排 已归档/)
+    const after = new Book(cfg.stateFile)
+    assert.equal(after.issue("yyzl/demo#1").orchestrator, "")
+    assert.equal(after.session("foreman-demo-1-编排"), null)
+    assert.equal(after.issue("yyzl/demo#2").orchestrator, "conv-o2", "在跑的先留着")
+    assert.equal(after.session("foreman-demo-2-编排")?.convId, "conv-o2")
+    assert.equal(after.issue("yyzl/demo#4").orchestrator, "conv-o4", "没合完不动")
+    assert.equal(after.session("foreman-编排")?.convId, "conv-global", "全局编排不动")
+
+    // 下一轮：上一条已经停了，这一轮才收它（在跑的那轮本来就不该动）。
+    const again = await archiveFinishedOrchestrators({ dws, stateFile: cfg.stateFile, log: () => {} })
+    assert.deepEqual(archived, ["conv-o1", "conv-o2"])
+    assert.equal(again.length, 1)
+    // 第三轮彻底没得收了
+    const third = await archiveFinishedOrchestrators({ dws, stateFile: cfg.stateFile, log: () => {} })
+    assert.equal(third.length, 0)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("archiveFinishedOrchestrators：归档失败只记账，不推翻工单状态", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = mkCfg(dir)
+    const book = new Book(cfg.stateFile)
+    book.setIssue("yyzl/demo#8", { state: "done", orchestrator: "conv-bad" })
+    book.record("foreman-demo-8-编排", { convId: "conv-bad", kind: "orchestrator", issueKey: "yyzl/demo#8" })
+    const notes = await archiveFinishedOrchestrators({
+      dws: { archive: async () => { throw new Error("侧边栏里没有任务") } },
+      stateFile: cfg.stateFile,
+      log: () => {},
+    })
+    assert.match(notes.join("；"), /归档失败/)
+    const after = new Book(cfg.stateFile)
+    assert.equal(after.issue("yyzl/demo#8").state, "done", "工单状态不能被归档失败推翻")
+    assert.equal(after.issue("yyzl/demo#8").orchestrator, "conv-bad", "记录留着下一轮再试")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

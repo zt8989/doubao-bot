@@ -7,7 +7,7 @@
 //   - 工作会话 id 写进账本 issues[<键>] 的 agent / agentConvId / orchestrator；
 //   - 工作会话失败用 `foreman resume` 在**同一条**工作会话里 steer 续跑，绝不新开；
 //   - PR 扫描独立走 deliver.mode=new，新建合并会话，不复用任何工单编排会话；
-//   - 合并关单之后 `foreman clean` 清 worktree 与工作会话。
+//   - 合并关单之后 `foreman clean` 清 worktree、工作会话与这张单自己的编排会话；
 import fs from "node:fs"
 import { Book } from "./book.mjs"
 import { builtinPrompt } from "./builtin-prompts.mjs"
@@ -36,6 +36,26 @@ export function issueOrchestratorName(cfg, issueKey = "") {
   if (!match) return `${prefix}-编排`
   const repoName = match[1].split("/").filter(Boolean).at(-1) || "issue"
   return `${prefix}-${repoName}-${match[2]}-编排`
+}
+
+// 工单收口（已合并/已关单）后编排会话就没有下一件事了，这两个状态算终端态。
+export const TERMINAL_ISSUE_STATES = ["done", "cleaned"]
+
+// 这张单的编排会话是不是 foreman 自己为它建的（而不是调用方/用户自己的会话）。
+// 判据只看账本：sessions 里 kind=orchestrator 且 issueKey 正好是这张单。
+// 全局编排（book.orchestrator，没有 issueKey）与用户发起方会话都不满足——反过来，
+// 拿这个函数当地址簿，就不会误归档用户自己的对话。
+export function ownedIssueOrchestrator(book, issueKey = "") {
+  const key = String(issueKey ?? "").trim()
+  if (!key) return null
+  for (const [name, s] of Object.entries(book?.sessions ?? {})) {
+    if (String(s?.kind ?? "") !== "orchestrator") continue
+    if (String(s?.issueKey ?? "") !== key) continue
+    const convId = String(s?.convId ?? "").trim()
+    if (!name && !convId) continue
+    return { name: String(name), convId }
+  }
+  return null
 }
 
 // 顶层全局编排只保留给手工 `foreman orch start` 的兼容入口；自动流程不再使用它。
@@ -162,6 +182,8 @@ export async function steerOrchestrator(ctx, text, { kind = "", target = "" } = 
   if (!body) return { ok: false, reason: "empty" }
   if (typeof ctx.dws?.steer !== "function") return { ok: false, reason: "no-steer" }
   await ctx.dws.steer(to, body)
+  book.clearIdle(to)
+  book.clearGone(to)
   book.markSteer(to, { kind, chars: body.length })
   ctx.log?.(`已 steer 进编排会话${kind ? `（${kind}）` : ""}：${body.split("\n")[0].slice(0, 80)}`)
   return { ok: true, convId: to }
@@ -205,8 +227,8 @@ export function ticketText({ repo, issue, orchestrator = "" } = {}) {
   lines.push(
     "",
     "下一步（你只做决策，不写代码）：",
-    `1. foreman dispatch --issue ${key} —— 建一工程一工作区、开工作会话，会话 id 会绑回这条会话；`,
-    `2. 工作会话只管改完 commit（不 push、不开 PR、不碰工单），更新会 steer 进来；失败就 foreman resume --issue ${key}（同一会话里续跑，别新开）；`,
+    `1. foreman dispatch --issue ${key} --prompt "<工单分析、这条编码会话的任务范围、依赖与验收要求>" —— 建一工程一工作区、开工作会话，编排指令随首句进入，会话 id 会绑回这条会话；`,
+    `2. 工作会话只管改完 commit（不 push、不开 PR、不碰工单），更新会 steer 进来并带执行会话 id；失败先按编排提示词归因处理，需要原会话续跑时 foreman resume <执行会话id>（不要传工单号）；`,
     `3. 工作会话 commit 之后，foreman 自己 push 分支并开 PR（PR 号与链接写进账本与这条更新里）——你不用催它开 PR；`,
     `4. 核对 PR 后 foreman pr merge <N> --repo <PR 所在仓库>（合并即关单），合完 foreman clean --issue ${key}。`
   )
@@ -246,21 +268,45 @@ export async function handToOrchestrator(ctx, { repoCfg, issue, orchestrator = "
   return { repo: repoCfg.repo, number: Number(issue.number), issueKey: key, state: "handed", convId, orchestrator: convId }
 }
 
-// 失败续跑：在同一条工作会话里 steer，不新开（编排侧只看这一条）。
-export async function resumeWorker(ctx, { issueKey } = {}) {
+// 失败续跑：入口只认工作会话 id。先由会话绑定/监听反查工单，再 steer 这条会话本身。
+export async function resumeWorker(ctx, { sessionId } = {}) {
   const cfg = ctx?.cfg ?? {}
-  const key = String(issueKey ?? "").trim()
-  const m = key.match(/^([^#\s]+)#([0-9]+)$/)
-  if (!m) return { ok: false, reason: "bad-issue" }
-  const repo = m[1]
-  const number = Number(m[2])
+  const requested = String(sessionId ?? "").trim()
+  if (!requested) return { ok: false, reason: "bad-session" }
   const book = new Book(cfg.stateFile)
+
+  let key = ""
+  let name = requested
+  let target = requested
+  for (const [candidate, rec] of Object.entries(book.issues ?? {})) {
+    if (String(rec?.agentConvId ?? "") !== requested && String(rec?.agent ?? "") !== requested) continue
+    key = candidate
+    name = String(rec?.agent ?? "") || requested
+    target = String(rec?.agentConvId ?? "") || String(rec?.agent ?? "") || requested
+    break
+  }
+  const watched = book.watch.find((w) => String(w?.target ?? "") === requested || String(w?.name ?? "") === requested)
+  if (!key && watched?.issueKey) key = String(watched.issueKey)
+  if (watched) {
+    name = String(watched.name ?? "") || name
+    target = String(watched.target ?? "") || target
+  }
+  const sessionEntry = Object.entries(book.sessions ?? {}).find(
+    ([sessionName, rec]) => sessionName === requested || String(rec?.convId ?? "") === requested,
+  )
+  if (!key && sessionEntry?.[1]?.issueKey) key = String(sessionEntry[1].issueKey)
+  if (sessionEntry) {
+    name = sessionEntry[0]
+    target = String(sessionEntry[1]?.convId ?? "") || target
+  }
+  if (!key) return { ok: false, reason: "unknown-session", sessionId: requested }
+
   const rec = book.issue(key)
-  if (!rec) return { ok: false, reason: "unknown-issue" }
-  const w = workerOf(book, key)
-  const target = w.convId || w.name
+  if (!rec) return { ok: false, reason: "unknown-session", sessionId: requested }
   if (!target) return { ok: false, reason: "no-worker" }
   if (typeof ctx.dws?.steer !== "function") return { ok: false, reason: "no-steer" }
+  const repo = String(key).split("#")[0]
+  const number = Number(String(key).split("#")[1])
   const ws = Array.isArray(rec.workspaces) ? rec.workspaces : []
   const text = resume({
     issue: { number, title: String(rec.title ?? "") },
@@ -271,14 +317,17 @@ export async function resumeWorker(ctx, { issueKey } = {}) {
     workspaces: ws.length ? ws : rec.worktree ? [{ repo, branch: rec.branch ?? "", worktree: rec.worktree }] : [],
   })
   await ctx.dws.steer(target, text)
+  book.clearIdle(target)
+  book.clearGone(target)
   book.setIssue(key, { state: "working", lastFailure: "", attempts: Number(rec.attempts ?? 0) + 1, resumedAt: nowIso() })
   ctx.log?.(`${key}：已在工作会话 ${target} 里 steer 续跑（不新开）`)
-  return { ok: true, issueKey: key, target, convId: w.convId, name: w.name, orchestrator: w.orchestrator }
+  return { ok: true, issueKey: key, target, convId: target, name, orchestrator: String(rec.orchestrator ?? "") }
 }
 
-// 结论后面跟的「下一步」：编排会话读到就知道该 dispatch / resume / merge / clean 哪一个。
-export function nextStepLine({ issueKey = "", result = null } = {}) {
+// 结论后面带决策输入与当前会话 id；具体选补派、续跑还是问人，由编排按原因判断。
+export function nextStepLine({ issueKey = "", result = null, sessionId = "" } = {}) {
   const status = String(result?.status ?? "")
+  const session = String(sessionId ?? "").trim() || "<执行会话id>"
   if (status === "done") {
     const prs = Array.isArray(result?.prs) && result.prs.length
       ? result.prs
@@ -293,17 +342,22 @@ export function nextStepLine({ issueKey = "", result = null } = {}) {
     ].join("\n")
   }
   if (status === "need_decision") {
-    return `下一步：把上面的问题给用户；答复后用 foreman resume --issue ${issueKey} 在同一工作会话里续跑（别新开）`
+    return `下一步：把上面的问题给用户；答复后用 foreman resume ${session} 在同一工作会话里续跑（别新开）`
   }
   if (status === "blocked" || status === "failed") {
-    return `下一步：foreman resume --issue ${issueKey} —— 用 steer 在这条工作会话里续跑，不要新开工作会话`
+    return [
+      "下一步：先根据上面的原因选择处理动作，不要固定续跑：",
+      `- 原会话能修正：foreman resume ${session}`,
+      `- 需要其他智能体协作：新派合适的工作会话并登记监听；它完成后 dws msg --mode steer ${session} "协作结果与继续任务"，让原会话继续；`,
+      "- 只有必须由用户拍板时才提问；不要新开重复的同职责会话。",
+    ].join("\n")
   }
   return ""
 }
 
-// clean：合并关单之后清残留 worktree、本地分支、工作会话与监听。
+// clean：合并关单之后清残留 worktree、本地分支、工作会话、编排会话与监听。
 // 幂等：没有产物、已经清过都只回一条 notes；worktree 有未提交改动就保留（不删别人正在写的东西）。
-export async function cleanIssue(ctx, { issueKey, archive = true } = {}) {
+export async function cleanIssue(ctx, { issueKey, archive = true, currentConv = "" } = {}) {
   const cfg = ctx?.cfg ?? {}
   const key = String(issueKey ?? "").trim()
   const book = new Book(cfg.stateFile)
@@ -386,6 +440,29 @@ export async function cleanIssue(ctx, { issueKey, archive = true } = {}) {
     book.delWatch(target)
   }
 
+  // 2.5) 这张单自己的编排会话：收口后它没有下一件事了，一并归档。
+  // 早先只收工作会话与监听，编排会话留在侧边栏里越积越多（每张单一条）。
+  // 只认账本里 foreman 为这张单建的那条：调用方自己发起的会话（用户会话）与全局编排一律不碰；
+  // 正在发出这条命令的会话也不归档（dws 本来也拒绝归档命令发起方），留给服务下一轮收。
+  const own = ownedIssueOrchestrator(book, key)
+  if (own) {
+    const target = own.convId || own.name
+    const caller = String(currentConv ?? "").trim()
+    if (caller && (caller === own.convId || caller === own.name)) {
+      notes.push(`编排会话 ${own.name || target} 就是当前会话，留给服务在收口后归档`)
+    } else if (archive && typeof ctx.dws?.archive === "function") {
+      try {
+        await ctx.dws.archive(target)
+        notes.push(`编排会话已归档：${own.name || target}`)
+        ctx.log?.(`clean：编排会话已归档 ${target}`)
+        book.delSession(own.name)
+        book.setIssue(key, { orchestrator: "" })
+      } catch (e) {
+        notes.push(`编排会话 ${own.name || target} 归档失败：${String(e?.message ?? e).slice(0, 120)}`)
+      }
+    }
+  }
+
   // 3) 账本收尾：会话字段清空，已合并的单落到 done
   const state = ["done", "pr-open", "cleaned"].includes(String(rec.state ?? "")) ? "done" : String(rec.state ?? "")
   book.setIssue(key, { agent: "", agentConvId: "", cleanedAt: nowIso(), ...(state ? { state } : {}) })
@@ -395,15 +472,17 @@ export async function cleanIssue(ctx, { issueKey, archive = true } = {}) {
   return { ok: true, issueKey: key, notes, cleanedAt: nowIso() }
 }
 
-// --all 时清哪些：终端态（已合并/已关单）且有工作区痕迹的单。
+// --all 时清哪些：终端态（已合并/已关单）且有工作区痕迹的单，
+// 或者只剩自己那条编排会话没收的单（否则老的残留会话永远扫不到）。
 export function cleanableIssues(book) {
   return Object.entries(book?.issues ?? {})
-    .filter(([, it]) => ["done", "cleaned"].includes(String(it?.state ?? "")))
+    .filter(([, it]) => TERMINAL_ISSUE_STATES.includes(String(it?.state ?? "")))
     .filter(
-      ([, it]) =>
+      ([key, it]) =>
         !!it?.worktree ||
         (Array.isArray(it?.workspaces) && it.workspaces.length) ||
-        !!String(it?.agent ?? "").trim(),
+        !!String(it?.agent ?? "").trim() ||
+        !!ownedIssueOrchestrator(book, key),
     )
     .map(([key]) => key)
 }

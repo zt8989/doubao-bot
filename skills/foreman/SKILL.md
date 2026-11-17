@@ -46,17 +46,17 @@ description: 接单编排 CLI（项目 foreman，命令 foreman）：**以工单
 | --- | --- | --- |
 | 起编排会话 | `foreman orch start` | 手工兼容入口；自动巡检不要调用，hand 会按工单自动新建 |
 | 交工单 | `foreman hand <owner/name>#N` | 把工单正文 steer 进编排会话，账本记 `handed`；不建工作区 |
-| 分配工作 | `foreman dispatch <owner/name>#N` | **编排调用**：建一工程一工作区 + 开工作会话，会话 id 绑回编排；已派过就 steer 同一条续跑 |
+| 分配工作 | `foreman dispatch <owner/name>#N --prompt "<编排指令>"` | **编排调用，提示词必填**：建一工程一工作区 + 开工作会话，会话 id 绑回编排；`--prompt` 注入工单分析、任务范围、依赖与验收要求，直接随派单首句进入（长指令用 `--file <路径>`），头部自动带完整工单 ID 与 URL；留空拒绝派单。已派过就 steer 同一条续跑，注入内容也合进这条消息 |
 | 看链路 | `foreman orch show` | 每条编排会话（含发起方会话）绑了哪些工作会话、最近 steer 了什么 |
 | 收工后开 PR | 服务自动 | 工作会话 commit 后，foreman 自己 push 分支 + 建 PR，PR 号/链接进账本并 steer 进编排（工作会话不碰这些） |
-| 失败续跑 | `foreman resume <owner/name>#N` | 在**同一条工作会话**里 `dws msg --mode steer`，**不新开** |
+| 失败续跑 | `foreman resume <执行会话id>` | 在**指定工作会话**里 `dws msg --mode steer`，**不新开、不传工单号** |
 | 合并 | `foreman pr merge <N> --repo R` | 合并即关单；结果 steer 回这条单的编排会话 |
-| 清尾 | `foreman clean <owner/name>#N`（或 `--all`） | 清 worktree、本地分支、工作会话与监听（幂等） |
+| 清尾 | `foreman clean <owner/name>#N`（或 `--all`） | 清 worktree、本地分支、工作会话、监听与这张单的编排会话（幂等；编排会话在正跑时留给服务下一轮收） |
 
 - 上表里 `hand` / `dispatch` / `resume` **全是异步投递**：命令返回（`handed` / `dispatched`）就等于这一步做完了，别接着等；从投递到 `<RESULT>` 回来常 30–60 分钟（见上面「异步」节）。
 - 工作会话的**任何状态更新**（结论、PR、失败原因）都由服务轮询后 `dws msg --mode steer` 插进**这张单绑的编排会话**，
   不再新建会话、不再 `dws notify`；用户自主发起的单就插回发起方会话。
-- 失败/卡住一律 `resume`：编排读到 `failed`/`blocked` 就 steer 同一条工作会话；重派也认账本里绑定的 `agentConvId`。
+- 失败/卡住先由编排归因：原会话能修正才 `resume <执行会话id>`；需要其他智能体就新派并 `watch add` 登记，完成后 steer 回等待结果的原会话；不要一律续跑，也不要为同一职责重复开会话。
 - PR 监听（别人家的 PR）按 `deliver.mode=new` 新建合并会话，消息里带 PR 链接，不再 steer 到全局或某张工单的编排会话。
 - 降级：配置 `sessionFlow.enabled: false` 或 `foreman run --direct` 退回老的多会话模型。
 
@@ -128,7 +128,7 @@ foreman watch poll               # 立刻跑一轮（checked / settled / notifie
 - **CLI 启动即握手**（除 `serve` / `help`）：任意子命令起来先读端口文件 `~/.foreman/service.port`（服务写的纯数字），拿它去 `GET /api/ping`；通了直接跑，不通就自动拉起服务、等服务把端口写进文件再连（上限 `handshakeTimeoutMs`，默认 5s）。**CLI 与服务的通信全程 HTTP，没有 unix socket。** 起不来非零退出，打印 `✗ foreman 服务没起来：<原因>` + 两条可执行提示（`foreman serve`、`cat ~/.foreman/service.log`），照做，别手动猜。
 - 逃生开关 `--no-service`：跳过握手与自动拉起，只跑这一条命令（测试与排障用）；配置 `service.enabled: false` 等价于一直带它。
 - 服务文件都在 `~/.foreman/` 下：`service.port`（实际端口，纯数字一行）、`foreman.pid`（pid/port/http/portFile/启动时间/版本）、`service.log`。重复启动只回「已在运行」（`already-running`），不会起第二个；端口被别的进程占着报 `port-in-use`；停用 SIGTERM 或前台 Ctrl-C。服务监听 `http://127.0.0.1:7317`（`service.http.port`，0 表示系统分配；实际端口写进 `service.port`）；CLI 的每条子命令走 `POST /api/rpc`（body 是 `{id, cmd, …}`），探活走 `GET /api/ping`。排障可以直接 `curl` 这两个路由核对服务状态。没有 `service.http.enabled` 开关——服务起来就一定在听。
-- **轮询先读侧边栏、不切窗口**：每轮先 `dws list --json`（`DwsDriver.runningMap`）拿「还在跑」，**在跑的会话直接跳过、不逐条 `dws status`**——`dws status` 内部要 `goto` 切到目标会话，20s 一轮会把用户窗口反复拽到被监听会话上。只有侧边栏显示没在跑的才读 status 取结论；侧边栏读不到时退回老行为，不漏通知。自动巡检同理：有被监听会话还在跑就跳过本轮（`skipped: "window-busy"`），避免豆包单实例下开新会话失败或把 kickoff 发进正在跑的会话。
+- **轮询先读侧边栏、不切窗口**：每轮先 `dws list --json`（`DwsDriver.runningMap`）拿「还在跑」，**在跑的会话直接跳过、不逐条 `dws status`**——`dws status` 内部要 `goto` 切到目标会话，20s 一轮会把用户窗口反复拽到被监听会话上。只有尚未消费且侧边栏显示没在跑的才读 status 取结论；侧边栏读不到时，未消费会话退回逐条 status，已消费会话仍保持 idle，不重复读取。后续由侧边栏重新出现 running，或 `resume` / 重派 steer 显式唤醒。自动巡检同理：有被监听会话还在跑就跳过本轮（`skipped: "window-busy"`），避免豆包单实例下开新会话失败或把 kickoff 发进正在跑的会话。
 - 监听节奏沿用 `pollSeconds`（默认 20s）：对登记会话跑 `dws status`，`streaming` 真（running）或 `chars: 0`（pending，dws 的"还没开始"坑）不动；`finished` 真、或 finished/streaming 都假但 `chars > 0` 且有文本（settled）才算跑完；再要求「回复指纹变了」（指纹 = `sha1(chars|head|tail)` 前 12 位）。同一个 `(会话, 指纹)` 只通知一次，去重记在 state.json 的 `notified` 键，服务重启不重发。
 - 通知含仓库、单号、结论类别、PR 链接（有则带）；目标取登记的 `notifyTo`，没写取 `notify.session`（`auto` → `MCP_VM_CONVERSATION_ID`）。三种不发：`notify.enabled: false`、目标为空、目标就是被监听会话自己；结论不在 `notify.events` 白名单也不发（显式盯的 `session-done` 例外）。发送失败只写 `service.log`、`dwsErrors++`，不影响继续监听。
 
@@ -140,7 +140,7 @@ foreman watch poll               # 立刻跑一轮（checked / settled / notifie
 - 作者在 `prWatch.ignoreAuthors`（自己的账号，由 `pickup.me` 补齐）里的单跳过，只记 `skipped: "self"`。
 - 其余 PR 合成一条消息投递：`deliver.mode: "new"`（默认）**新建一条合并会话**（读合并提示词 + 监控项目，会话名 `foreman-合并-<YYYYMMDD-HHmm>`）；`existing` 才用 `dws notify` 发给 `prWatch.notifyTarget`：`earliest`（默认）= 账本 `sessions` 里最早登记、有 `convId` 的会话（第一个调用方）；也可写死会话 id/侧边栏标题。
 - 先按 `pr-view` 的 `mergeNote`/`mergeable` 判冲突，**有冲突的默认过滤掉**（`prWatch.filterConflicts`，默认 `true`；这类单合不了，报了没用，冲突解掉下一轮会自动恢复），记 `skipped: "conflict"`。
-- **别人家的 PR 只通知、不在监听里合**：监听看不到关联工单，通知里带 `foreman pr merge <N> --repo R`，由编排 agent 核对工单后再合；合不了 `foreman pr merge` 直接回理由（`pr-merge` 报错 + `pr-view` 的 `mergeNote`）。
+- **别人家的 PR 只通知、不在监听里直接合**：监听看不到关联工单，通知合并助手核对并交 `<RESULT>`；`mergeable=true` 的 PR 由 foreman 自动执行 `runMergeTask` 合并。通知里的 `foreman pr merge <N> --repo R` 仅供人工兜底，合不了会直接回理由（`pr-merge` 报错 + `pr-view` 的 `mergeNote`）。
 - 去重记在 `state.json` 的 `prWatch` 键（`<repo>#<number>`），发成功才盖 `notifiedAt`；失败下一轮重试，重启不重发。`existing` 模式下账本里还没有调用方时不发也不记账；`new` 模式每次新建会话，不受影响。
 - 起服务 1s 后先扫一遍，之后按间隔跑。
 
@@ -186,11 +186,12 @@ foreman run --no-notify                # 这一轮不登记监听，因此不会
 foreman orch start                    # 手工兼容入口；自动巡检按工单新建独立编排，不调用它
 foreman orch show                     # 每条编排会话（含发起方会话）绑了哪些工作会话、最近 steer 了什么
 foreman hand <owner/name>#<N>         # 把工单交给编排会话（不建工作区、不开工作会话）
-foreman dispatch <owner/name>#<N>     # 编排调用：建工作区 + 开工作会话，会话 id 绑回编排
-foreman resume <owner/name>#<N>       # 失败/卡住：在同一条工作会话里 steer（不新开）
+foreman dispatch <owner/name>#<N> --prompt "<编排指令>"   # 提示词必填：工单分析、任务范围、依赖与验收随首句注入
+                                    # 头部自动带完整工单 ID 和 URL；长指令改用 --file <路径>，留空拒绝派单
+foreman resume <执行会话id>             # 原会话可修正时：按会话 id steer 续跑（不新开、不传工单号）
                                       # 以上三条都支持 --orchestrator <会话id|标题>：绑到发起方会话
                                       #（不传则取 MCP_VM_CONVERSATION_ID，即「用户自己发起的会话」）
-foreman clean <owner/name>#<N>        # 合并关单后清 worktree / 分支 / 工作会话（幂等）
+foreman clean <owner/name>#<N>        # 合并关单后清 worktree / 分支 / 工作会话 / 本单编排会话（幂等）
 foreman clean --all                   # 清所有终端态工单的残留
 foreman tasks                         # 每条工单到哪一步、卡在哪
 foreman pr poll                       # 立刻扫一轮 PR（作者不是自己的（pickup.me）报给最早登记的调用方）
@@ -210,7 +211,7 @@ foreman doctor [--start]              # --start 才真的连豆包窗口读状�
 
 ## 一轮的流程
 
-0. **会话中心（默认）先交给本单编排**：捞到单不直接建工作区，而是 `ensureIssueOrchestrator`（这张单独立一条编排会话，按单幂等）+ `dws msg --mode steer` 把工单交进去，账本记 `handed` 与 `orchestrator`；编排读完调 `foreman dispatch` 才走下面 2、3 步。失败/卡住由本单编排调 `foreman resume`（同一条工作会话 steer），合完调 `foreman clean`。
+0. **会话中心（默认）先交给本单编排**：捞到单不直接建工作区，而是 `ensureIssueOrchestrator`（这张单独立一条编排会话，按单幂等）+ `dws msg --mode steer` 把工单交进去，账本记 `handed` 与 `orchestrator`；编排读完调 `foreman dispatch` 才走下面 2、3 步。失败/卡住由编排先归因：原会话可修正就 `foreman resume <执行会话id>`，需要其他智能体就补派并登记监听，完成后 steer 回原会话；合完调 `foreman clean`。
 1. `opencli gitea search --label <id>` 拉 open 工单，按 `pickup` 过滤（排除人工标签、已处理的、到重试上限的），**三档排序**：我的（作者是 `pickup.me`）→ 无人认领 → 他人，同档最老先接（`pickup.priority` 可改顺序）。
 2. 工单牵涉几个工程（主仓库 + 正文里提到的本产品其它工程）就各建一个工作区：`herdr worktree create --cwd <该工程> --branch fix/issue-N --base origin/<base> --path ~/.foreman/worktrees/<该工程>/fix-issue-N --no-focus`。**一个工程一个工作区，不合并、不共用。**
 3. `dws open --name foreman-<工单所在仓库>-<N>` 发 kickoff：把工单正文、**每个工程的工作区与分支清单**、边界（**一工程一工作区：每个工程只在自己那条工作区里改，不许跨目录、不许动主 checkout；缺工作区就交 blocked 写「缺工作区：<owner/name>」**）、**「改完就 commit 然后结束」**（不 push、不开 PR、不合并、不关工单、不动 worktree 与会话——**工作会话不认识 foreman，提示词里也不出现 foreman 命令**；想读工单细节用 `opencli gitea issue-view --repo <仓库> <N>` 只读）、`<RESULT>` 协议一次写进去。
@@ -265,9 +266,10 @@ RESULT 协议（只认最后一个块，差一点按失败处理）：
 | 一条也捞不到 | `labelIds` 配的 id 不对、`excludeLabels` 命中、已指派且 `onlyUnassigned` | `foreman run --dry-run --once` 看"open N 条，可接 M 条"，顺带看它给每张单列了几个工程的工作区 |
 | 跨工程单交 `need_decision`「要求改另一个仓库」 | 首句把边界写死在单一 worktree（老行为），或工程没认出来 | 看 `foreman tasks` / 账本 `workspaces` 有几条；不够就 `foreman ws add --repo <工程> --issue <单号>` 补开，再 `foreman retry` 放回 |
 | 工单合了一条 PR 还是 `pr-open`、没关单 | 一工程一工作区：还有别的工程的 PR 没合 | `foreman ws list --issue <单号>` 看 `prs`；逐条 `foreman pr merge <N> --repo <该工程>`，全合完 close 节点才关单 |
-| 工作会话失败后又冒出一条新会话 | 走的不是 `resume`（直接 `dispatch` 时账本没绑上） | `foreman orch show` 看 `agentConvId`；用 `foreman resume <单号>`，它只 steer 同一条 |
+| 工作会话失败后又冒出一条新会话 | 走的不是 `resume`（直接 `dispatch` 时账本没绑上） | `foreman orch show` 看 `agentConvId`；用 `foreman resume <执行会话id>`，它只 steer 指定会话 |
 | 编排会话收不到更新 | 工单没绑定 `issues[键].orchestrator`，或 `openNew` 没拿到 convId | `foreman orch show` 看这张单的 orchestrator；空就重新 `foreman hand <owner/name>#N`，让它新建/复用本单编排 |
 | `clean` 说 worktree 保留 | 工作区有未提交改动（不删别人正在写的东西） | 进 worktree 看一眼，commit 或确认无需后重跑 `foreman clean` |
+| 侧边栏堆着一排「工单编排」会话 | 工单收口后这张单自己的编排会话没被归档（`clean` 早先只管工作会话）；已修：`clean` 与服务每轮巡检都会收 | 先看服务在跑（`foreman ping`）；想立刻收就 `foreman clean --all`（只收 `done`/`cleaned` 的单，全局编排与你自己发起的会话不动） |
 | `ws add` 报「没处理过这条工单」 | `--issue` 写法不对（要 `<owner/name>#<单号>`，用首句里的「工单键」） | 照首句抄；账本里确实没有就先 `foreman run --once` 派单 |
 | 验收失败「工作区还有未提交改动」 | 会话没 commit 或留了临时文件 | 验收不在 run 里自动跑；手动发现就让会话补 commit，或进 worktree 看一眼 |
 | 验收失败「分支上没有新提交」 | 会话只看了没改，或改在别的分支 | 同上；进 worktree 手动看一眼，必要时 `foreman retry <仓库> <N>` 放回队列 |
