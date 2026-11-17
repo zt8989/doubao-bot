@@ -34,8 +34,9 @@ const SCHEMA = `
     attempts       INTEGER NOT NULL DEFAULT 0,
     note           TEXT,
     first_seen_at  TEXT NOT NULL,
-    last_seen_at   TEXT NOT NULL,
-    last_update_at TEXT
+    last_seen_at   TEXT NOT NULL,   -- 最后一次被同步看到，每轮都会刷新
+    last_update_at TEXT,
+    last_change_at TEXT             -- 最后一次真实变化（账本 updatedAt），「今日」口径用它
   );
 
   CREATE TABLE IF NOT EXISTS prs (
@@ -50,7 +51,8 @@ const SCHEMA = `
     notified_to    TEXT,
     notified_at    TEXT,
     first_seen_at  TEXT NOT NULL,
-    last_seen_at   TEXT NOT NULL
+    last_seen_at   TEXT NOT NULL,   -- 最后一次被同步看到，每轮都会刷新
+    last_change_at TEXT             -- 最后一次真实变化（新发现/状态或通知变化），「今日」口径用它
   );
 
   CREATE TABLE IF NOT EXISTS polls (
@@ -108,12 +110,21 @@ export class ConsoleStore {
     this.db.exec(SCHEMA)
     // 老库补列：接单派给了哪个会话，统计要靠它。
     try { this.db.exec("ALTER TABLE tasks ADD COLUMN agent TEXT DEFAULT ''") } catch {}
+    // 老库补列：last_seen_at 每轮同步都会刷新，不能当「今天有没有变化」用，
+    // 单独的 last_change_at 只记真实变化（账本 updatedAt / 新发现 / 状态变化）。
+    try { this.db.exec("ALTER TABLE tasks ADD COLUMN last_change_at TEXT") } catch {}
+    try { this.db.exec("ALTER TABLE prs ADD COLUMN last_change_at TEXT") } catch {}
+    // 老库首次补列后回填一次，历史行的真实变化时间就是原来的 last_update_at / first_seen_at。
+    try {
+      this.db.exec("UPDATE tasks SET last_change_at = COALESCE(last_update_at, first_seen_at) WHERE last_change_at IS NULL")
+      this.db.exec("UPDATE prs SET last_change_at = COALESCE(NULLIF(notified_at, ''), first_seen_at) WHERE last_change_at IS NULL")
+    } catch {}
 
     this.q = {
       upsertTask: this.db.prepare(`
         INSERT INTO tasks (key, repo, number, title, url, state, branch, worktree, attempts, note, agent,
-                           first_seen_at, last_seen_at, last_update_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           first_seen_at, last_seen_at, last_update_at, last_change_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(key) DO UPDATE SET
           title          = excluded.title,
           url            = excluded.url,
@@ -124,21 +135,23 @@ export class ConsoleStore {
           note           = excluded.note,
           agent          = excluded.agent,
           last_seen_at   = excluded.last_seen_at,
-          last_update_at = excluded.last_update_at
+          last_update_at = excluded.last_update_at,
+          last_change_at = COALESCE(excluded.last_change_at, tasks.last_change_at)
       `),
       upsertPr: this.db.prepare(`
         INSERT INTO prs (key, repo, number, title, author, url, skipped, state,
-                         notified_to, notified_at, first_seen_at, last_seen_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         notified_to, notified_at, first_seen_at, last_seen_at, last_change_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(key) DO UPDATE SET
-          title        = excluded.title,
-          author       = excluded.author,
-          url          = excluded.url,
-          skipped      = excluded.skipped,
-          state        = excluded.state,
-          notified_to  = excluded.notified_to,
-          notified_at  = excluded.notified_at,
-          last_seen_at = excluded.last_seen_at
+          title          = excluded.title,
+          author         = excluded.author,
+          url            = excluded.url,
+          skipped        = excluded.skipped,
+          state          = excluded.state,
+          notified_to    = excluded.notified_to,
+          notified_at    = excluded.notified_at,
+          last_seen_at   = excluded.last_seen_at,
+          last_change_at = COALESCE(excluded.last_change_at, prs.last_change_at)
       `),
       insertPoll: this.db.prepare(`
         INSERT INTO polls (at, tasks, prs, new_tasks, new_prs, pending) VALUES (?, ?, ?, ?, ?, ?)
@@ -147,8 +160,8 @@ export class ConsoleStore {
       countPrs: this.db.prepare("SELECT COUNT(*) AS c FROM prs"),
       countPolls: this.db.prepare("SELECT COUNT(*) AS c FROM polls"),
       countPending: this.db.prepare("SELECT COUNT(*) AS c FROM prs WHERE state = 'pending'"),
-      allTasks: this.db.prepare("SELECT * FROM tasks ORDER BY last_seen_at DESC"),
-      allPrs: this.db.prepare("SELECT * FROM prs ORDER BY last_seen_at DESC"),
+      allTasks: this.db.prepare("SELECT * FROM tasks ORDER BY COALESCE(last_change_at, last_update_at) DESC, number DESC"),
+      allPrs: this.db.prepare("SELECT * FROM prs ORDER BY COALESCE(last_change_at, first_seen_at) DESC, number DESC"),
       recentPolls: this.db.prepare(
         "SELECT id, at, tasks, prs, new_tasks, new_prs, pending FROM polls ORDER BY id DESC LIMIT 10"
       ),
@@ -275,6 +288,12 @@ export class ConsoleStore {
           })
         }
       }
+      // 真实变化时间：账本有 updatedAt 就用它；账本没给但状态变了、或是新单，才用本轮时间。
+      // 都没变就传 null，交给 upsert 的 COALESCE 保留旧值——这样「今日」不会被每轮同步刷成今天。
+      const changed = prev
+        ? String(prev.state || "") !== String(it.state || "") || Number(it.attempts) > Number(prev.attempts || 0)
+        : true
+      const changeAt = it.updatedAt || (changed ? at : null)
       this.q.upsertTask.run(
         key,
         repo,
@@ -289,7 +308,8 @@ export class ConsoleStore {
         it.agent || "",
         it.updatedAt || at,
         at,
-        it.updatedAt || at
+        it.updatedAt || at,
+        changeAt
       )
     }
 
@@ -312,6 +332,10 @@ export class ConsoleStore {
           detail: p.skipped ? `跳过：${p.skipped}` : p.notifiedTo ? `已通知 ${p.notifiedTo}` : "",
         })
       }
+      // 同任务口径：新 PR、状态变了、或刚发过通知才算变化，其余保留旧值。
+      const prChangeAt = !prev || String(prev.state || "") !== state
+        ? (p.notifiedAt || at)
+        : (String(prev.notified_at || "") !== String(p.notifiedAt || "") ? (p.notifiedAt || at) : null)
       this.q.upsertPr.run(
         key,
         p.repo || repo,
@@ -324,7 +348,8 @@ export class ConsoleStore {
         p.notifiedTo || "",
         p.notifiedAt || "",
         p.seenAt || at,
-        at
+        at,
+        prChangeAt
       )
     }
 
@@ -429,8 +454,9 @@ export class ConsoleStore {
   recordPoll(sync = {}) {
     const now = new Date()
     const today = localDay(now)
-    const tasks = this.q.allTasks.all().filter((r) => localDay(r.last_seen_at) === today)
-    const prs = this.q.allPrs.all().filter((r) => localDay(r.last_seen_at) === today)
+    // 当天口径 = 当天真实有变化（last_change_at），不是「这轮同步看到过」（last_seen_at）。
+    const tasks = this.q.allTasks.all().filter((r) => localDay(r.last_change_at || r.last_update_at) === today)
+    const prs = this.q.allPrs.all().filter((r) => localDay(r.last_change_at || r.first_seen_at) === today)
     const pending = prs.filter((r) => r.state === "pending").length
 
     this.q.insertPoll.run(
@@ -454,7 +480,8 @@ export class ConsoleStore {
     const allTasks = this.q.allTasks.all()
     const allPrs = this.q.allPrs.all()
 
-    // 看今天：仍按 last_seen_at 取「当天有更新」的行，跟实时同步一致。
+    // 看今天：按 last_change_at 取「当天真实有变化」的行——不能用 last_seen_at，
+    // 那个字段每轮同步都会被刷成当前时间，会把账本里所有历史单都算进今天。
     // 回看某天：状态从事件流水回放到那天结束，列表只列「那天新建或有过变化」的条目。
     const stateAt = new Map()
     const touchedAt = new Map()
@@ -463,8 +490,8 @@ export class ConsoleStore {
     let taskRows
     let prRows
     if (isToday) {
-      taskRows = allTasks.filter((r) => localDay(r.last_seen_at) === today)
-      prRows = allPrs.filter((r) => localDay(r.last_seen_at) === today)
+      taskRows = allTasks.filter((r) => localDay(r.last_change_at || r.last_update_at) === today)
+      prRows = allPrs.filter((r) => localDay(r.last_change_at || r.first_seen_at) === today)
     } else {
       for (const e of this.q.eventsUpToDay.all(target)) {
         if (e.to_state) stateAt.set(e.key, e.to_state)
@@ -489,7 +516,7 @@ export class ConsoleStore {
     const tasks = taskRows.map((r) => {
       const past = pastOf(r)
       const state = past ? past.state : r.state
-      const updatedAt = past ? past.at : r.last_update_at
+      const updatedAt = past ? past.at : (r.last_change_at || r.last_update_at)
       return {
         key: r.key,
         repo: r.repo,

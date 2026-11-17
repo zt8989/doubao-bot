@@ -83,3 +83,27 @@ test("polls 记录每轮扫描，且条数随轮次增长", () => {
   assert.equal(snap.recentPolls[0].newTasks, 0, "第二轮没有新增")
   store.close()
 })
+
+test("今日口径按真实变化时间：账本没变的老单不会因为同步被算进今天", () => {
+  const store = tmpStore()
+  const old = new Date(Date.now() - 3 * 86400000).toISOString()
+  const book = { issues: { "a/b#1": { title: "老单", state: "done", updatedAt: old } }, prSeen: {} }
+
+  store.sync(book)
+  store.sync(book) // 再同步一轮，last_seen_at 会刷新，但 last_change_at 不能动
+  const snap = store.snapshot({ book, cfg: {}, pr: {} })
+  assert.equal(snap.tasks.length, 0, "三天前的单不该出现在今天")
+  assert.equal(snap.storage.rows.tasks, 1, "库里仍然留着它，只是不算今天")
+  assert.equal(snap.stats.historyTasks, 1)
+
+  store.recordPoll(store.sync(book))
+  assert.equal(store.snapshot({ book, cfg: {}, pr: {} }).recentPolls[0].tasks, 0, "轮询口径同样不算老单")
+
+  const now = new Date().toISOString()
+  const book2 = { issues: { ...book.issues, "a/b#2": { title: "新单", state: "working", updatedAt: now } }, prSeen: {} }
+  store.sync(book2)
+  const snap2 = store.snapshot({ book: book2, cfg: {}, pr: {} })
+  assert.equal(snap2.tasks.length, 1, "今天新派的单要出现，且只有它")
+  assert.equal(snap2.tasks[0].key, "a/b#2")
+  store.close()
+})
