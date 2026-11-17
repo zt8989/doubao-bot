@@ -4,7 +4,7 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { mergeDecision, startServer, runMergeTask } from "../src/service.mjs"
+import { mergeDecision, startServer, runMergeTask, completeIssue } from "../src/service.mjs"
 import { Book } from "../src/book.mjs"
 
 function tmpDir() {
@@ -219,6 +219,98 @@ test("runMergeTask：没传 --issue 时按 PR 反查工单，close 节点照样�
     assert.equal(calls[0].workflow, "own", "账本里有派活痕迹，按自有工单收尾")
     assert.ok(out.notes.some((n) => n.includes("#121")))
   } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("completeIssue：远端已合并时不重复合并，复用 afterMerge 收尾", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = mkCfg(dir)
+    const book = new Book(cfg.stateFile)
+    book.setIssue("demo/demo#9", { state: "pr-open", pr: 12, branch: "fix/issue-9", worktree: "/tmp/wt-9" })
+    book.setWatch({ target: "conv-work", name: "conv-work", issueKey: "demo/demo#9", repo: "demo/demo", number: 9 })
+    let merges = 0
+    const after = []
+    const engine = {
+      paused: () => false,
+      setPaused: () => {},
+      emit: async () => {},
+      issueKeyForPr: () => "demo/demo#9",
+      afterMerge: async ({ watcher, workflow }) => {
+        after.push({ issueKey: watcher.issueKey, workflow })
+        new Book(cfg.stateFile).setIssue("demo/demo#9", { state: "done" })
+        return { nodes: ["close", "cleanup", "archive"], notes: ["已收尾"] }
+      },
+    }
+    const gitea = {
+      viewPr: async () => ({ state: "merged" }),
+      mergePr: async () => { merges++ },
+      closeIssue: async () => {},
+    }
+    const out = await completeIssue({ cfg, gitea, engine, dws: mkDws([], []), log: () => {} }, { repo: "demo/demo", number: 9 })
+    assert.equal(out.ok, true)
+    assert.equal(out.completed, true)
+    assert.equal(merges, 0, "手动完成不能再发合并请求")
+    assert.deepEqual(after, [{ issueKey: "demo/demo#9", workflow: "own" }])
+    assert.equal(new Book(cfg.stateFile).issue("demo/demo#9").state, "done")
+    assert.equal(new Book(cfg.stateFile).watch.some((w) => w.issueKey === "demo/demo#9"), false, "手动完成要摘掉该单监听")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("completeIssue：开放 PR 拒绝完成，也不触发合并或收尾", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = mkCfg(dir)
+    new Book(cfg.stateFile).setIssue("demo/demo#9", { state: "pr-open", pr: 12 })
+    let merges = 0
+    let afterMerges = 0
+    const out = await completeIssue({
+      cfg,
+      gitea: { viewPr: async () => ({ state: "open" }), mergePr: async () => { merges++ } },
+      engine: { afterMerge: async () => { afterMerges++ } },
+      log: () => {},
+    }, { repo: "demo/demo", number: 9 })
+    assert.equal(out.ok, false)
+    assert.equal(out.error, "pr-not-merged")
+    assert.equal(out.state, "open")
+    assert.equal(merges, 0)
+    assert.equal(afterMerges, 0)
+    assert.equal(new Book(cfg.stateFile).issue("demo/demo#9").state, "pr-open")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("POST /api/complete：开放 PR 返回 409，不改变账本", async () => {
+  const dir = tmpDir()
+  let server
+  try {
+    const cfg = mkCfg(dir)
+    new Book(cfg.stateFile).setIssue("demo/demo#9", { state: "pr-open", pr: 12 })
+    let merges = 0
+    const gitea = {
+      listPulls: async () => [],
+      viewPr: async () => ({ state: "open" }),
+      mergePr: async () => { merges++ },
+      closeIssue: async () => {},
+    }
+    server = await startServer({ cfg, dws: mkDws([], []), gitea, log: () => {} })
+    const res = await fetch(`http://127.0.0.1:${server.port}/api/complete`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repo: "demo/demo", number: 9 }),
+    })
+    const body = await res.json()
+    assert.equal(res.status, 409)
+    assert.equal(body.ok, false)
+    assert.equal(body.error, "pr-not-merged")
+    assert.equal(merges, 0)
+    assert.equal(new Book(cfg.stateFile).issue("demo/demo#9").state, "pr-open")
+  } finally {
+    if (server) await server.close()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })

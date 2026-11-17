@@ -162,6 +162,23 @@ export function startConsoleHttp({ store, ctx, dir, host = "127.0.0.1", port = 7
         })
       }
 
+      if (pathname === "/api/complete") {
+        // 手动完成：只补“远端已合并、账本未收尾”，是否允许由服务层核对 PR 状态。
+        if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
+        if (!onRpc) return sendJson(res, 501, { ok: false, error: "rpc_not_enabled" })
+        let body
+        try {
+          body = await readBody(req)
+        } catch (e) {
+          return sendJson(res, 400, { ok: false, error: e.code || "bad_request", message: e.message })
+        }
+        const repo = String(body.repo ?? "").trim()
+        const number = Number(body.number ?? 0)
+        if (!repo || !number) return sendJson(res, 400, { ok: false, error: "bad-request", message: "需要 repo / number" })
+        const r = await onRpc({ id: `http-${Date.now()}`, cmd: "issue complete", repo, number })
+        return sendJson(res, r?.ok === false ? 409 : 200, r)
+      }
+
       if (pathname === "/api/workflow") {
         // 首页「分配任务」用：两条 workflow 的定义、节点（含暂停状态与累计执行次数）、在跑实例。
         if (!onRpc) return sendJson(res, 501, { ok: false, error: "rpc_not_enabled" })
@@ -181,7 +198,11 @@ export function startConsoleHttp({ store, ctx, dir, host = "127.0.0.1", port = 7
       }
 
       if (pathname === "/api/schedules") {
-        if (req.method === "GET") return sendJson(res, 200, { ok: true, schedules: ctx.schedules?.() ?? [] })
+        const workHours = () => ctx.workHours?.() ?? {
+          start: String(ctx.cfg?.workHours?.start ?? "08:30"),
+          end: String(ctx.cfg?.workHours?.end ?? "18:30"),
+        }
+        if (req.method === "GET") return sendJson(res, 200, { ok: true, schedules: ctx.schedules?.() ?? [], workHours: workHours() })
         if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
         if (typeof ctx.applySchedules !== "function") return sendJson(res, 501, { ok: false, error: "schedules_not_supported" })
         let body
@@ -193,7 +214,7 @@ export function startConsoleHttp({ store, ctx, dir, host = "127.0.0.1", port = 7
         const patch = body?.patch ?? body ?? {}
         try {
           const schedules = ctx.applySchedules(patch)
-          return sendJson(res, 200, { ok: true, schedules })
+          return sendJson(res, 200, { ok: true, schedules, workHours: workHours() })
         } catch (e) {
           return sendJson(res, 400, { ok: false, error: "bad_patch", message: e.message })
         }

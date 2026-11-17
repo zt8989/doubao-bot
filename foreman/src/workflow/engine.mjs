@@ -132,10 +132,6 @@ export class WorkflowEngine {
       return out
     }
 
-    // 先取「跑过哪些节点」再去发 pr.merged：这一发会把 run 的 stageAt 补成只有 merge，
-    // 之后的节点自清就认不出前置节点了。
-    const reached = this.lifecycle.stagesReached(wf, issueKey)
-
     // merge 节点：合并事实落账（mergeAsk / 合并队列），然后落 pr.merged。
     await run("merge")
     await this.emit(EVENTS.merge, {
@@ -153,11 +149,11 @@ export class WorkflowEngine {
     await run("close")
     await this.emit(EVENTS.close, { issueKey, key, pr, issue: issueNo, target: watcher?.target, workflow: wf })
 
-    // 合并前跑过的节点按逆序自清：pr-open（PR 记成 merged）→ dispatch（摘监听）→ workspace（删工作区）。
-    // 只清真的跑过的节点；流程实例丢了（服务重启）时按 own 的完整前置节点兜底。
+    // 合并后按账本自清：pr-open（PR 记成 merged）→ dispatch（摘监听）→ workspace（删工作区）。
+    // 清理器都幂等，不能按旧流程实例的 reached 阶段过滤：服务重启后实例常只恢复到 pr-open，
+    // 若因此跳过 workspace，就会留下 herdr workspace 与 git worktree。
     const pre = wf === "review" ? [] : ["workspace", "dispatch", "pr-open"]
     for (const stage of [...pre].reverse()) {
-      if (reached.length && !reached.includes(stage)) continue
       const op = stage === "workspace"
         ? startOperation(this, "cleanup", `清理工作区 ${issueKey || key}`, {
           key: issueKey || key,

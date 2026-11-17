@@ -43,6 +43,8 @@ test("readFixedPrompt：配置没给路径就用内置提示词；给了路径�
     assert.match(readFixedPrompt({}), /派单会话提示词/)
     assert.match(readFixedPrompt({}), /判合并/)
     assert.match(readFixedPrompt({}, "", { lane: "merge" }), /合并助手/)
+    assert.match(readFixedPrompt({}, "", { lane: "merge" }), /禁止顶层数组/)
+    assert.match(readFixedPrompt({}, "", { lane: "merge" }), /`items` 数组/)
     const missing = path.join(dir, "nope.md")
     assert.throws(() => readFixedPrompt({ deliver: { promptFile: missing } }), /读不到固定提示词/)
     const empty = path.join(dir, "empty.md")

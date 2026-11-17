@@ -41,12 +41,12 @@ export function kickoff({ repo, issue, worktree, branch, base, workspaces, faile
       : `改完必须自己跑相关测试；跑不了就在 tests 里写清原因，不要假装跑过。`,
   ]
   const lines = [
-    `【工作会话 · ${repo} #${issue.number} · 第 ${attempt} 次】`,
+    `【工作会话 · ${key} · 第 ${attempt} 次】`,
+    `工单键：${key}`,
+    `工单链接：${issue.url || "（未提供）"}`,
     ``,
     `工单：#${issue.number} ${issue.title}`,
   ]
-  if (issue.url) lines.push(`工单链接：${issue.url}`)
-  lines.push(`工单键：${key}`)
   lines.push(
     ``,
     `工单正文：`,
@@ -233,10 +233,10 @@ export function parseResult(text) {
   const block = lastResultBlock(raw)
   if (block) {
     const parsed = tryJson(block)
-    if (parsed) return normalize(parsed, raw, block)
+    if (parsed) return normalizeParsed(parsed, raw, block)
   }
   const loose = tryJson(raw)
-  if (loose && loose.status) return normalize(loose, raw, JSON.stringify(loose))
+  if (loose && (Array.isArray(loose) || loose.status)) return normalizeParsed(loose, raw, JSON.stringify(loose))
   return { status: "none", raw, text: raw.trim() }
 }
 
@@ -252,14 +252,35 @@ function tryJson(s) {
   let t = String(s).trim()
   const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i)
   if (fence) t = fence[1].trim()
-  const start = t.indexOf("{")
-  const end = t.lastIndexOf("}")
-  if (start < 0 || end < start) return null
+  const objectAt = t.indexOf("{")
+  const arrayAt = t.indexOf("[")
+  const start = objectAt < 0 ? arrayAt : arrayAt < 0 ? objectAt : Math.min(objectAt, arrayAt)
+  if (start < 0) return null
+  const end = t.lastIndexOf(t[start] === "[" ? "]" : "}")
+  if (end < start) return null
   try {
     return JSON.parse(t.slice(start, end + 1))
   } catch {
     return null
   }
+}
+
+// 合并助手旧提示词没有写清多条 PR 的格式，可能直接交顶层数组。
+// 新提示词统一用 { items: [...] }；这里兼容旧结果，避免已完成的判断卡死、永远不触发自动合并。
+function normalizeParsed(parsed, raw, block) {
+  if (!Array.isArray(parsed)) return normalize(parsed, raw, block)
+  const rows = parsed.filter((it) => it && typeof it === "object" && !Array.isArray(it))
+  if (!rows.length) return { status: "none", raw, text: raw.trim() }
+  const items = rows.map(normalizeItem).filter((it) => it.repo || it.pr)
+  const status = rows.every((it) => String(it.status ?? "").trim() === "done")
+    ? "done"
+    : String(rows.find((it) => String(it.status ?? "").trim() !== "done")?.status ?? "failed")
+  const mergeable = items.some((it) => it.mergeable === true) ? true
+    : items.some((it) => it.mergeable === false) ? false : null
+  const summary = rows.map((it) => String(it.summary ?? "").trim()).filter(Boolean).join("；")
+  const tests = rows.map((it) => String(it.tests ?? "").trim()).filter(Boolean).join("；")
+  const question = rows.map((it) => String(it.question ?? "").trim()).find(Boolean) ?? ""
+  return normalize({ status, mergeable, items: rows, summary, tests, question }, raw, block)
 }
 
 function normalize(o, raw, block) {

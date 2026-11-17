@@ -109,6 +109,24 @@ export function listSchedules(cfg, state = {}) {
   ]
 }
 
+function clockMinutes(value, label) {
+  const text = String(value ?? "").trim()
+  const m = /^(\d{2}):(\d{2})$/.exec(text)
+  const hours = Number(m?.[1])
+  const minutes = Number(m?.[2])
+  if (!m || hours > 23 || minutes > 59) throw new Error(`${label}必须是有效的 HH:mm 时间`)
+  return hours * 60 + minutes
+}
+
+function normalizeWorkHours(value, cfg) {
+  const start = String(value.start ?? cfg.workHours?.start ?? "08:30").trim()
+  const end = String(value.end ?? cfg.workHours?.end ?? "18:30").trim()
+  const startAt = clockMinutes(start, "开始时间")
+  const endAt = clockMinutes(end, "结束时间")
+  if (startAt >= endAt) throw new Error("开始时间必须早于结束时间")
+  return { start, end }
+}
+
 /**
  * 改开关与 cron：只动内存里的 cfg，返回新状态。
  * patch 每项可以是布尔（纯开关），也可以是对象：
@@ -139,8 +157,9 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
       if ("cron" in next) cfg.prWatch.cron = next.cron
     } else if (id === "planner") {
       if ("enabled" in next) cfg.planner = { ...(cfg.planner ?? {}), enabled: next.enabled }
-    } else if (id === "workHours" && "enabled" in next) {
-      cfg.workHours = { ...(cfg.workHours ?? {}), offUntil: next.enabled ? "" : localIso(nextWorkdayStart(cfg, at)) }
+    } else if (id === "workHours") {
+      if ("start" in obj || "end" in obj) cfg.workHours = { ...(cfg.workHours ?? {}), ...normalizeWorkHours(obj, cfg) }
+      if ("enabled" in next) cfg.workHours = { ...(cfg.workHours ?? {}), offUntil: next.enabled ? "" : localIso(nextWorkdayStart(cfg, at)) }
     }
   }
   return listSchedules(cfg)
@@ -162,6 +181,7 @@ export function persistSchedules(file, patch = {}, cfg = {}) {
     const obj = value && typeof value === "object" ? value : { enabled: value === true || value === "true" }
     const section = { ...(raw[id] ?? {}) }
     if (id === "workHours") {
+      if ("start" in obj || "end" in obj) Object.assign(section, normalizeWorkHours(obj, cfg))
       if ("enabled" in obj) section.offUntil = String(cfg?.workHours?.offUntil ?? "")
     } else {
       if ("enabled" in obj) section[FLAG_KEY[id]] = obj.enabled === true || obj.enabled === "true"

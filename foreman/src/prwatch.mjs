@@ -1,5 +1,5 @@
-// PR 监听：定时扫配置里各仓库的 open PR，作者不是自己（pickup.me / prWatch.ignoreAuthors）的单**通知编排 agent 去合并**
-// （监听只看得到 PR，看不到关联工单，合并必须由能核对工单的编排做）。去重记在账本 prWatch 键下。
+// PR 监听：定时扫配置里各仓库的 open PR，作者不是自己（pickup.me / prWatch.ignoreAuthors）的单**通知合并助手核对**
+// （监听只看得到 PR，看不到关联工单；助手交回可合结论后由 foreman 自动合并）。去重记在账本 prWatch 键下。
 import { nowIso } from "./util.mjs"
 import { Book } from "./book.mjs"
 
@@ -69,18 +69,18 @@ export async function mergeFailureReason({ gitea, repo, pr, error } = {}) {
   return reason.slice(0, 300)
 }
 
-// 通知正文：一条消息列清楚每条待合并 PR，并给出「核对工单后合并」的入口。
+// 通知正文：列清楚每条待合并 PR；合并助手交回结论后，可合的由 foreman 自动合并。
 export function prNotifyText(prs = []) {
-  const lines = [`【foreman】别人家的 PR ${prs.length} 条，等你核对工单后合并`]
+  const lines = [`【foreman】别人家的 PR ${prs.length} 条，核对后可合的会自动合并`]
   for (const pr of prs) {
     lines.push("")
     lines.push(`· ${pr.repo}#${pr.number} ${pr.title ?? ""}`.trim())
     lines.push(`  作者：${pr.author || "未知"}`)
     if (pr.url) lines.push(`  链接：${pr.url}`)
-    lines.push(`  合并：foreman pr merge ${pr.number} --repo ${pr.repo}`)
+    lines.push(`  人工兜底：foreman pr merge ${pr.number} --repo ${pr.repo}`)
   }
   lines.push("")
-  lines.push("先核对 PR 关联的工单与改动，再执行上面的合并；合不了 foreman 会回理由。")
+  lines.push("先核对 PR 关联的工单与改动，再按合并提示词输出 RESULT；可合的由 foreman 自动合并，不要在合并会话里直接执行上面的人工兜底命令。")
   return lines.join("\n")
 }
 
@@ -95,7 +95,7 @@ export function isConflicting(view) {
   return false
 }
 
-// 跑一轮 PR 扫描：列 open PR → 过滤作者 → 账本去重 → 查冲突（冲突的过滤掉）→ 交给编排 agent 去合并。
+// 跑一轮 PR 扫描：列 open PR → 过滤作者 → 账本去重 → 查冲突（冲突的过滤掉）→ 交给合并助手核对。
 // push 给了就 steer 进唯一编排会话（会话中心，默认）；deliver 给了才每次新建一条会话；
 // 都没有就塞回 target 那条已有会话。只有发成功才记账；发送失败下一轮重试。
 export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: overrideTarget, deliver = null, push = null }) {

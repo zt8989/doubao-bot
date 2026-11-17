@@ -88,6 +88,25 @@ test("applySchedules：workHours 的开关是临时闭嘴，恢复后清空 offU
   assert.equal(listSchedules(cfg).find((r) => r.id === "workHours").enabled, true)
 })
 
+test("工作时间：开始与结束可自由设置、校验并持久化，其他配置保持不变", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-work-hours-"))
+  const file = path.join(dir, "config.json")
+  fs.writeFileSync(file, JSON.stringify({ pickup: { auto: true, me: "233151" }, workHours: { start: "08:30", end: "17:30", days: [1, 2, 3, 4, 5] } }))
+  const cfg = baseCfg()
+  applySchedules(cfg, { workHours: { start: "07:45", end: "20:30" } })
+  assert.equal(cfg.workHours.start, "07:45")
+  assert.equal(cfg.workHours.end, "20:30")
+  assert.deepEqual(cfg.workHours.days, [1, 2, 3, 4, 5])
+  persistSchedules(file, { workHours: { start: "07:45", end: "20:30" } }, cfg)
+  const raw = JSON.parse(fs.readFileSync(file, "utf8"))
+  assert.equal(raw.workHours.start, "07:45")
+  assert.equal(raw.workHours.end, "20:30")
+  assert.equal(raw.pickup.me, "233151")
+  assert.throws(() => applySchedules(cfg, { workHours: { start: "25:00", end: "20:30" } }), /有效的 HH:mm/)
+  assert.throws(() => applySchedules(cfg, { workHours: { start: "20:30", end: "08:30" } }), /早于结束时间/)
+  assert.equal(cfg.workHours.start, "07:45", "非法时间不能污染内存配置")
+})
+
 test("nextWorkdayStart：跳过周末，落在工作时段起点", () => {
   // 2026-11-13 是周五 19:00（窗口之后），下一个开始应是周一 08:30
   const at = new Date(2026, 10, 13, 19, 0, 0)
@@ -149,6 +168,7 @@ test("HTTP：/api/schedules 读写开关，/api/pickup 立刻跑一轮", async (
   let dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-http-"))
   const ctx = {
     schedules: () => listSchedules(cfg),
+    workHours: () => ({ start: cfg.workHours.start, end: cfg.workHours.end }),
     applySchedules: (patch) => {
       calls.patches.push(patch)
       return applySchedules(cfg, patch)
@@ -165,6 +185,7 @@ test("HTTP：/api/schedules 读写开关，/api/pickup 立刻跑一轮", async (
     const list = await (await fetch(`${base}/api/schedules`)).json()
     assert.equal(list.ok, true)
     assert.equal(list.schedules.find((s) => s.id === "pickup").enabled, false)
+    assert.deepEqual(list.workHours, { start: "08:30", end: "17:30" })
 
     const set = await (
       await fetch(`${base}/api/schedules`, {
@@ -176,6 +197,25 @@ test("HTTP：/api/schedules 读写开关，/api/pickup 立刻跑一轮", async (
     assert.equal(set.ok, true)
     assert.equal(set.schedules.find((s) => s.id === "pickup").enabled, true)
     assert.deepEqual(calls.patches, [{ pickup: true }])
+
+    const hours = await (
+      await fetch(`${base}/api/schedules`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ patch: { workHours: { start: "08:00", end: "20:30" } } }),
+      })
+    ).json()
+    assert.equal(hours.ok, true)
+    assert.deepEqual(hours.workHours, { start: "08:00", end: "20:30" })
+    assert.equal(hours.schedules.find((s) => s.id === "workHours").detail.includes("08:00–20:30"), true)
+
+    const invalid = await fetch(`${base}/api/schedules`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ patch: { workHours: { start: "21:00", end: "08:00" } } }),
+    })
+    assert.equal(invalid.status, 400)
+    assert.match((await invalid.json()).message, /早于结束时间/)
 
     const run = await (await fetch(`${base}/api/pickup`, { method: "POST" })).json()
     assert.equal(run.ok, true)

@@ -192,10 +192,19 @@ export async function runRound(ctx) {
   return handled
 }
 
+// 编排的分析与任务拆分必须随派单首句一起进编码会话，不能派完后才补 steer。
+// 续跑同一条会话时也拼进同一条消息；标准提示词里的工作区与交付边界仍然优先。
+function withDispatchPrompt(text, extra = "") {
+  const instruction = String(extra ?? "").trim()
+  if (!instruction) return text
+  return `${String(text ?? "").trim()}\n\n---\n\n编排智能体补充指令（本次派单，仍需遵守上述工作区与交付边界）：\n${instruction}`
+}
+
 // 派活：读工单 → 建/复用 worktree → 记账 working → dws.open/send 派出去 → 记账会话 → 登记监听。
 // 返回 { repo, number, state:"dispatched", branch, convId }。不 waitFinished、不 info、不验收、不 PR。
 export async function handleIssue(ctx, repoCfg, summary) {
   const { cfg, dws, log } = ctx
+  const dispatchPrompt = String(ctx.dispatchPrompt ?? "").trim()
   // 账本兜底：自动接单那一路（pickup/run）的 ctx 自带 book，服务里 `foreman dispatch` 那条 RPC
   // 用的是服务级 ctx（只有 state/cfg/dws/engine），不带 book——不兜底就会在 book.issue 上崩
   // （Cannot read properties of undefined (reading 'issue')）。
@@ -224,7 +233,7 @@ export async function handleIssue(ctx, repoCfg, summary) {
       const b = ws?.branch || issueBranch(issue, issue.title)
       return { repo: r.repo, name: r.name, branch: b, base: r.base, worktree: workspacePath(cfg.worktreeDir, r, b) }
     })
-    const prompt = ctx.decision
+    const basePrompt = ctx.decision
       ? decisionKickoff({ repo: repoCfg.repo, issue, base: repoCfg.base, workspaces: plan, labels: issue.labels ?? [], attempt: (prev.attempts ?? 0) + 1 })
       : kickoff({
           repo: repoCfg.repo,
@@ -234,6 +243,7 @@ export async function handleIssue(ctx, repoCfg, summary) {
           attempt: (prev.attempts ?? 0) + 1,
           lastFailure: prev.lastFailure ?? "",
         })
+    const prompt = withDispatchPrompt(basePrompt, dispatchPrompt)
     log(
       `[dry-run] ${key}\n  工程 ${plan.length} 个：${plan.map((w) => `${w.repo} → ${w.worktree}（${w.branch}）`).join("；")}\n  会话：${name}\n  首句：\n${prompt}`
     )
@@ -317,9 +327,12 @@ export async function handleIssue(ctx, repoCfg, summary) {
   const agentName = bound.name || name
   const boundTarget = bound.convId || bound.name || book.session(name)?.convId || ""
   let convId = bound.convId || book.session(name)?.convId || ""
-  const resumeText = resume({ issue, attempt, base: repoCfg.base, failure: prev.lastFailure ?? "", repo: repoCfg.repo, workspaces })
+  const resumeText = withDispatchPrompt(
+    resume({ issue, attempt, base: repoCfg.base, failure: prev.lastFailure ?? "", repo: repoCfg.repo, workspaces }),
+    dispatchPrompt,
+  )
   // 决策单首句：走另一套提示词，让 agent 自己判断要不要做、缺什么信息。
-  const kickoffText = decision
+  const baseKickoff = decision
     ? decisionKickoff({ repo: repoCfg.repo, issue, base: repoCfg.base, workspaces, labels: issue.labels ?? [], attempt })
     : kickoff({
         repo: repoCfg.repo,
@@ -330,6 +343,7 @@ export async function handleIssue(ctx, repoCfg, summary) {
         attempt,
         lastFailure: prev.lastFailure ?? "",
       })
+  const kickoffText = withDispatchPrompt(baseKickoff, dispatchPrompt)
   try {
     if (boundTarget) {
       // 决策单续跑也发决策提示词：上一次的「继续改」口径会把 agent 又推回去直接写代码。
@@ -341,6 +355,8 @@ export async function handleIssue(ctx, repoCfg, summary) {
         log(`${key}：续会话 ${agentName}（attempt ${attempt}）`)
         await dws.send(agentName, again)
       }
+      book.clearIdle(boundTarget)
+      book.clearGone(boundTarget)
     } else if (flowOn && typeof dws.openNew === "function") {
       log(`${key}：开工作会话 ${agentName}（attempt ${attempt}，只确认送达）`)
       const opened = await dws.openNew({

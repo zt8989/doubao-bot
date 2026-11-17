@@ -239,6 +239,6 @@ test("手动接单：普通工单仍走标准派单提示词", async () => {
   const r = await pickIssue(ctx, { repo: repoCfg.repo, number: 32 })
   assert.equal(r.ok, true)
   assert.equal(r.decision, false)
-  assert.match(r.prompt, /工作会话 · yyzl\/win-ai-harness #32/)
+  assert.match(r.prompt, /工作会话 · yyzl\/win-ai-harness#32/)
   assert.doesNotMatch(r.prompt, /决策会话/)
 })

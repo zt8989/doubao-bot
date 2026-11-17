@@ -177,6 +177,47 @@ test("engine.afterMerge：每个节点只清自己的产物，事件按 merge→
   }
 })
 
+test("engine.afterMerge：重启只恢复到 pr-open 也必须清 herdr 与 git 工作区", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-nodes-"))
+  const file = path.join(dir, "state.json")
+  const book = new Book(file)
+  book.setIssue("demo/demo#9", {
+    state: "pr-open", pr: 12, branch: "fix/issue-9", worktree: "/wt/fix-issue-9",
+    workspaces: [{ repo: "demo/demo", branch: "fix/issue-9", worktree: "/wt/fix-issue-9", backend: "herdr" }],
+  })
+  const cleanups = []
+  const driver = fakeDriver()
+  const engine = new WorkflowEngine({
+    cfg: { stateFile: file, repos: [{ repo: "demo/demo", dir: "/w/demo" }] },
+    session: new DoubaoSessionAdapter({ driver, cfg: {} }),
+    tracker: { closeIssue: async () => {}, editLabels: async () => ({}), on: async () => {} },
+    workspace: {
+      cleanup: async (args) => {
+        cleanups.push(args)
+        return { notes: ["herdr 工作区已关闭", "worktree 已删除"] }
+      },
+      on: async () => {},
+    },
+    log: () => {},
+  })
+  try {
+    // 模拟服务重启：restore 只按当前账本恢复出 pr-open，没有 workspace.ready 的历史。
+    engine.restore(book)
+    const out = await engine.afterMerge({
+      watcher: { target: "conv-work", issueKey: "demo/demo#9" },
+      merge: { key: "demo/demo#12", repo: "demo/demo", pr: 12, issueNumber: 9 },
+      book,
+      workflow: "own",
+    })
+    assert.deepEqual(cleanups, [{ repoDir: "/w/demo", worktree: "/wt/fix-issue-9", branch: "fix/issue-9" }])
+    assert.ok(out.nodes.includes("workspace"), "旧实例缺 workspace 阶段也不能跳过自动清理")
+    assert.ok(out.notes.some((n) => n.includes("herdr 工作区已关闭")))
+    assert.ok(out.notes.some((n) => n.includes("worktree 已删除")))
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("engine.afterMerge：没有 worktree 记录时 workspace 节点跳过，其它节点照常", async () => {
   const driver = fakeDriver()
   const closed = []

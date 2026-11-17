@@ -80,7 +80,7 @@ export const DEFAULTS = {
     events: ["done", "pr-open", "needs-human", "blocked", "escalated", "failed"],
   },
   // PR 监听：每 intervalSeconds 扫一遍各仓库 open PR，过滤自己的 PR 与冲突 PR。
-  // deliver.mode=new 时每轮新建合并会话并附 PR 链接，由它核对后合并；existing 才通知已有会话。
+  // deliver.mode=new 时每轮新建合并会话并附 PR 链接，由它核对并交 RESULT，可合的由 foreman 自动合并；existing 才通知已有会话。
   prWatch: {
     enabled: true,
     intervalSeconds: 300,

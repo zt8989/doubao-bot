@@ -1,14 +1,18 @@
 // Gitea 工单/PR 适配器：workflow 只通过它读写工单与 PR。
 // 换 Jira / GitLab 时照这个形状再写一个即可。
-import { listPulls, listIssues, viewIssue, mergePr, closeIssue, createPr, commentIssue, editLabels } from "../../gitea.mjs"
+import { listPulls, listIssues, viewIssue, viewPr, mergePr, closeIssue, createPr, commentIssue, editLabels } from "../../gitea.mjs"
 
 export class GiteaTrackerAdapter {
   constructor({ impl = {} } = {}) {
-    this.impl = { listPulls, listIssues, viewIssue, mergePr, closeIssue, createPr, commentIssue, editLabels, ...impl }
+    this.impl = { listPulls, listIssues, viewIssue, viewPr, mergePr, closeIssue, createPr, commentIssue, editLabels, ...impl }
   }
 
   viewIssue(repo, number) {
     return this.impl.viewIssue(repo, number)
+  }
+
+  viewPr(repo, number) {
+    return this.impl.viewPr(repo, number)
   }
 
   listIssues(repo, opts) {

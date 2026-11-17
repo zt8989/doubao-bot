@@ -71,6 +71,31 @@ test("parseResult 把合并结论字段带出来（mergeable / conflict / items�
   assert.equal(r3.items[1].mergeable, false)
 })
 
+test("parseResult 兼容旧合并会话的顶层数组，并生成多条自动合并任务", () => {
+  const rows = [
+    { ...verdict, pr: 318, prUrl: "http://gitea/demo/demo/pulls/318", summary: "#318 可合" },
+    { ...verdict, pr: 319, prUrl: "http://gitea/demo/demo/pulls/319", summary: "#319 可合" },
+  ]
+  const result = parseResult(`<RESULT>${JSON.stringify(rows)}</RESULT>`)
+  assert.equal(result.status, "done")
+  assert.equal(result.mergeable, true)
+  assert.equal(result.items.length, 2)
+
+  const dir = tmpDir()
+  try {
+    const d = judgeMergeVerdict({
+      cfg: mkCfg(dir),
+      record: { repo: "demo/demo" },
+      result,
+      book: new Book(path.join(dir, "state.json")),
+    })
+    assert.equal(d.action, "merge")
+    assert.deepEqual(d.tasks.map((t) => t.key), ["demo/demo#318", "demo/demo#319"])
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("verdictSessions：只认「PR待合并」的合并会话，回执会话不算", () => {
   const dir = tmpDir()
   try {

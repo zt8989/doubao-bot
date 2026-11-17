@@ -86,7 +86,7 @@ class FmSidebar extends LitElement {
   render() {
     const views = [
       { id: "overview", label: "工单" },
-      { id: "schedules", label: "定时任务" },
+      { id: "schedules", label: "设置" },
       { id: "operations", label: "操作日志" },
     ]
     return html`
@@ -222,6 +222,9 @@ class FmTasks extends LitElement {
     candBusy: { type: String },
     candError: { type: String },
     candNote: { type: String },
+    completeBusy: { type: String },
+    completeNote: { type: String },
+    completeError: { type: String },
   }
   createRenderRoot() {
     return this
@@ -413,6 +416,8 @@ class FmTasks extends LitElement {
               : html`<span class="hint">${rows.length ? `${rows.length} 条 · 点「详情」看每个节点` : "暂无"}</span>`}
           </div>
         </div>
+        ${tab === "today" && this.completeError ? html`<div class="note error" role="alert">${this.completeError}</div>` : ""}
+        ${tab === "today" && this.completeNote ? html`<div class="note" role="status">${this.completeNote}</div>` : ""}
         ${tab === "pending" ? this.pendingView() : rows.length
           ? html`
               <div class="table-wrap">
@@ -446,6 +451,15 @@ class FmTasks extends LitElement {
                           <td class="time-cell">${t.updatedAtClock || "—"}</td>
                           <td class="detail-cell">
                             <button class="ghost" @click=${() => this.toggle(key)}>${this.openKey === key ? "收起" : "详情"}</button>
+                            ${t.state === "pr-open"
+                              ? html`<button
+                                  class="ghost"
+                                  style="margin-left: 6px"
+                                  title="核对远端 PR 已合并后，将工单置为已完成并执行既有清理"
+                                  ?disabled=${this.completeBusy !== ""}
+                                  @click=${() => emit(this, "task-complete", { repo: t.repo, number: t.number })}
+                                >${this.completeBusy === key ? "完成中…" : "手动完成"}</button>`
+                              : ""}
                           </td>
                         </tr>
                         ${this.openKey === key ? this.detail(t) : ""}`
@@ -486,9 +500,14 @@ const SKIP_LABEL = {
 }
 
 class FmSchedules extends LitElement {
-  static properties = { schedules: { attribute: false }, busy: { type: String }, error: { type: String } }
+  static properties = { schedules: { attribute: false }, workHours: { attribute: false }, busy: { type: String }, error: { type: String }, note: { type: String } }
   createRenderRoot() {
     return this
+  }
+  saveWorkHours() {
+    const start = this.querySelector('input[data-work-hours="start"]')?.value || ""
+    const end = this.querySelector('input[data-work-hours="end"]')?.value || ""
+    emit(this, "work-hours-save", { start, end })
   }
   saveCron(id) {
     const input = this.querySelector(`input[data-cron="${id}"]`)
@@ -497,6 +516,30 @@ class FmSchedules extends LitElement {
   render() {
     const rows = this.schedules || []
     return html`
+      <section class="panel work-hours-panel">
+        <div class="panel-head">
+          <h2>工作时间</h2>
+          <div class="panel-side"><span class="hint">保存后立即生效，无需重启服务</span></div>
+        </div>
+        <div class="work-hours-body">
+          <div class="work-hours-form">
+            <label class="time-field">
+              <span>开始时间</span>
+              <input type="time" data-work-hours="start" required step="60" value=${this.workHours?.start || "08:30"} @keydown=${(e) => { if (e.key === "Enter") this.saveWorkHours() }} />
+            </label>
+            <span class="time-separator">至</span>
+            <label class="time-field">
+              <span>结束时间</span>
+              <input type="time" data-work-hours="end" required step="60" value=${this.workHours?.end || "18:30"} @keydown=${(e) => { if (e.key === "Enter") this.saveWorkHours() }} />
+            </label>
+            <button class="ghost work-hours-save" ?disabled=${this.busy !== ""} @click=${() => this.saveWorkHours()}>
+              ${this.busy === "work-hours" ? "保存中…" : "保存工作时间"}
+            </button>
+          </div>
+          <div class="hint">适用于工作日自动派单与相关定时任务；开始时间需早于结束时间。</div>
+          ${this.note ? html`<div class="sched-note">${this.note}</div>` : ""}
+        </div>
+      </section>
       <section class="panel">
         <div class="panel-head">
           <h2>定时任务</h2>
@@ -656,6 +699,7 @@ class FmConsole extends LitElement {
     view: { type: String },
     sidebarCollapsed: { type: Boolean },
     schedules: { attribute: false },
+    workHours: { attribute: false },
     operations: { attribute: false },
     workflow: { attribute: false },
     nodeBusy: { type: String },
@@ -665,9 +709,13 @@ class FmConsole extends LitElement {
     candBusy: { type: String },
     candError: { type: String },
     candNote: { type: String },
+    completeBusy: { type: String },
+    completeNote: { type: String },
+    completeError: { type: String },
     opFilter: { type: String },
     schedBusy: { type: String },
     schedError: { type: String },
+    schedNote: { type: String },
     busy: { type: String },
     error: { type: String },
   }
@@ -684,6 +732,7 @@ class FmConsole extends LitElement {
       this.sidebarCollapsed = false
     }
     this.schedules = []
+    this.workHours = { start: "08:30", end: "18:30" }
     this.operations = []
     this.workflow = null
     this.nodeBusy = ""
@@ -694,9 +743,13 @@ class FmConsole extends LitElement {
     this.candBusy = ""
     this.candError = ""
     this.candNote = ""
+    this.completeBusy = ""
+    this.completeNote = ""
+    this.completeError = ""
     this.opFilter = "all"
     this.schedBusy = ""
     this.schedError = ""
+    this.schedNote = ""
     // day 为空 = 看今天；选了某天就回看那天的任务/PR。URL 上带 ?day= 也能直接打开那天。
     this.day = ""
     try {
@@ -756,6 +809,7 @@ class FmConsole extends LitElement {
       } catch {}
     }
     this._onSchedSave = (e) => this.saveScheduleCron(e.detail.id, e.detail.cron)
+    this._onWorkHoursSave = (e) => this.saveWorkHours(e.detail)
     this._onScheduleRun = (e) => this.runScheduleNow(e.detail.id)
     this._onOpFilter = (e) => {
       this.opFilter = e.detail.filter
@@ -767,6 +821,7 @@ class FmConsole extends LitElement {
     this.addEventListener("sidebar-toggle", this._onSidebarToggle)
     this.addEventListener("schedule-toggle", this._onSchedToggle)
     this.addEventListener("schedule-save", this._onSchedSave)
+    this.addEventListener("work-hours-save", this._onWorkHoursSave)
     this.addEventListener("schedule-run", this._onScheduleRun)
     this._onNodeToggle = (e) => this.toggleNode(e.detail)
     this.addEventListener("node-toggle", this._onNodeToggle)
@@ -779,9 +834,11 @@ class FmConsole extends LitElement {
     }
     this._onCandRefresh = () => this.loadCandidates({ refresh: true })
     this._onCandidatePick = (e) => this.pickCandidate(e.detail)
+    this._onTaskComplete = (e) => this.completeTask(e.detail)
     this.addEventListener("task-tab", this._onTaskTab)
     this.addEventListener("candidates-refresh", this._onCandRefresh)
     this.addEventListener("candidate-pick", this._onCandidatePick)
+    this.addEventListener("task-complete", this._onTaskComplete)
 
     this._onFocus = () => {
       this.load()
@@ -819,12 +876,14 @@ class FmConsole extends LitElement {
     this.removeEventListener("sidebar-toggle", this._onSidebarToggle)
     this.removeEventListener("schedule-toggle", this._onSchedToggle)
     this.removeEventListener("schedule-save", this._onSchedSave)
+    this.removeEventListener("work-hours-save", this._onWorkHoursSave)
     this.removeEventListener("schedule-run", this._onScheduleRun)
     this.removeEventListener("node-toggle", this._onNodeToggle)
     this.removeEventListener("operation-filter", this._onOpFilter)
     this.removeEventListener("task-tab", this._onTaskTab)
     this.removeEventListener("candidates-refresh", this._onCandRefresh)
     this.removeEventListener("candidate-pick", this._onCandidatePick)
+    this.removeEventListener("task-complete", this._onTaskComplete)
     super.disconnectedCallback()
   }
 
@@ -927,6 +986,30 @@ class FmConsole extends LitElement {
     }
   }
 
+  // 手动完成：服务核对 PR 已 merged 后走原有关单、工作区清理和监听清理。
+  async completeTask({ repo, number } = {}) {
+    const key = `${repo}#${number}`
+    if (!repo || !number || this.completeBusy) return
+    this.completeBusy = key
+    this.completeNote = ""
+    this.completeError = ""
+    try {
+      const res = await fetch("/api/complete", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ repo, number }),
+      })
+      const body = await res.json()
+      if (!res.ok || body.ok === false) throw new Error(body.message || `HTTP ${res.status}`)
+      this.completeNote = body.skipped === "already-done" ? `${key} 已经是已完成状态` : `${key} 已按远端合并结果完成收尾`
+      await Promise.all([this.load(), this.loadWorkflow(), this.loadOperations()])
+    } catch (e) {
+      this.completeError = `手动完成失败（${key}）：${e.message}`
+    } finally {
+      this.completeBusy = ""
+    }
+  }
+
   async loadWorkflow() {    try {
       const res = await fetch("/api/workflow", { cache: "no-store" })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -964,6 +1047,7 @@ class FmConsole extends LitElement {
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const body = await res.json()
       this.schedules = body.schedules || []
+      if (body.workHours) this.workHours = body.workHours
     } catch (e) {
       this.error = `服务 · 拿不到定时任务（${e.message}）`
     }
@@ -1020,6 +1104,38 @@ class FmConsole extends LitElement {
     }
   }
 
+  async saveWorkHours({ start, end } = {}) {
+    if (this.schedBusy) return
+    this.schedError = ""
+    this.schedNote = ""
+    if (!start || !end) {
+      this.schedError = "请选择开始时间和结束时间"
+      return
+    }
+    if (start >= end) {
+      this.schedError = "开始时间必须早于结束时间"
+      return
+    }
+    this.schedBusy = "work-hours"
+    try {
+      const res = await fetch("/api/schedules", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ patch: { workHours: { start, end } } }),
+      })
+      const body = await res.json()
+      if (!res.ok || body.ok === false) throw new Error(body.message || `HTTP ${res.status}`)
+      this.schedules = body.schedules || []
+      this.workHours = body.workHours || { start, end }
+      this.schedNote = `工作时间已保存：${start}–${end}，已立即生效`
+      await this.load()
+    } catch (e) {
+      this.schedError = `保存工作时间失败：${e.message}`
+    } finally {
+      this.schedBusy = ""
+    }
+  }
+
   async runScheduleNow(id) {
     if (this.schedBusy) return
     this.schedBusy = `run-${id}`
@@ -1048,7 +1164,7 @@ class FmConsole extends LitElement {
         <fm-sidebar .view=${this.view} .collapsed=${this.sidebarCollapsed}></fm-sidebar>
         <main>
         ${this.view === "schedules"
-          ? html`<fm-schedules .schedules=${this.schedules} .busy=${this.schedBusy} .error=${this.schedError}></fm-schedules>`
+          ? html`<fm-schedules .schedules=${this.schedules} .workHours=${this.workHours} .busy=${this.schedBusy} .error=${this.schedError} .note=${this.schedNote}></fm-schedules>`
           : this.view === "operations"
           ? html`<fm-operations .operations=${this.operations} .filter=${this.opFilter}></fm-operations>`
           : this.data
@@ -1066,6 +1182,9 @@ class FmConsole extends LitElement {
                 .candBusy=${this.candBusy}
                 .candError=${this.candError}
                 .candNote=${this.candNote}
+                .completeBusy=${this.completeBusy}
+                .completeNote=${this.completeNote}
+                .completeError=${this.completeError}
               ></fm-tasks>`
           : html`
               <section class="panel">

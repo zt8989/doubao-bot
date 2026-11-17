@@ -66,7 +66,7 @@ test("侧边栏显示没在跑：照常读 status，结论只落痕、不发消�
   }
 })
 
-test("侧边栏读不到：退回逐条 status，结论照样只落痕", async () => {
+test("侧边栏读不到：首个 RESULT 照常消费，之后同一会话进入 idle，不重复 status", async () => {
   const { ctx, calls, dir } = mkCtx({
     runningMap: async () => { throw new Error("list 失败") },
     status: async () => ({ streaming: false, finished: true, chars: 500, head: "H", tail: "T", status: "ok" }),
@@ -77,6 +77,10 @@ test("侧边栏读不到：退回逐条 status，结论照样只落痕", async (
     assert.equal(r.notified, 0)
     assert.equal(calls.notified.length, 0)
     assert.ok(new Book(ctx.cfg.stateFile).notified["conv-a"])
+    await pollOnce(ctx)
+    assert.equal(calls.status, 1, "RESULT 已消费且没有 running 信号，不应再读 status")
+    assert.equal(calls.info, 1, "RESULT 已消费，也不应再读 info")
+    assert.equal(ctx.state.watchers.get("conv-a").lastPhase, "idle")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
