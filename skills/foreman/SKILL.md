@@ -121,7 +121,7 @@ foreman watch rm <会话id|标题>     # 取消登记
 foreman watch poll               # 立刻跑一轮（checked / settled / notified），取证补漏
 ```
 
-- **两条通道（派单 / 合并）**：派单管接活、开会话、续跑，**同时 2 张单在跑**（`pickup.maxRunning`，派活动作本身串行，抢 `run.lock`）；合并管合 PR、关单、清工作区、归档，**1 并发**（`merge.concurrency`），排队在账本 `mergeQueue` 里，由 `merge` 定时器（默认 60s，`merge.cron` 可改）扫。两条通道互不阻塞：正在合 PR 不会挡住派下一张单。`foreman status` 里 `lanes.dispatch` / `lanes.merge` 分别看。
+- **两条通道（派单 / 合并）**：派单管接活、开会话、续跑；`pickup.maxRunning`（默认 2）**只限制定时巡检**，agent 主动调 `foreman dispatch` 不限在跑上限，派活动作本身串行并抢 `run.lock`。合并管合 PR、关单、清工作区、归档，**1 并发**（`merge.concurrency`），排队在账本 `mergeQueue` 里，由 `merge` 定时器（默认 60s，`merge.cron` 可改）扫。两条通道互不阻塞：正在合 PR 不会挡住派下一张单。`foreman status` 里 `lanes.dispatch` / `lanes.merge` 分别看。
 
 - **自动巡检（`pickup.auto: true`）**：服务自己按 `pickup.intervalSeconds`（默认 1800s）在工作时间窗（`workHours`，默认工作日 08:30–17:30）里捞单，起服务 1s 后先跑一轮；**派单通道并行 2 张单**（`pickup.maxRunning`，默认 2），每轮最多补 `min(空槽, pickup.maxPerRound=2)` 条，和 CLI 的 `foreman run` 抢同一把 `run.lock`，账本 `working` 去重所以不会重复派。**不用外部 cron，也不用守着敲 `foreman run`**。`foreman pickup` 手动催一轮；`foreman status` 的 `pickup` 段看 `maxRunning/inflight/lastAt/count/lastResult`。
 
