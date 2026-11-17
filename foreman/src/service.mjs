@@ -1840,6 +1840,10 @@ export async function cleanupPrArtifacts({ repoDir, worktree, branch = "" } = {}
 // 早先只有执行会话会在 pr.merged 上被归档，通知会话没人管：一条条留在侧边栏里、
 // 既没人读也没人收（#235 与重复投递出的两条 #238 会话就是这么积下来的）。
 // 只动 foreman 自己新建的投递会话（notices 账本里登记的），不碰执行会话与用户自己的会话。
+// 会话已经不存在的错误文案（dws 侧边栏找不到这条任务）。这类错误重试多少次都一样，
+// 归档/收记录按「已经收过了」处理，别再每轮刷失败日志。
+const SESSION_GONE = /侧边栏里没有任务/
+
 export async function archiveMergedNotices({ dws, stateFile, log = () => {} } = {}) {
   const notes = []
   if (!dws || typeof dws.archive !== "function" || !stateFile) return notes
@@ -1860,6 +1864,14 @@ export async function archiveMergedNotices({ dws, stateFile, log = () => {} } = 
       log(`已归档通知会话（它报的 PR 都合完了）：${name}`)
     } catch (e) {
       const msg = String(e?.message ?? e ?? "")
+      // 会话早就不在侧边栏里了（用户自己收的 / 早归档过）：这不是失败，
+      // 记录留着只会每轮重试、每轮刷一行「归档失败」。收掉这条 notice，不再重试。
+      if (SESSION_GONE.test(msg)) {
+        new Book(stateFile).delNotice(target)
+        notes.push(`通知会话 ${name} 已不在侧边栏，收掉记录`)
+        log(`通知会话 ${name} 已不在侧边栏，收掉记录（不再重试）`)
+        continue
+      }
       // 归档不成功不推翻合并事实：只记一笔，下一轮再试（notice 记录留着）。
       notes.push(`通知会话 ${name} 归档失败：${msg.slice(0, 120)}`)
       log(`归档通知会话 ${name} 失败：${msg}`)
@@ -1894,6 +1906,15 @@ export async function archiveFinishedOrchestrators({ dws, stateFile, log = () =>
       log(`已归档收口工单的编排会话：${own.name || target}（${key}）`)
     } catch (e) {
       const msg = String(e?.message ?? e ?? "")
+      // 会话已经不在侧边栏里（用户手动收了 / 早归档过）：不算失败，清掉绑定就不再重试。
+      if (SESSION_GONE.test(msg)) {
+        const after = new Book(stateFile)
+        after.delSession(own.name)
+        after.setIssue(key, { orchestrator: "", orchestratorArchivedAt: nowIso() })
+        notes.push(`编排会话 ${own.name || target} 已不在侧边栏，收掉绑定（${key}）`)
+        log(`编排会话 ${own.name || target} 已不在侧边栏，收掉绑定（${key}）`)
+        continue
+      }
       notes.push(`编排会话 ${own.name || target} 归档失败：${msg.slice(0, 120)}`)
       log(`归档编排会话 ${own.name || target} 失败：${msg}`)
     }

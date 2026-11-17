@@ -440,7 +440,7 @@ test("archiveFinishedOrchestrators：收口的单归档自己的编排会话；�
   }
 })
 
-test("archiveFinishedOrchestrators：归档失败只记账，不推翻工单状态", async () => {
+test("archiveFinishedOrchestrators：归档真的失败只记账，不推翻工单状态", async () => {
   const dir = tmpDir()
   try {
     const cfg = mkCfg(dir)
@@ -448,7 +448,7 @@ test("archiveFinishedOrchestrators：归档失败只记账，不推翻工单状�
     book.setIssue("yyzl/demo#8", { state: "done", orchestrator: "conv-bad" })
     book.record("foreman-demo-8-编排", { convId: "conv-bad", kind: "orchestrator", issueKey: "yyzl/demo#8" })
     const notes = await archiveFinishedOrchestrators({
-      dws: { archive: async () => { throw new Error("侧边栏里没有任务") } },
+      dws: { archive: async () => { throw new Error("dws archive 超时") } },
       stateFile: cfg.stateFile,
       log: () => {},
     })
@@ -456,6 +456,34 @@ test("archiveFinishedOrchestrators：归档失败只记账，不推翻工单状�
     const after = new Book(cfg.stateFile)
     assert.equal(after.issue("yyzl/demo#8").state, "done", "工单状态不能被归档失败推翻")
     assert.equal(after.issue("yyzl/demo#8").orchestrator, "conv-bad", "记录留着下一轮再试")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("archiveFinishedOrchestrators：会话已不在侧边栏 → 收掉绑定，不再每轮重试", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = mkCfg(dir)
+    const book = new Book(cfg.stateFile)
+    book.setIssue("yyzl/demo#9", { state: "done", orchestrator: "conv-gone" })
+    book.record("foreman-demo-9-编排", { convId: "conv-gone", kind: "orchestrator", issueKey: "yyzl/demo#9" })
+    const logs = []
+    const notes = await archiveFinishedOrchestrators({
+      dws: { archive: async () => { throw new Error("侧边栏里没有任务 conv-gone") } },
+      stateFile: cfg.stateFile,
+      log: (m) => logs.push(m),
+    })
+    assert.match(notes.join("；"), /已不在侧边栏/)
+    assert.doesNotMatch(notes.join("；"), /归档失败/)
+    const after = new Book(cfg.stateFile)
+    assert.equal(after.issue("yyzl/demo#9").state, "done")
+    assert.equal(after.issue("yyzl/demo#9").orchestrator, "", "会话没了就收掉绑定")
+    assert.ok(after.issue("yyzl/demo#9").orchestratorArchivedAt, "留收掉的时间")
+    assert.equal(after.session("foreman-demo-9-编排"), null)
+    // 第二轮没有任何要处理的了
+    const again = await archiveFinishedOrchestrators({ dws: { archive: async () => { throw new Error("侧边栏里没有任务") } }, stateFile: cfg.stateFile, log: () => {} })
+    assert.equal(again.length, 0)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

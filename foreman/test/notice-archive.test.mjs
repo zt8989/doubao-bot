@@ -66,3 +66,26 @@ test("归档失败：预留记录下轮重试，不抛错", async () => {
   assert.match(notes[0], /归档失败/)
   assert.ok(new Book(file).notices["foreman-PR待合并-20261112-1116"], "失败要留下记录，下一轮再试")
 })
+
+test("会话已不在侧边栏：收掉记录，不再每轮刷失败日志", async () => {
+  const file = tmpBook()
+  const b = new Book(file)
+  b.markPrSeen("yyzl/yyjz-oa-frontend#235", { repo: "yyzl/yyjz-oa-frontend", number: 235, skipped: "merged", merged: true })
+  b.markNotice("foreman-合并-20261113-1400", {
+    name: "foreman-合并-20261113-1400", convId: "38453350711358211", kind: "合并",
+    prs: ["yyzl/yyjz-oa-frontend#235"],
+  })
+
+  const dws = { archive: async (name) => { throw new Error("侧边栏里没有任务 " + name) } }
+  const logs = []
+  const notes = await archiveMergedNotices({ dws, stateFile: file, log: (m) => logs.push(m) })
+
+  assert.equal(notes.length, 1)
+  assert.match(notes[0], /已不在侧边栏/)
+  assert.doesNotMatch(notes[0], /归档失败/)
+  assert.equal(new Book(file).notices["foreman-合并-20261113-1400"], undefined, "记录收掉，不再重试")
+  assert.match(logs.join("\n"), /不再重试/)
+  // 第二轮：没有任何要处理的
+  const again = await archiveMergedNotices({ dws, stateFile: file, log: () => {} })
+  assert.equal(again.length, 0)
+})
