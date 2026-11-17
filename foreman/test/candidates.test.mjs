@@ -120,6 +120,33 @@ test("待分配列表：某个仓库拉不到工单时只记错误，不拖垮�
   assert.match(r.errors[0].message, /401/)
 })
 
+test("待分配列表：按「我的 → 无人认领 → 他人认领」排，最多 10 条", async () => {
+  forgetCandidates()
+  const stateFile = tmpState()
+  const list = []
+  // 12 条他人认领 + 1 条无人认领 + 2 条我的：mine 必须挤进前 10，others 被截断。
+  for (let n = 1; n <= 12; n++) {
+    list.push(issue(n, { author: "someone-else", assignees: ["someone"], createdAt: `2026-11-${String(n).padStart(2, "0")}T00:00:00Z` }))
+  }
+  list.push(issue(20, { author: "someone-else", assignees: [], createdAt: "2026-11-02T00:00:00Z" }))
+  list.push(issue(21, { createdAt: "2026-11-03T00:00:00Z" }))
+  list.push(issue(22, { createdAt: "2026-11-01T00:00:00Z" }))
+  const ctx = { cfg: cfg({ stateFile }), gitea: fakeGitea(list) }
+  const r = await candidatesOnce(ctx)
+  assert.equal(r.total, 15)
+  assert.equal(r.items.length, 10)
+  assert.deepEqual(
+    r.items.slice(0, 3).map((i) => [i.number, i.bucket]),
+    [
+      [22, "mine"],
+      [21, "mine"],
+      [20, "unassigned"],
+    ],
+    "mine 优先，同档按创建时间老的在前"
+  )
+  assert.ok(r.items.slice(3).every((i) => i.bucket === "others"))
+})
+
 test("手动接单：账本里已处理/在跑的单不重复派", async () => {
   const stateFile = tmpState()
   const book = new Book(stateFile)

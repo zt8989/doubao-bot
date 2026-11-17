@@ -515,12 +515,25 @@ export async function candidatesOnce(ctx, { refresh = false } = {}) {
     }
   }
 
+  // 页面只给 10 条：先按归属（我的 → 无人认领 → 他人认领），同档里再按创建时间，老的在前。
+  // total 保留全量条数，让页面能提示「还有几条没显示」。
+  const RANK = { mine: 0, unassigned: 1, others: 2 }
+  items.sort(
+    (a, b) =>
+      (RANK[a.bucket] ?? 3) - (RANK[b.bucket] ?? 3) ||
+      String(a.createdAt || "").localeCompare(String(b.createdAt || "")) ||
+      a.number - b.number
+  )
+  const total = items.length
+  const view = items.slice(0, 10)
+
   const runningOwn = ctx.engine?.active?.("own")?.length ?? 0
   const inflight = Math.max(inflightIssues(book).length, runningOwn)
   const payload = {
     ok: true,
     at: nowIso(),
-    items,
+    items: view,
+    total,
     errors,
     capacity: { inflight, maxRunning: Number(cfg.pickup?.maxRunning) || 2 },
     pickup: { auto: cfg.pickup?.auto === true, inWorkHours: inWorkHours(cfg) },

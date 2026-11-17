@@ -362,7 +362,11 @@ class FmTasks extends LitElement {
           </tbody>
         </table>
       </div>
-      <div class="panel-foot">在跑 ${cap.inflight ?? 0}/${cap.maxRunning ?? "?"} · 手动接单不看自动接单开关 · 接单会建工作区并开执行会话</div>`
+      <div class="panel-foot">
+        ${(info.total || items.length) > items.length
+          ? `共 ${info.total} 条待分配 · 按「我的 → 无人认领 → 他人认领」只显示前 ${items.length} 条 · `
+          : ""}在跑 ${cap.inflight ?? 0}/${cap.maxRunning ?? "?"} · 手动接单不看自动接单开关 · 接单会建工作区并开执行会话
+      </div>`
   }
   render() {
     const rows = this.tasks || []
