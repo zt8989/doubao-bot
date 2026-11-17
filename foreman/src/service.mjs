@@ -2392,6 +2392,9 @@ export async function handleRequest(ctx, req) {  const id = req?.id
         maxPerRound: ctx.cfg.pickup?.maxPerRound,
         maxRunning: ctx.cfg.pickup?.maxRunning,
         handToOrchestrator: ctx.cfg.pickup?.handToOrchestrator !== false,
+        // 收口即续跑：true 表示工单收口后自动补一轮，不等 pickup.cron。
+        kickAfterDone: ctx.cfg.pickup?.kickAfterDone !== false,
+        kickPending: Boolean(ctx.pickupKickTimer),
         inflight: inflightIssues(new Book(ctx.cfg.stateFile)).length,
         lastAt: ctx.state.pickup?.lastAt ?? null,
         count: ctx.state.pickup?.count ?? 0,
