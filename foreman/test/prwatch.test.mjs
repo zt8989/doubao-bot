@@ -224,6 +224,46 @@ test("服务里 prPoll：起服务后能手动跑一轮，状态里带 PR 计数
   }
 })
 
+test("服务里 prPoll：sessionFlow 开启时 PR 仍新建合并会话，不 steer 全局编排", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = baseCfg(dir)
+    cfg.sessionFlow = { enabled: true }
+    cfg.deliver = { mode: "new" }
+    new Book(cfg.stateFile).setOrchestrator({ convId: "conv-global", name: "foreman-编排" })
+
+    const delivered = []
+    const steered = []
+    const ctx = {
+      cfg,
+      state: { pr: { polling: false, pollCount: 0, notifiedCount: 0, pending: 0 } },
+      log: () => {},
+      gitea: {
+        listPulls: async () => [{ repo: "demo/demo", number: 5, title: "待合并", author: "wangwu", url: "http://x/pulls/5" }],
+        viewPr: async () => ({ mergeNote: "可以合并", state: "open" }),
+      },
+      dws: {
+        steer: async (target) => { steered.push(target) },
+        notify: async () => { throw new Error("new 模式不该 notify 已有会话") },
+      },
+      deliver: async ({ text, kind, lane }) => {
+        delivered.push({ text, kind, lane })
+        return { session: "foreman-合并-test", convId: "conv-merge" }
+      },
+    }
+
+    const out = await prPollOnce(ctx)
+    assert.equal(out.notified, 1)
+    assert.equal(out.via, "new-session")
+    assert.equal(delivered.length, 1)
+    assert.equal(delivered[0].lane, "merge")
+    assert.match(delivered[0].text, /http:\/\/x\/pulls\/5/)
+    assert.deepEqual(steered, [], "PR 不能 steer 到全局编排")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("prWatchOnce：通知失败下一轮补发，发成功后不再重发", async () => {
   const dir = tmpDir()
   try {

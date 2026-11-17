@@ -1,11 +1,13 @@
-// 以编排会话为中心：整条链路只有一条编排智能体会话，工作会话都绑在它身上。
+// 以工单绑定的编排会话为中心：自动巡检每张工单各起一条编排智能体会话，工作会话绑在它身上。
 //
 // 与老模型的区别（老：每次收工新建「派单/合并」会话、由服务通知）：
-//   - 编排会话只起一次（ensureOrchestrator 幂等），后面全靠 dws steer 往里插消息；
-//   - 工单先交给编排（hand），由编排调 `foreman dispatch` 分配工作；
+//   - 自动巡检按工单起编排会话（ensureIssueOrchestrator 幂等），后续全靠 dws steer 插消息；
+//   - 用户从当前会话主动派单时，当前会话直接作为这张单的编排，不另起；
+//   - 工单先交给自己的编排（hand），由编排调 `foreman dispatch` 分配工作；
 //   - 工作会话 id 写进账本 issues[<键>] 的 agent / agentConvId / orchestrator；
 //   - 工作会话失败用 `foreman resume` 在**同一条**工作会话里 steer 续跑，绝不新开；
-//   - 合并关单之后 `foreman clean` 清 worktree 与会话。
+//   - PR 扫描独立走 deliver.mode=new，新建合并会话，不复用任何工单编排会话；
+//   - 合并关单之后 `foreman clean` 清 worktree 与工作会话。
 import fs from "node:fs"
 import { Book } from "./book.mjs"
 import { builtinPrompt } from "./builtin-prompts.mjs"
@@ -26,7 +28,17 @@ export function orchestratorName(cfg) {
   return `${String(cfg?.deliver?.namePrefix ?? "").trim() || "foreman"}-编排`
 }
 
-// 编排会话 id：账本顶层 orchestrator.convId；没有就是空串（调用方决定降级还是先 ensure）。
+// 自动巡检的编排会话按工单命名，和该单的工作会话区分开，也方便在侧边栏直接认单。
+export function issueOrchestratorName(cfg, issueKey = "") {
+  const prefix = String(cfg?.deliver?.namePrefix ?? "").trim() || "foreman"
+  const key = String(issueKey ?? "").trim()
+  const match = key.match(/^([^#\s]+)#([0-9]+)$/)
+  if (!match) return `${prefix}-编排`
+  const repoName = match[1].split("/").filter(Boolean).at(-1) || "issue"
+  return `${prefix}-${repoName}-${match[2]}-编排`
+}
+
+// 顶层全局编排只保留给手工 `foreman orch start` 的兼容入口；自动流程不再使用它。
 export function orchestratorTarget(book) {
   return String(book?.data?.orchestrator?.convId ?? "").trim()
 }
@@ -44,7 +56,7 @@ function orchestratorBasePrompt(cfg) {
   return text
 }
 
-export function orchestratorPrompt(ctx = {}) {
+export function orchestratorPrompt(ctx = {}, { issueKey = "", issue = null } = {}) {
   const cfg = ctx.cfg ?? {}
   const projectDir = String(cfg.sessionFlow?.projectDir ?? cfg.deliver?.projectDir ?? "").trim()
   const base = String((cfg.repos ?? [])[0]?.base ?? "").trim()
@@ -52,7 +64,12 @@ export function orchestratorPrompt(ctx = {}) {
   if (projectDir) lines.push(`监控项目：${projectDir}`)
   lines.push("通道：派单（agent 主动 dispatch 不限在跑上限；pickup.maxRunning 只约束定时巡检）")
   if (base) lines.push(`基线：origin/${base}`)
-  lines.push("工单会 steer 进这条会话（正文带「工单键」）；实现只在工作会话里，你不写代码。")
+  if (issueKey) {
+    lines.push(`绑定工单：${issueKey}${issue?.title ? ` ${issue.title}` : ""}`)
+    lines.push("你只编排这一张工单；这张单后续的工作会话更新都会 steer 到本会话。")
+  } else {
+    lines.push("工单会 steer 进这条会话（正文带「工单键」）；实现只在工作会话里，你不写代码。")
+  }
   return lines.join("\n")
 }
 
@@ -80,11 +97,54 @@ export async function ensureOrchestrator(ctx, { name = "" } = {}) {
   return { ok: true, reused: false, created: true, convId: newConvId, name: nm }
 }
 
-// 一张单的编排会话：先看绑在单上的（用户自主发起时会话 id 就记在这里），
-// 没有才回落到 foreman 起的那条全局编排会话。
+// 一张自动巡检工单一条编排会话。先创建并立刻把 convId 绑到 issues[key]，再交工单；
+// 如果后续 steer 失败，下一轮会复用这条绑定，不会重复开新会话。
+export async function ensureIssueOrchestrator(ctx, { issueKey, repoCfg = null, issue = null } = {}) {
+  const { cfg, dws, log = () => {} } = ctx
+  const key = String(issueKey ?? "").trim()
+  if (!key) throw new Error("issueKey 不能为空，无法绑定工单编排会话")
+  const book = new Book(cfg.stateFile)
+  const prev = book.issue(key) ?? {}
+  const existing = String(prev.orchestrator ?? "").trim()
+  if (existing) {
+    const name = Object.entries(book.sessions ?? {}).find(([, s]) => String(s?.convId ?? "") === existing)?.[0]
+      || issueOrchestratorName(cfg, key)
+    return { ok: true, reused: true, created: false, convId: existing, name }
+  }
+  if (typeof dws?.openNew !== "function") {
+    throw Object.assign(new Error("会话适配器没有 openNew，起不了工单编排会话"), { code: "no-session-adapter" })
+  }
+
+  const name = issueOrchestratorName(cfg, key)
+  const prompt = orchestratorPrompt(ctx, { issueKey: key, issue })
+  const noWait = cfg?.sessionFlow?.waitFirstReply !== true
+  const out = await dws.openNew({ name, prompt, noWait })
+  const convId = String(out?.convId ?? "").trim()
+  if (!convId) throw new Error(`工单编排会话 ${name} 没返回会话 id，不能安全绑定`)
+  const number = Number(key.split("#")[1] ?? 0) || null
+  book.setIssue(key, {
+    repo: String(repoCfg?.repo ?? prev.repo ?? key.split("#")[0]),
+    issue: number,
+    title: String(issue?.title ?? prev.title ?? ""),
+    url: String(issue?.url ?? prev.url ?? ""),
+    orchestrator: convId,
+  })
+  book.record(name, {
+    convId,
+    kind: "orchestrator",
+    role: "orchestrator",
+    notify: false,
+    issue: number,
+    issueKey: key,
+  })
+  log(`${key}：已新建独立编排会话 ${name}`)
+  return { ok: true, reused: false, created: true, convId, name }
+}
+
+// 一张单的后续更新只认单上绑定的编排会话；没有绑定就停住，不再错投到全局编排。
 export function orchestratorOf(book, issueKey = "", fallback = "") {
   const own = String(book?.issue?.(String(issueKey ?? ""))?.orchestrator ?? "").trim()
-  return own || String(fallback ?? "").trim() || orchestratorTarget(book)
+  return own || String(fallback ?? "").trim()
 }
 
 // 往编排会话里插一条（dws steer：Command+Enter，不打断它当前那一轮）。
@@ -149,8 +209,8 @@ export function ticketText({ repo, issue, orchestrator = "" } = {}) {
   return lines.join("\n")
 }
 
-// 把一张工单交给编排：起/复用编排会话 → steer 工单 → 账本记 handed（等编排来 dispatch）。
-// orchestrator 给了就直接交给那条会话（用户自主发起：它自己就是编排），不再去起全局编排会话。
+// 把一张工单交给它自己的编排：自动巡检新建/复用该单绑定的编排会话，再 steer 工单。
+// orchestrator 给了就直接交给调用方会话（用户自主发起：它自己就是编排），不另起会话。
 export async function handToOrchestrator(ctx, { repoCfg, issue, orchestrator = "" } = {}) {
   const { cfg, log = () => {} } = ctx
   const gitea = ctx.gitea ?? realGitea
@@ -165,7 +225,7 @@ export async function handToOrchestrator(ctx, { repoCfg, issue, orchestrator = "
     }
   }
   const caller = String(orchestrator ?? ctx.orchestrator ?? "").trim()
-  const convId = caller || (await ensureOrchestrator(ctx)).convId
+  const convId = caller || (await ensureIssueOrchestrator(ctx, { issueKey: key, repoCfg, issue: detail })).convId
   await steerOrchestrator(ctx, ticketText({ repo: repoCfg.repo, issue: detail, orchestrator: convId }), {
     kind: "ticket",
     target: convId,

@@ -19,7 +19,7 @@ import { decisionKickoff, doneComment, holdComment, issueBranch, kickoff, prBody
 import { findWorkspace, reposForIssue, workspacePath } from "./workspaces.mjs"
 import { Book } from "./book.mjs"
 import { startOperation, finishOperation } from "./operations.mjs"
-import { bindWorker, ensureOrchestrator, handToOrchestrator, sessionFlowEnabled, workerOf } from "./sessionflow.mjs"
+import { bindWorker, ensureIssueOrchestrator, handToOrchestrator, sessionFlowEnabled, workerOf } from "./sessionflow.mjs"
 
 export const issueKey = (repo, n) => `${repo}#${n}`
 
@@ -123,7 +123,7 @@ export function sortIssues(issues, order = "oldest", { me = "", priority = ["min
 }
 
 // 一轮：每个仓库各自捞、各自做，做完一条接一条。只派活，不等结果。
-// 会话中心模式（默认，sessionFlow.enabled）下捞到单先交给唯一编排会话，
+// 会话中心模式（默认，sessionFlow.enabled）下每张工单交给各自新建的编排会话，
 // 由它调 foreman dispatch 分配工作；ctx.hand=false 或 pickup.handToOrchestrator=false 才自己派。
 export async function runRound(ctx) {
   const { cfg, book, log } = ctx
@@ -159,9 +159,9 @@ export async function runRound(ctx) {
       })
       try {
         if (hand && ctx.dryRun) {
-          // dry-run 不许有副作用：只打印「会交给谁」，不 ensure、不 steer。
-          const target = String(book?.data?.orchestrator?.convId ?? "").trim()
-          log(`[dry-run] ${key}：会交给编排会话 ${target || "（还没起，会先起一条编排会话再 steer）"}，由它调 foreman dispatch`)
+          // dry-run 不许有副作用：只打印这张单会绑定哪条独立编排，不 ensure、不 steer。
+          const target = String(book?.issue?.(key)?.orchestrator ?? "").trim()
+          log(`[dry-run] ${key}：会交给这张单的独立编排会话 ${target || "（还没起，会先新建再 steer）"}，由它调 foreman dispatch`)
           out = { repo: repoCfg.repo, number: it.number, state: "planned", hand: true, orchestrator: target }
         } else {
           out = hand
@@ -280,16 +280,17 @@ export async function handleIssue(ctx, repoCfg, summary) {
   const flowOn = sessionFlowEnabled(cfg)
   const orchOn = flowOn && !decision
   // 编排会话有两种来源，都写进 issues[键].orchestrator，后续更新一律 steer 到它：
-  //   1) 定时任务自动接单：由 foreman 起的那条**唯一**编排会话（ensureOrchestrator 幂等）；
+  //   1) 定时任务自动接单：这张单自己新建一条编排会话（ensureIssueOrchestrator 按单幂等）；
   //   2) 用户自主发起的会话调 dispatch：直接把调用方会话 id 绑成这张单的编排（--orchestrator / MCP_VM_CONVERSATION_ID）。
   const caller = String(ctx.orchestrator ?? "").trim()
   let orchConvId = orchOn ? caller || String(prev.orchestrator ?? "").trim() : ""
   if (orchOn && !orchConvId) {
-    // 起不来不阻断派单：这条单先不绑，日志里写清，之后 orch start 起来再 dispatch 一次就会绑上。
+    // 没有安全绑定就不开工作会话，避免工作成果出来后无处可 steer。
     try {
-      orchConvId = (await ensureOrchestrator(ctx)).convId
+      orchConvId = (await ensureIssueOrchestrator(ctx, { issueKey: key, repoCfg, issue })).convId
     } catch (e) {
-      log(`${key}：编排会话没起来（${e.message}），这条单先不绑定`)
+      log(`${key}：独立编排会话没起来，暂停派单：${e.message}`)
+      return { repo: repoCfg.repo, number: issue.number, state: "failed", reason: `编排会话没起来：${e.message}` }
     }
   } else if (orchOn && caller) {
     log(`${key}：绑定调用方会话 ${caller} 为这张单的编排（用户自主发起）`)

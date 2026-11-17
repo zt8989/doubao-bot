@@ -18,10 +18,10 @@ Gitea 侧一律走 opencli。
 
 ## 以编排会话为中心（默认）
 
-整条链路只有**一条编排智能体会话**（`foreman-编排`，账本顶层 `orchestrator`）：
+自动巡检时，每张工单都有**自己的一条编排智能体会话**（`foreman-<仓库>-<单号>-编排`），绑定在 `issues[键].orchestrator`：
 
 ```
-捞到工单 → hand：steer 工单进编排会话（账本记 handed）
+捞到工单 → hand：新建/复用这张单的编排会话，steer 工单进去（账本记 handed）
               ↓（编排读工单，自己决定怎么派）
          dispatch：建一工程一工作区 + 开工作会话，会话 id 绑回编排（issues[键].agentConvId / .orchestrator）
               ↓
@@ -32,13 +32,13 @@ Gitea 侧一律走 opencli。
          编排核对 → pr merge（合并即关单）→ clean：清 worktree、本地分支、工作会话与监听（幂等）
 ```
 
-- **唯一性**：自动接单时 `ensureOrchestrator` 幂等——账本里已有 `convId` 就直接复用，绝不开第二条。
-  用户自己发起的会话不需要这条：发起方就是编排（见下）。PR 监听同样 steer 到编排会话，不再新建「合并会话」。
+- **按单独立**：自动接单时 `ensureIssueOrchestrator` 按工单幂等——这张单已有 `convId` 就复用，不重复开；不同工单绝不共用。
+  用户自己发起的会话不需要另起：发起方就是编排（见下）。PR 监听独立走 `deliver.mode=new`，新建「合并会话」。
 - **编排会话从哪来（两种都绑同一种字段 `issues[键].orchestrator`）**：
-  1. **定时任务自动接单**：`foreman hand` → foreman 起/复用那条**全局**编排会话（`orch start`，全程只有一条）；
+  1. **定时任务自动接单**：`foreman hand` → foreman 新建/复用这张单自己的编排会话；
   2. **用户自主发起**：用户在某个豆包会话里调 `foreman dispatch`（或 hand/resume），
      发起方会话 id（`--orchestrator <id>`，不传则取 `MCP_VM_CONVERSATION_ID`）直接绑成这张单的编排，
-     工作会话的更新都 steer 回那条发起方会话，不会再另起全局编排会话。
+     工作会话的更新都 steer 回那条发起方会话，不会再另起编排会话。
 - **绑定**：`dispatch` 把工作会话写进账本（`agent` / `agentConvId` / `orchestrator`，会话记录 `kind: "worker"`、`parent: <编排 id>`）。
 - **失败不新开**：`foreman resume` 找到这条单绑定的工作会话，用 `dws steer` 把「接着跑」插进去；
   续跑计数与 `lastFailure` 都写账本。
@@ -298,7 +298,7 @@ foreman run --direct --once      # 这一轮自己派活（老行为，不交给
 foreman run --every 1800         # 常驻，每 1800s 一轮
 foreman run --notify <会话id|标题>  # 这一轮派出的会话，登记监听时通知目标写谁
 foreman run --no-notify          # 这一轮不登记监听，因此不会有通知（连同其它参数一起用）
-foreman orch start               # 起/复用全局编排会话（幂等；只有自动接单用这条）
+foreman orch start               # 手工兼容入口：起/复用顶层全局编排（自动巡检不用它）
 foreman orch show                 # 每条编排会话绑了哪些工作会话、最近 steer 了什么
 foreman hand <owner/name>#N      # 把工单交给编排会话（不建工作区、不开工作会话）
 foreman dispatch <owner/name>#N  # 编排调用：建工作区 + 开工作会话，会话 id 绑回编排；已派过就 steer 续跑

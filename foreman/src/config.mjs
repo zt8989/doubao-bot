@@ -37,13 +37,14 @@ export const DEFAULTS = {
     // 保守开关：有被监听会话在跑时不派新会话（老行为）。默认关，
     // 关掉才能同时有 2 张单在跑；豆包窗口互相抢时再打开。
     pauseWhileRunning: false,
-    // 以编排会话为中心：捞到单先交给唯一编排会话（steer），由它调 foreman dispatch 分配工作。
+    // 自动巡检每张工单先新建自己的编排会话（steer 工单进去），由它调 foreman dispatch 分配工作。
     // 设 false（或 CLI 带 --direct）退回老行为：run 自己建工作区、开工作会话。
     handToOrchestrator: true,
   },
-  // 以编排会话为中心：全程只起一条编排会话（不再每次收工新建派单/合并会话）。
-  // 工作会话 id 绑在它身上，状态更新走 dws steer；失败也 steer 续跑同一条工作会话；
-  // 合并关单后 foreman clean 清 worktree 与会话。enabled:false 退回老的多会话模型。
+  // 工单会话中心：自动巡检每张工单各起一条编排会话，工作会话绑定这张单的编排。
+  // 用户从当前会话主动派单时直接绑定当前会话；后续状态更新都 steer 到单上绑定的编排。
+  // PR 扫描不受这里控制，deliver.mode=new 时始终新建合并会话。
+  // enabled:false 退回老的多会话模型。
   sessionFlow: {
     enabled: true,
     // 会话名；留空用 `<deliver.namePrefix>-编排`。
@@ -78,8 +79,8 @@ export const DEFAULTS = {
     maxAttempts: 2,
     events: ["done", "pr-open", "needs-human", "blocked", "escalated", "failed"],
   },
-  // PR 监听：每 intervalSeconds 扫一遍各仓库 open PR，把作者不在 ignoreAuthors 里的单
-  // 别人家的 PR 只通知「最早登记的调用方」（编排 agent），由它核对工单后合并。默认 5 分钟一次。
+  // PR 监听：每 intervalSeconds 扫一遍各仓库 open PR，过滤自己的 PR 与冲突 PR。
+  // deliver.mode=new 时每轮新建合并会话并附 PR 链接，由它核对后合并；existing 才通知已有会话。
   prWatch: {
     enabled: true,
     intervalSeconds: 300,

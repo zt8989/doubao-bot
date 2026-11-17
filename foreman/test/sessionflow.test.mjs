@@ -121,6 +121,41 @@ test("hand：起编排会话并把工单 steer 进去，账本记 handed（不�
   }
 })
 
+test("自动巡检：每张工单各建独立编排并绑定，重复交同一张单不重复开", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-per-issue-"))
+  try {
+    const cfg = mkCfg(dir)
+    const repo = mkRepo(dir, "demo")
+    cfg.repos = [repo]
+    const dws = mkDws()
+    const ctx = {
+      cfg,
+      dws,
+      log: () => {},
+      gitea: { viewIssue: async (_repo, n) => ({ number: n, title: `工单 ${n}`, body: `处理 ${n}` }) },
+    }
+
+    const first = await handToOrchestrator(ctx, { repoCfg: repo, issue: { number: 7, title: "工单 7" } })
+    const second = await handToOrchestrator(ctx, { repoCfg: repo, issue: { number: 8, title: "工单 8" } })
+    const again = await handToOrchestrator(ctx, { repoCfg: repo, issue: { number: 7, title: "工单 7" } })
+    const book = new Book(cfg.stateFile)
+
+    assert.notEqual(first.convId, second.convId, "不同工单不能共用编排会话")
+    assert.equal(again.convId, first.convId, "同一工单要复用已绑定的编排会话")
+    assert.equal(dws.calls.openNew.length, 2, "两张工单只各开一条编排")
+    assert.match(dws.calls.openNew[0].name, /demo-7-编排/)
+    assert.match(dws.calls.openNew[1].name, /demo-8-编排/)
+    assert.match(dws.calls.openNew[0].prompt, /绑定工单：yyzl\/demo#7/)
+    assert.equal(book.issue("yyzl/demo#7").orchestrator, first.convId)
+    assert.equal(book.issue("yyzl/demo#8").orchestrator, second.convId)
+    assert.equal(book.session(dws.calls.openNew[0].name).issueKey, "yyzl/demo#7")
+    assert.equal(orchestratorTarget(book), "", "自动流程不再创建全局编排")
+    assert.equal(dws.calls.steer.at(-1).target, first.convId, "后续仍 steer 到这张单自己的编排")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("dispatch：工作会话 id 绑到编排会话（账本 + 会话记录都要对得上）", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-dispatch-"))
   try {
@@ -160,7 +195,9 @@ test("dispatch：工作会话 id 绑到编排会话（账本 + 会话记录都�
     assert.ok(rec.orchestrator, "编排会话 id 要写进账本")
     assert.equal(book.session(out[0].agent).parent, rec.orchestrator)
     assert.equal(book.session(out[0].agent).kind, "worker", "工作会话要标成 worker，不能算编排会话")
-    assert.equal(dws.calls.openNew.length, 2, "1 条编排 + 1 条工作会话")
+    assert.equal(dws.calls.openNew.length, 2, "1 条工单编排 + 1 条工作会话")
+    assert.match(dws.calls.openNew[0].name, /demo-7-编排/)
+    assert.equal(orchestratorTarget(book), "", "直接派单也不该创建全局编排")
     assert.deepEqual(workerOf(book, key).convId, out[0].convId)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
