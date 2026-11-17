@@ -97,10 +97,11 @@ export async function ensureOrchestrator(ctx, { name = "" } = {}) {
   return { ok: true, reused: false, created: true, convId: newConvId, name: nm }
 }
 
-// 一张自动巡检工单一条编排会话。先创建并立刻把 convId 绑到 issues[key]，再交工单；
-// 如果后续 steer 失败，下一轮会复用这条绑定，不会重复开新会话。
+// 所有工单共用同一条全局编排会话（用户 2026-11-17 口径：始终用一个）。
+// 先复用 issues[key].orchestrator 上已有的绑定；没绑就退到全局编排会话，
+// 并把这条 convId 写回 issues[key].orchestrator，保证 steerOrchestrator 找得到。
 export async function ensureIssueOrchestrator(ctx, { issueKey, repoCfg = null, issue = null } = {}) {
-  const { cfg, dws, log = () => {} } = ctx
+  const { cfg, log = () => {} } = ctx
   const key = String(issueKey ?? "").trim()
   if (!key) throw new Error("issueKey 不能为空，无法绑定工单编排会话")
   const book = new Book(cfg.stateFile)
@@ -108,19 +109,13 @@ export async function ensureIssueOrchestrator(ctx, { issueKey, repoCfg = null, i
   const existing = String(prev.orchestrator ?? "").trim()
   if (existing) {
     const name = Object.entries(book.sessions ?? {}).find(([, s]) => String(s?.convId ?? "") === existing)?.[0]
-      || issueOrchestratorName(cfg, key)
+      || orchestratorName(cfg)
     return { ok: true, reused: true, created: false, convId: existing, name }
   }
-  if (typeof dws?.openNew !== "function") {
-    throw Object.assign(new Error("会话适配器没有 openNew，起不了工单编排会话"), { code: "no-session-adapter" })
-  }
-
-  const name = issueOrchestratorName(cfg, key)
-  const prompt = orchestratorPrompt(ctx, { issueKey: key, issue })
-  const noWait = cfg?.sessionFlow?.waitFirstReply !== true
-  const out = await dws.openNew({ name, prompt, noWait })
-  const convId = String(out?.convId ?? "").trim()
-  if (!convId) throw new Error(`工单编排会话 ${name} 没返回会话 id，不能安全绑定`)
+  // 复用 / 起全局编排会话
+  const g = await ensureOrchestrator(ctx)
+  const convId = String(g.convId ?? "").trim()
+  if (!convId) throw new Error("全局编排会话没拿到 convId，不能绑定到工单")
   const number = Number(key.split("#")[1] ?? 0) || null
   book.setIssue(key, {
     repo: String(repoCfg?.repo ?? prev.repo ?? key.split("#")[0]),
@@ -129,16 +124,8 @@ export async function ensureIssueOrchestrator(ctx, { issueKey, repoCfg = null, i
     url: String(issue?.url ?? prev.url ?? ""),
     orchestrator: convId,
   })
-  book.record(name, {
-    convId,
-    kind: "orchestrator",
-    role: "orchestrator",
-    notify: false,
-    issue: number,
-    issueKey: key,
-  })
-  log(`${key}：已新建独立编排会话 ${name}`)
-  return { ok: true, reused: false, created: true, convId, name }
+  log(`${key}：复用全局编排会话 ${g.name}`)
+  return { ok: true, reused: true, created: false, convId, name: g.name }
 }
 
 // 一张单的后续更新只认单上绑定的编排会话；没有绑定就停住，不再错投到全局编排。
