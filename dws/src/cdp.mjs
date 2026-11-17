@@ -37,27 +37,74 @@ export async function targets(port) {
   }
 }
 
-// copies 列出正在跑这个二进制的进程命令行，用于发现“用户自己开的那个”。
-export function copies(binary) {
+// processes 列出正在跑这个二进制的进程（pid + 命令行）。
+// 发现“用户自己开的那个”和 `dws start --force` 该杀谁，都靠它：只认主进程，
+// 不碰 Chromium 的 Helper 子进程（主进程退了，子进程跟着退）。
+export function processes(binary) {
   let out = ""
   try {
-    out = execFileSync("ps", ["-axww", "-o", "command="], {
+    out = execFileSync("ps", ["-axww", "-o", "pid=,command="], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     })
   } catch {
     return []
   }
-  return out
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l === binary || l.startsWith(binary + " "))
+  const list = []
+  for (const line of out.split("\n")) {
+    const m = line.trim().match(/^(\d+)\s+(.*)$/)
+    if (!m) continue
+    const command = m[2]
+    if (command !== binary && !command.startsWith(binary + " ")) continue
+    list.push({ pid: Number(m[1]), command })
+  }
+  return list
+}
+
+// copies 只留命令行（老接口，别删：App 的 others 注入还按它来）。
+export function copies(binary) {
+  return processes(binary).map((p) => p.command)
+}
+
+function alive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (e) {
+    // EPERM 说明进程还在，只是不归我们发信号
+    return e?.code === "EPERM"
+  }
+}
+
+// signalPids 给一批 pid 发信号；已经退掉的、没权限的都跳过，不抛错。
+export function signalPids(pids, sig) {
+  for (const pid of pids) {
+    try {
+      process.kill(pid, sig)
+    } catch {}
+  }
+}
+
+// killPids 按「先 SIGTERM 让它体面退出、等一会儿还活着再 SIGKILL」杀一批进程。
+// 返回 { term, kill, stillAlive }：term = 发了 SIGTERM 的，kill = 补了 SIGKILL 的。
+export async function killPids(pids, { graceMs = 5000, pollMs = 250, signal } = {}) {
+  const list = (pids ?? []).filter((pid) => Number.isInteger(pid) && pid > 0)
+  if (!list.length) return { term: [], kill: [], stillAlive: [] }
+  signalPids(list, "SIGTERM")
+  const until = Date.now() + graceMs
+  while (Date.now() < until && list.some(alive)) await sleep(pollMs, signal)
+  const stubborn = list.filter(alive)
+  if (stubborn.length) signalPids(stubborn, "SIGKILL")
+  const hardUntil = Date.now() + 2000
+  while (Date.now() < hardUntil && stubborn.some(alive)) await sleep(pollMs, signal)
+  return { term: list, kill: stubborn, stillAlive: list.filter(alive) }
 }
 
 export class App {
-  constructor({ binary, dataDir, owns, args = [], others }) {
-    Object.assign(this, { binary, dataDir, owns, args })
-    this.others = others ?? (() => copies(binary))
+  constructor({ binary, dataDir, owns, args = [], others, procs, kill = killPids, probe = targets }) {
+    Object.assign(this, { binary, dataDir, owns, args, kill, probe })
+    this.procs = procs ?? (() => processes(binary))
+    this.others = others ?? (() => this.procs().map((p) => p.command))
     this.profile = path.join(dataDir, "profile")
     this.portFile = path.join(dataDir, "port")
   }
@@ -74,26 +121,88 @@ export class App {
   async running() {
     const port = this.savedPort()
     if (!port) return 0
-    const list = await targets(port)
+    const list = await this.probe(port)
     return list && this.owns(list) ? port : 0
   }
 
-  // start 没启动就启动，等到页面应答为止；从不杀进程。
-  // 用户自己开着的那份会把新进程“抢走”后自己退出（macOS 单实例），
-  // 且默认 profile 不允许开调试端口，所以这种情况直接报 app_busy。
-  async start({ timeout = 45000, signal } = {}) {
-    const up = await this.running()
-    if (up) return up
+  // status 把启动现场一次说清：
+  //   port    我们自己的实例在后面答 CDP 的端口（0 = 没有）
+  //   savedPort 上次落盘的端口（可能已失效）
+  //   procs   跑这个二进制的全部进程
+  //   foreign 不带我们 profile 的那些 —— 用户自己开的豆包，dws 接管不了
+  async status() {
+    const savedPort = this.savedPort()
+    const list = savedPort ? await this.probe(savedPort) : null
+    const port = list && this.owns(list) ? savedPort : 0
+    const mine = `--user-data-dir=${this.profile}`
+    const procs = this.procs()
+    return { port, savedPort, procs, foreign: procs.filter((p) => !p.command.includes(mine)) }
+  }
+
+  // shutdown 杀掉这个二进制的全部进程（只给 `dws start --force` 清场用）。
+  // 用户自己开的豆包窗口会一起没，这是 --force 明确要求的行为；杀掉后把失效的端口文件清掉。
+  async shutdown({ graceMs = 5000, signal } = {}) {
+    const procs = this.procs()
+    if (!procs.length) {
+      try {
+        fs.rmSync(this.portFile, { force: true })
+      } catch {}
+      return { pids: [], term: [], kill: [] }
+    }
+    const pids = procs.map((p) => p.pid)
+    const r = await this.kill(pids, { graceMs, signal })
+    const until = Date.now() + 3000
+    while (Date.now() < until && this.procs().length) await sleep(250, signal)
+    if (this.procs().length) {
+      throw Object.assign(Error(`豆包进程杀不掉（PID ${this.procs().map((p) => p.pid).join(", ")}）`), {
+        code: "app_kill_failed",
+      })
+    }
+    try {
+      fs.rmSync(this.portFile, { force: true })
+    } catch {}
+    return { pids, term: r.term ?? pids, kill: r.kill ?? [] }
+  }
+
+  // up 独占启动：已由 dws 起好且端口在答就直接复用；豆包在跑但没开 CDP 时
+  // 没有 force 就报 app_busy（并提示 --force），有 force 就先杀掉再起。
+  // 返回 { port, already, killed }——killed 是本次被 --force 杀掉的 pid。
+  async up({ timeout = 45000, force = false, signal } = {}) {
+    const st = await this.status()
+    if (st.port) return { port: st.port, already: true, killed: [] }
     if (!fs.existsSync(this.binary)) {
       throw Object.assign(Error(`找不到豆包：${this.binary}`), { code: "app_missing" })
     }
-    const mine = `--user-data-dir=${this.profile}`
-    if (this.others().some((c) => !c.includes(mine))) {
-      throw Object.assign(
-        Error(`豆包正在用你自己的 profile 运行，请先完全退出豆包（⌘Q）再让 dws 启动它`),
-        { code: "app_busy" }
-      )
+    let killed = []
+    if (st.procs.length) {
+      const pids = st.procs.map((p) => p.pid).join(", ")
+      if (!force) {
+        throw Object.assign(
+          Error(
+            `豆包已经在运行（PID ${pids}），但没有可用的 CDP 调试端口，dws 接管不了。\n` +
+              `  要独占启动就加 --force：dws start --force（会先杀掉豆包进程再启动）\n` +
+              `  或者自己 ⌘Q 退出豆包后重跑`
+          ),
+          { code: "app_busy", pids: st.procs.map((p) => p.pid) }
+        )
+      }
+      // --force：清场。同一个二进制只能有一个实例，我们自己那份没开端口的残留也一起杀。
+      const shut = await this.shutdown({ signal })
+      killed = shut.pids
     }
+    const port = await this.launch({ timeout, signal })
+    return { port, already: false, killed }
+  }
+
+  // start 没启动就启动，等到页面应答为止；从不杀进程（要杀用 up({ force: true })）。
+  // 用户自己开着的那份会把新进程“抢走”后自己退出（macOS 单实例），
+  // 且默认 profile 不允许开调试端口，所以这种情况直接报 app_busy。
+  async start(opts = {}) {
+    return (await this.up(opts)).port
+  }
+
+  // launch 真的拉起进程并等页面应答；清场逻辑不在这里。
+  async launch({ timeout = 45000, signal } = {}) {
     fs.mkdirSync(this.profile, { recursive: true })
     const port = await freePort()
     fs.writeFileSync(this.portFile, String(port))
@@ -106,7 +215,7 @@ export class App {
     const until = Date.now() + timeout
     while (Date.now() < until) {
       await sleep(400, signal)
-      const list = await targets(port)
+      const list = await this.probe(port)
       if (list && this.owns(list)) return port
     }
     throw Object.assign(

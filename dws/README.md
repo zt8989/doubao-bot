@@ -24,7 +24,13 @@ push / 开 PR / 合并 / 关单、工单留言、挂起与重试队列、定时�
 ## 前置条件（重要）
 
 1. **豆包一次只能开一个副本。** 你自己开着的豆包会占住单实例，`dws` 起不来（报 `app_busy`）。
-   跑之前先 **⌘Q 退出豆包**；`dws` 会用自己的 profile 起一个窗口，这个窗口你可以同时用。
+   两种情况分开处理：
+   - 先跑 `dws start`：已由 dws 起好且调试端口在答就直接复用，不重复开窗口。
+   - 豆包在跑但没开 CDP 调试端口（也就是你自己开的那个窗口）：`dws start` 会拒绝并提示
+     `dws start --force`。加 `--force` 才动手——它先杀掉豆包进程（你自己开的窗口会一起没），
+     再独占启动。也可以先 **⌘Q 退出豆包**再跑 `dws start`。
+   - 从豆包会话里发出的 `dws start --force` 会被拒绝：杀豆包等于杀掉发出命令的这个窗口。
+     要清场请到终端里跑。
 2. 这个 profile 默认复用 magpie 的 `~/Library/Application Support/magpie-doubao-work`，
    里面已经登录过豆包。换 profile 用 `DOUBAO_WORK_HOME`，换二进制用 `DOUBAO_WORK_APP`。
 3. Node ≥ 22（用到内置 `WebSocket` / `fetch`）。
@@ -39,12 +45,18 @@ npm link          # 全局安装：之后任何地方都能用 dws
 # 全局安装推荐把配置放 ~/.dws/config.json（默认会找 ./config.json，其次 ~/.dws/config.json）
 mkdir -p ~/.dws && cp config.example.json ~/.dws/config.json
 
-dws doctor                           # 自检；--start 会真的拉起豆包查登录态
+dws doctor                           # 零成本自检（二进制 / profile / 配置 / 进程·CDP 端口）
+dws start                            # 要拉起豆包查登录态用这个（doctor --start 已下线）
 ```
 
 ## 命令
 
 ```bash
+# 独占启动：没在跑就用自己的 profile 拉起豆包并开 CDP 端口
+dws start
+# 豆包在跑但没开 CDP（你自己开的窗口）：先杀掉它再独占启动
+dws start --force
+
 # 开一条会话（新建工作任务；带 prompt 就顺带把第一句发出去并等它跑完）
 dws open --name win-ai-harness --repo yyzl/win-ai-harness --prompt "先看一眼仓库现状"
 dws open --name scratch --file /tmp/brief.md             # 长提示词走文件
@@ -111,7 +123,7 @@ id 会给出两种假结论：明明建出来了却报「窗口没切到新会�
 
 | 现象 | 处理 |
 | --- | --- |
-| `豆包正在用你自己的 profile 运行` | ⌘Q 退出豆包，再跑 |
+| `豆包已经在运行（PID …），但没有可用的 CDP 调试端口` | 你自己开的豆包占着单实例。⌘Q 退出，或跑 `dws start --force`（杀进程再独占启动） |
 | `豆包没有登录` | 在 `dws` 起的那个窗口里登录一次（profile 会记住） |
 | 会话说“菜单里没有模型” | 豆包模型菜单改了；`dws open --model auto` 或改 `models.json` |
 | `dws status` 说不在当前窗口 | 窗口里是别的任务；`dws use <id>` 切过去再查 |

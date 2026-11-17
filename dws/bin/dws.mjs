@@ -15,6 +15,7 @@ const VERSION = JSON.parse(fs.readFileSync(path.join(HERE, "..", "package.json")
 const HELP = `dws ${VERSION} —— 豆包会话 CLI（开启会话 / 会话状态 / 会话信息）
 
 用法：
+  dws start [--force]               独占启动豆包（自己的 profile + CDP 调试端口）
   dws open  --name <会话名> [--repo <owner/name>] [--project <项目名>] [--prompt <文字> | --file <文件>]
             [--mode local|cloud] [--model auto|<模型 id>] [--no-wait]
   dws projects                      列出豆包侧边栏「项目」分组下的项目
@@ -26,7 +27,7 @@ const HELP = `dws ${VERSION} —— 豆包会话 CLI（开启会话 / 会话状�
   dws status [会话名|任务id] [--json]       看会话状态（是否还在跑 / 是否已跑完）
   dws info  [会话名|任务id] [--json] [--out <文件>]   取会话信息（整段对话）
   dws send  <会话名|任务id> <文字> | --file <文件>     在同一任务里续说；任务不在了就重开并带 handoff
-  dws doctor [--start]               自检：豆包二进制、profile、配置、登录态
+  dws doctor                         零成本自检：豆包二进制、profile、配置、进程/CDP 端口
   dws help <命令>                   看某条命令的用法（等价于 dws <命令> --help）
 
 公共参数：
@@ -60,9 +61,13 @@ const { pos, flags } = parseArgs(argv.slice(1))
 // 每条命令的用法。子命令的 --help/-h 只打印这里的内容，绝不进入执行流程
 // （历史上子命令的 --help 曾被当成真实执行，所以这里独立于执行流程）。
 const HELP_BY_CMD = {
+  start: [
+    "dws start [--force]",
+    "独占启动豆包：用自己的 profile 拉起豆包并开 CDP 调试端口，起好了就复用（不重复开窗口）。豆包已经在运行、但没开 CDP 调试端口时拒绝启动，并提示加 --force；--force 会先杀掉豆包进程（用户自己开的那个窗口也会没），再独占启动。",
+  ],
   open: [
     "dws open --name <会话名> [--repo <owner/name>] [--project <项目名>] [--prompt <文字> | --file <文件>]\n            [--mode local|cloud] [--model auto|<模型 id>] [--no-wait]",
-    "新建一条工作任务（会话）。带 --prompt/--file 会顺带把第一句发出去并等它跑完；不带就只建任务。豆包是单实例，先 ⌘Q 退出自己的豆包。",
+    "新建一条工作任务（会话）。带 --prompt/--file 会顺带把第一句发出去并等它跑完；不带就只建任务。豆包是单实例：先用 dws start 独占启动（自己开着的豆包会占住单实例，先 ⌘Q 退出，或 dws start --force 杀掉它再起）。",
     "--no-wait 只确认首句送达并回读新会话 id，不等第一轮回复（每次新建会话的通知用）。",
   ],
   projects: ["dws projects", "列出豆包侧边栏「项目」分组下的项目。"],
@@ -98,8 +103,8 @@ const HELP_BY_CMD = {
     "--no-wait 只确认送达、不等回复（通知这类场景用；目标在跑时用 Command+Enter 追加，不打断）。",
   ],
   doctor: [
-    "dws doctor [--start]",
-    "自检：豆包二进制、profile、配置。--start 会真的拉起豆包查登录态。",
+    "dws doctor",
+    "零成本自检：豆包二进制、profile、配置、进程/CDP 端口；不会拉起豆包。要拉起窗口并查登录态用 dws start（--start 已下线）。",
   ],
 }
 
@@ -148,6 +153,8 @@ async function main() {
       return say(VERSION)
     case "open":
       return cmdOpen()
+    case "start":
+      return cmdStart()
     case "list":
       return cmdList()
     case "use":
@@ -206,6 +213,56 @@ function ctx({ needConfig = false } = {}) {
   })
   liveSession = session
   return { cfg, book, session, doubao }
+}
+
+// dws start：独占启动豆包（自己的 profile + CDP 调试端口）。
+// 已在跑且端口在答 → 直接复用；豆包在跑但没开 CDP → 没 --force 就报 app_busy 并提示 --force，
+// 有 --force 就先杀掉进程再独占启动。
+async function cmdStart() {
+  const { doubao } = ctx()
+  const force = isTruthy(flags.force, false)
+  // --force 会杀掉豆包进程。如果这条命令就是从豆包会话里发出的，杀掉豆包等于把
+  // 发出命令的这个窗口（和这条回复）一起杀掉：直接拒绝，让用户到终端里跑。
+  if (force && selfConvIds().length) {
+    throw Error(
+      `拒绝 --force：这条命令是从豆包会话 ${selfConvIds()[0]} 里发出的，` +
+        `杀掉豆包进程会把你正在用的这个窗口（和这条回复）一起杀掉。要独占启动请在终端里跑 dws start --force。`
+    )
+  }
+  const st = await doubao.app.status()
+  if (st.port) {
+    log(`豆包已经在 dws 的调试端口 ${st.port} 上答话，直接复用`)
+  } else if (st.procs.length && force) {
+    log(`--force：先杀掉豆包进程（PID ${st.procs.map((p) => p.pid).join(", ")}），再独占启动……`)
+  } else if (st.procs.length) {
+    log(`豆包在运行但没开 CDP 调试端口（PID ${st.procs.map((p) => p.pid).join(", ")}）`)
+  } else {
+    log(`启动豆包（profile ${doubao.app.profile}）……`)
+  }
+  const up = await doubao.app.up({ force })
+  log(up.already ? `已复用端口 ${up.port}` : `豆包已起在端口 ${up.port}`)
+  // 起完顺手读一次登录态：没登录的话后续命令全会 doubao_signed_out，提前说清楚。
+  let state = null
+  let windowErr = ""
+  try {
+    state = await doubao.state()
+  } catch (e) {
+    windowErr = e.message.split("\n")[0]
+  }
+  if (state && !state.signedIn) log(`豆包这个 profile 还没登录：在窗口里登录一次（profile 会记住）`)
+  if (windowErr) log(`窗口没读到聊天页：${windowErr}（在豆包里点开一个对话再跑）`)
+  printJson({
+    ok: true,
+    port: up.port,
+    already: up.already || undefined,
+    killed: up.killed.length ? up.killed : undefined,
+    profile: doubao.app.profile,
+    window: !!state,
+    signedIn: state?.signedIn,
+    user: state?.name || undefined,
+    convId: state?.convId || undefined,
+    error: windowErr || undefined,
+  })
 }
 
 async function cmdOpen() {
@@ -580,16 +637,22 @@ async function cmdDoctor() {
   const d = new Doubao()
   add("豆包二进制", fs.existsSync(d.app.binary), d.app.binary)
   add("豆包 profile", fs.existsSync(path.join(d.app.dataDir, "profile")), d.app.dataDir)
-  if (isTruthy(flags.start, false)) {
-    try {
-      const st = await d.state()
-      add("豆包登录态", st.signedIn, `${st.name || "?"} · ${st.url}`)
-      d.close()
-    } catch (e) {
-      add("豆包窗口", false, `${e.code ?? ""} ${e.message}`)
-    }
-  } else {
-    add("豆包窗口", true, "跳过（加 --start 会真的拉起窗口检查登录态）")
+  try {
+    const st = await d.app.status()
+    add(
+      "豆包进程",
+      true,
+      st.procs.length
+        ? `${st.procs.length} 个（PID ${st.procs.map((p) => p.pid).join(", ")}）${st.port ? `，CDP 端口 ${st.port}` : "，没开 CDP 端口（要独占启动加 dws start --force）"}`
+        : "没在跑"
+    )
+  } catch (e) {
+    add("豆包进程", false, e.message)
+  }
+  if (flags.start !== undefined) {
+    // --start 已下线：它和 dws start 干的是同一件事（拉起窗口 + 查登录态），
+    // 留两个入口只会让「哪个命令会真的启动豆包」说不清的。
+    throw Error("`dws doctor --start` 已下线：要拉起豆包查登录态请跑 `dws start`（doctor 只做零成本自检）")
   }
 
   for (const c of checks) log(`${c.ok ? "✓" : "✗"} ${c.name}${c.detail ? "  " + c.detail : ""}`)
@@ -610,7 +673,7 @@ async function promptOf() {
 function whyText(why) {
   return (
     {
-      app_busy: "豆包正被你自己的窗口占着，先退掉再跑",
+      app_busy: "豆包正被你自己的窗口占着，先退掉再跑（或 dws start --force 杀掉它再独占启动）",
       app_missing: "没装豆包",
       signed_out: "豆包没登录",
       no_task: "窗口里还没有任务",

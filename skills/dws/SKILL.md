@@ -12,17 +12,22 @@ description: 驱动 dws（豆包会话 CLI，项目 doubao-bot）：给豆包桌
 ## 动手前先确认这四条
 
 1. `command -v dws`。没有链接时用 `node /Users/zhouteng/Documents/workspace/doubao-bot/dws/bin/dws.mjs <子命令>`，行为一致。
-2. **豆包是单实例**：用户自己开着的豆包会占住单实例，必须让用户 **⌘Q 退出**后才能跑会话类命令。报 `app_busy` /「豆包正在用你自己的 profile 运行」时停下来说明并等用户退出，不要换 profile、不要反复重试。
+2. **豆包是单实例**：先跑 `dws start` 独占启动（已由 dws 起好且调试端口在答就直接复用）。
+   豆包在跑但没开 CDP 调试端口时，`dws start` 会拒绝并提示 `dws start --force`；`--force` 才会
+   先杀掉豆包进程（用户自己开的窗口会一起没）再独占启动。不要换 profile、不要反复重试。
+   从豆包会话里发出的 `dws start --force` 会被拒绝——杀豆包等于杀掉发出命令的会话，清场要到终端里跑。
+   会话类命令自己也会在需要时拉起豆包，所以 `dws start` 不是前置必需，只是「先把窗口备好」。
 3. 配置查找顺序：`./config.json` → `~/.dws/config.json`；要指定就用 `-c <文件>` 或 `--config <文件>`（两者等价）。全局配置里 `stateFile` 应写 `"state.json"`（写 `.dws/state.json` 会套成 `~/.dws/.dws/`）。
 4. Node ≥ 22（用到内置 `WebSocket` / `fetch`）。
 
-`dws doctor` 是零成本自检（豆包二进制、profile、配置）；加 `--start` 才真的拉起豆包查登录态。
+`dws doctor` 是零成本自检（豆包二进制、profile、配置、进程/CDP 端口），不会拉起豆包。要拉起窗口并查登录态用 `dws start`；`dws doctor --start` 已下线（和 `dws start` 重复），调用会直接报错并指向 `dws start`。
 
 ## 按目标选命令
 
 | 目标 | 命令 |
 | --- | --- |
-| 自检 | `dws doctor` / `dws doctor --start` |
+| 自检 | `dws doctor`（要拉起豆包查登录态用 `dws start`） |
+| 独占启动豆包 | `dws start`（豆包在跑但没开 CDP 时加 `--force` 先杀掉再起） |
 | 看全部工作任务 + 本地会话 | `dws list` / `dws projects` |
 | 看某条会话跑到哪了 | `dws status [会话名\|任务id] [--json]` |
 | 取整段对话（含思考） | `dws info [会话名\|任务id] [--json] [--out <文件>]` |
@@ -34,6 +39,8 @@ description: 驱动 dws（豆包会话 CLI，项目 doubao-bot）：给豆包桌
 | 归档一段对话 | `dws archive <任务id\|会话名>` |
 
 ```bash
+dws start                                  # 独占启动（已在跑就复用，端口在答就直说端口）
+dws start --force                          # 豆包在跑但没开 CDP：杀掉进程再独占启动（用户窗口会没）
 dws open --name scratch                    # 只建工作任务，不发第一句
 dws open --name review --prompt "先看一眼仓库现状"
 dws open --name notice --file /tmp/notice.md --no-wait   # 投递完就返回，不等第一轮回复
@@ -50,6 +57,8 @@ dws send review "接着改，先跑一下单测"
 
 会话命令的坑：
 
+- `start` 是独占启动：没在跑就用自己的 profile 拉起豆包并开 CDP 调试端口；已由 dws 起好且端口在答就直接复用，不重复开窗口。豆包在跑但没开 CDP（用户自己开的窗口）时**默认拒绝**并提示 `dws start --force`，不会自动杀进程；`--force` 才会先 SIGTERM→SIGKILL 杀掉豆包进程再启动。**从豆包会话里发出的 `--force` 会被拒绝**（杀豆包会把发出命令的这个窗口和回复一起杀掉），清场请在终端里跑。
+- `open` 会顺带拉起豆包，所以日常不必先 `dws start`；`start` 用在「想先确认窗口/登录态再派活」的场景。
 - `use` 会把用户的豆包窗口切走；用户正在用那个窗口时不要调，改为读已落盘的 `status` / `info` 摘要。
 - `status` / `info` 需要连上窗口；窗口里是别的任务时会明确报「不在当前窗口里」，并给出落盘的最后一次回复摘要——这不算失败。
 - `send` 在同一任务里续说；任务已不在窗口时会新开一条并自动带 handoff（进展都在工作区提交里）。

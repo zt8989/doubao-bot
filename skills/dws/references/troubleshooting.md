@@ -10,8 +10,8 @@
 
 ```bash
 command -v dws && dws --help
-dws doctor                 # 零成本：二进制、profile、配置
-dws doctor --start         # 会真的拉起豆包，查登录态与窗口
+dws doctor                 # 零成本：二进制、profile、配置、进程/CDP 端口
+dws start                  # 要拉起豆包查登录态与窗口用这个（doctor --start 已下线）
 ```
 
 `doctor` 打 JSON，`ok:false` 的条目就是问题所在；不要跳过它去猜。默认 profile 与二进制：
@@ -24,11 +24,12 @@ dws doctor --start         # 会真的拉起豆包，查登录态与窗口
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| `app_busy` /「豆包正在用你自己的 profile 运行，请先 ⌘Q」 | 用户自己开的豆包占了单实例（CDP 端口冲突）；不是配置错 | 让用户 ⌘Q 退出豆包，再重跑；**不要换 profile、不要反复重试**；起来后 `dws doctor --start` 查登录 |
+| `app_busy` /「豆包已经在运行（PID …），但没有可用的 CDP 调试端口」 | 豆包在跑但没开调试端口（通常是用户自己开的那个窗口占了单实例）；不是配置错 | 要独占启动就 `dws start --force`（先杀掉豆包进程再起，用户自己的窗口会没）；或让用户 ⌘Q 退出后重跑 `dws start`。**不要换 profile、不要反复重试**；起来后 `dws start` 查登录 |
+| 从豆包会话里跑 `dws start --force` 被拒 | 杀豆包会把发出命令的这个会话窗口一起杀掉 | 不是 bug：到终端里跑 `dws start --force` |
 | `doubao_signed_out` /「豆包没有登录」 | 该 profile 没登录态 | 在 dws 起的那个窗口里登录一次，profile 会记住 |
 | `app_missing` | 两个 app 路径都没有，`DOUBAO_WORK_APP` 也指错 | 装豆包/豆包工作，或用 `DOUBAO_WORK_APP` 指到真实二进制 |
 | `app_start_timeout` | 启动慢或被杀 | 重试一次；仍失败看是否有安全软件拦启动 |
-| `doubao_no_window` | 起来了但没有聊天页 | 确认没被登录页/更新弹窗挡住；`dws doctor --start` 复跑 |
+| `doubao_no_window` | 起来了但没有聊天页 | 确认没被登录页/更新弹窗挡住；`dws start` 复跑 |
 | 会话说「菜单里没有模型」 | 豆包模型菜单改版，`models.json` 里的入口对不上 | 先用 `--model auto`；仍不行更新 `<profile>/models.json`（结构在 `src/doubao.mjs`） |
 | 按钮点了没反应 / 找不到输入框 | 页面改版，`data-testid` 变了 | 改 `src/doubao.mjs` 里的选择器；这是 UI 驱动的已知代价 |
 | `status` 报「不在当前窗口里（窗口里是另一个任务）」 | 单窗口，当前只挂着别的任务 | 正常现象：`dws use <任务id>` 切过去，或直接看落盘的 `replySummary`；`send` 会自动新开任务并带 handoff |

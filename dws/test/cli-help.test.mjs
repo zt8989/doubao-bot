@@ -21,6 +21,7 @@ function run(args) {
 }
 
 const CASES = [
+  { args: ["start", "--help"], expect: "dws start", label: "start --help" },
   { args: ["open", "--help"], expect: "dws open --name", label: "open --help" },
   { args: ["send", "--help"], expect: "handoff", label: "send --help" },
   { args: ["status", "--help"], expect: "dws status", label: "status --help" },
@@ -64,6 +65,16 @@ test("已下线的命令不再可用", () => {
   }
 })
 
+
+// doctor --start 已下线：它和 dws start 重复（都是拉起窗口 + 查登录态），
+// 调用要明确报错并指向 dws start，不能静默跳过登录态检查。
+test("dws doctor --start 已下线，报错并指向 dws start", () => {
+  const r = run(["doctor", "--start"])
+  assert.equal(r.status, 1, r.stdout)
+  assert.match(r.stderr, /--start.*已下线|已下线.*--start/)
+  assert.match(r.stderr, /dws start/)
+  assert.deepEqual(r.files, [])
+})
 
 // `-c <文件>` 曾被当成布尔，值漏成位置参数，报 p.startsWith is not a function。
 test("-c 短参与 --config 等价", () => {
