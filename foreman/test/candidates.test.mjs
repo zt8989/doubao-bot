@@ -62,7 +62,7 @@ test("待分配列表：列出全部 open 工单（不看接单标签），只�
 
   const c = cfg({ stateFile })
   const ctx = { cfg: c, gitea: fakeGitea([
-    issue(1),
+    issue(1, { labels: ["ready-for-agent", "needs-triage"] }),
     issue(2),
     issue(3),
     issue(4, { author: "someone-else", assignees: ["someone"] }),
@@ -77,6 +77,8 @@ test("待分配列表：列出全部 open 工单（不看接单标签），只�
     "done/handed 的不列；没打接单标签的、带 needs-human 的都列（排序：我的 → 他人）"
   )
   assert.equal(r.items.find((i) => i.number === 1).bucket, "mine")
+  assert.deepEqual(r.items.find((i) => i.number === 1).labels, ["ready-for-agent", "needs-triage"], "接口把全部工单标签带给页面")
+  assert.deepEqual(r.items.find((i) => i.number === 5).labels, ["needs-human"], "人工类标签也不能被过滤或丢掉")
   assert.equal(r.items.find((i) => i.number === 4).bucket, "others")
   assert.equal(r.items[0].url, "http://gitea.test/yyzl/win-ai-harness/issues/1", "库里没有 url 时按仓库拼")
   assert.equal(r.capacity.maxRunning, 2)

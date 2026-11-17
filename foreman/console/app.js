@@ -305,7 +305,7 @@ class FmTasks extends LitElement {
         </td>
       </tr>`
   }
-  // 待分配：open + 接单标签、账本里还没处理过的单。每行一个「接单」，点了就派这一条。
+  // 待分配：全部 open 工单，只做账本去重；标签原样展示，过滤规则仍只作用于自动巡检。
   pendingView() {
     const items = this.candidates || []
     const info = this.candInfo || {}
@@ -335,6 +335,7 @@ class FmTasks extends LitElement {
             <tr>
               <th class="col-id">工单</th>
               <th>标题</th>
+              <th>标签</th>
               <th class="col-state">归属</th>
               <th class="col-branch">作者</th>
               <th class="col-time">创建</th>
@@ -345,6 +346,9 @@ class FmTasks extends LitElement {
             ${items.map((c) => {
               const key = `${c.repo}#${c.number}`
               const [cls, label] = BUCKET[c.bucket] || ["self", "他人认领"]
+              const labels = (Array.isArray(c.labels) ? c.labels : [])
+                .map((tag) => String(typeof tag === "string" ? tag : tag?.name ?? "").trim())
+                .filter(Boolean)
               return html`
                 <tr>
                   <td class="id-cell">
@@ -352,6 +356,13 @@ class FmTasks extends LitElement {
                       ><span class="repo">${c.repo}#</span><span>${c.number}</span></a>
                   </td>
                   <td class="title-cell" title=${c.title || ""}>${c.title || "（无标题）"}</td>
+                  <td class="labels-cell">
+                    ${labels.length
+                      ? html`<div class="candidate-labels" aria-label="工单标签">
+                          ${labels.map((tag) => html`<span class=${"candidate-label" + (tag === "ready-for-agent" ? " is-ready" : "")}>${tag}</span>`)}
+                        </div>`
+                      : "—"}
+                  </td>
                   <td><span class=${"badge " + cls}>${label}</span></td>
                   <td class="branch-cell" title=${c.author || ""}>${c.author || "—"}</td>
                   <td class="time-cell">${stampText(c.createdAt) || "—"}</td>

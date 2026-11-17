@@ -127,8 +127,11 @@ cli({
             : row.querySelector('.octicon-issue-closed') ? 'closed' : null,
           title: titleLink.textContent.trim(),
           url: new URL(titleLink.getAttribute('href'), window.location.origin).href,
-          labels: [...row.querySelectorAll('.labels-list .ui-label')]
-            .map((l) => l.getAttribute('data-tooltip-content') || l.textContent.trim()),
+          // 当前 Gitea 的类名是「ui label」（两个类），旧版是「ui-label」（一个类），两种都兼容。
+          labels: [...row.querySelectorAll('.labels-list .ui.label, .labels-list .ui-label')]
+            .map((l) => l.querySelector('.gt-ellipsis')?.textContent.trim()
+              || l.getAttribute('data-tooltip-content') || l.textContent.trim())
+            .filter(Boolean),
           assignees: [...row.querySelectorAll('img.avatar[title]')].map((i) => i.getAttribute('title')),
           creator: row.querySelector('.item-body a[href^="/"]:not(.index)')?.textContent.trim() || null,
           createdAt: row.querySelector('relative-time')?.getAttribute('datetime') || null,
