@@ -91,6 +91,10 @@ export const NODE_TEARDOWN = {
     const number = Number(pr ?? 0)
     if (!number) return { notes: [] }
     book.markMergeAsked(key, { pr: number, url: prUrl, status: "merged", error: "" })
+    // 合并事实同步落 prSeen：own 流程的 pr-open 节点会再写一次（幂等），review 流程没有
+    // pr-open 节点（engine.afterMerge 的 pre 列表为空），这里是它唯一的写点；
+    // archiveMergedNotices 靠 prSeen.merged/skipped=merged 判定「通知会话报过的 PR 全合完」。
+    book.markPrSeen(key, { repo, number, url: prUrl, merged: true, skipped: "merged", mergeError: "" })
     try {
       book.dropMerge(key)
     } catch {}
