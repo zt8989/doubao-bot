@@ -37,7 +37,7 @@ export const DEFAULTS = {
     // 保守开关：有被监听会话在跑时不派新会话（老行为）。默认关，
     // 关掉才能同时有 2 张单在跑；豆包窗口互相抢时再打开。
     pauseWhileRunning: false,
-    // 自动巡检每张工单先新建自己的编排会话（steer 工单进去），由它调 foreman dispatch 分配工作。
+    // 自动巡检每张工单先新建自己的编排会话（首句含编排职责与工单），由它调 foreman dispatch 分配工作。
     // 设 false（或 CLI 带 --direct）退回老行为：run 自己建工作区、开工作会话。
     handToOrchestrator: true,
   },

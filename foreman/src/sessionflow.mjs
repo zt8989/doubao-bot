@@ -1,7 +1,7 @@
 // 以工单绑定的编排会话为中心：自动巡检每张工单各起一条编排智能体会话，工作会话绑在它身上。
 //
 // 与老模型的区别（老：每次收工新建「派单/合并」会话、由服务通知）：
-//   - 自动巡检按工单起编排会话（ensureIssueOrchestrator 幂等），后续全靠 dws steer 插消息；
+//   - 自动巡检按工单起编排会话（ensureIssueOrchestrator 幂等），编排职责与工单合进首句，后续更新用 dws steer；
 //   - 用户从当前会话主动派单时，当前会话直接作为这张单的编排，不另起；
 //   - 工单先交给自己的编排（hand），由编排调 `foreman dispatch` 分配工作；
 //   - 工作会话 id 写进账本 issues[<键>] 的 agent / agentConvId / orchestrator；
@@ -97,9 +97,9 @@ export async function ensureOrchestrator(ctx, { name = "" } = {}) {
   return { ok: true, reused: false, created: true, convId: newConvId, name: nm }
 }
 
-// 一张自动巡检工单一条编排会话。先创建并立刻把 convId 绑到 issues[key]，再交工单；
-// 如果后续 steer 失败，下一轮会复用这条绑定，不会重复开新会话。
-export async function ensureIssueOrchestrator(ctx, { issueKey, repoCfg = null, issue = null } = {}) {
+// 一张自动巡检工单一条编排会话。hand 时把编排职责和工单合进首句，一次发出；
+// 已有绑定直接复用，不重复开会话，也不再 steer 工单。
+export async function ensureIssueOrchestrator(ctx, { issueKey, repoCfg = null, issue = null, withTicket = false } = {}) {
   const { cfg, dws, log = () => {} } = ctx
   const key = String(issueKey ?? "").trim()
   if (!key) throw new Error("issueKey 不能为空，无法绑定工单编排会话")
@@ -116,7 +116,11 @@ export async function ensureIssueOrchestrator(ctx, { issueKey, repoCfg = null, i
   }
 
   const name = issueOrchestratorName(cfg, key)
-  const prompt = orchestratorPrompt(ctx, { issueKey: key, issue })
+  let prompt = orchestratorPrompt(ctx, { issueKey: key, issue })
+  if (withTicket) {
+    if (!repoCfg?.repo) throw new Error("合并编排与工单首句时缺 repoCfg.repo")
+    prompt = `${prompt}\n\n---\n\n${ticketText({ repo: repoCfg.repo, issue })}`
+  }
   const noWait = cfg?.sessionFlow?.waitFirstReply !== true
   const out = await dws.openNew({ name, prompt, noWait })
   const convId = String(out?.convId ?? "").trim()
@@ -209,8 +213,8 @@ export function ticketText({ repo, issue, orchestrator = "" } = {}) {
   return lines.join("\n")
 }
 
-// 把一张工单交给它自己的编排：自动巡检新建/复用该单绑定的编排会话，再 steer 工单。
-// orchestrator 给了就直接交给调用方会话（用户自主发起：它自己就是编排），不另起会话。
+// 把一张工单交给它自己的编排：新建时首句同时包含编排职责与完整工单，不再单独 steer。
+// 已有绑定说明首句已经发过；调用方会话自己发起了 hand，也已经持有工单上下文。
 export async function handToOrchestrator(ctx, { repoCfg, issue, orchestrator = "" } = {}) {
   const { cfg, log = () => {} } = ctx
   const gitea = ctx.gitea ?? realGitea
@@ -225,11 +229,7 @@ export async function handToOrchestrator(ctx, { repoCfg, issue, orchestrator = "
     }
   }
   const caller = String(orchestrator ?? ctx.orchestrator ?? "").trim()
-  const convId = caller || (await ensureIssueOrchestrator(ctx, { issueKey: key, repoCfg, issue: detail })).convId
-  await steerOrchestrator(ctx, ticketText({ repo: repoCfg.repo, issue: detail, orchestrator: convId }), {
-    kind: "ticket",
-    target: convId,
-  })
+  const convId = caller || (await ensureIssueOrchestrator(ctx, { issueKey: key, repoCfg, issue: detail, withTicket: true })).convId
   const book = new Book(cfg.stateFile)
   const prev = book.issue(key) ?? {}
   book.setIssue(key, {

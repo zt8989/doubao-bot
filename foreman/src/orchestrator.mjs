@@ -161,7 +161,7 @@ export async function runRound(ctx) {
         if (hand && ctx.dryRun) {
           // dry-run 不许有副作用：只打印这张单会绑定哪条独立编排，不 ensure、不 steer。
           const target = String(book?.issue?.(key)?.orchestrator ?? "").trim()
-          log(`[dry-run] ${key}：会交给这张单的独立编排会话 ${target || "（还没起，会先新建再 steer）"}，由它调 foreman dispatch`)
+          log(`[dry-run] ${key}：会交给这张单的独立编排会话 ${target || "（还没起，首句会带上编排职责与工单）"}，由它调 foreman dispatch`)
           out = { repo: repoCfg.repo, number: it.number, state: "planned", hand: true, orchestrator: target }
         } else {
           out = hand

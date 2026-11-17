@@ -95,7 +95,7 @@ test("编排会话幂等：账本里已有 convId 就复用，绝不开第二条
   }
 })
 
-test("hand：起编排会话并把工单 steer 进去，账本记 handed（不建工作区）", async () => {
+test("hand：编排职责与工单合进首句一次发出，不 steer，账本记 handed（不建工作区）", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-hand-"))
   try {
     const cfg = mkCfg(dir)
@@ -108,10 +108,12 @@ test("hand：起编排会话并把工单 steer 进去，账本记 handed（不�
     const out = await handToOrchestrator(ctx, { repoCfg: repo, issue })
     assert.equal(out.state, "handed")
     assert.ok(out.convId)
-    assert.equal(dws.calls.steer.length, 1)
-    assert.equal(dws.calls.steer[0].target, out.convId)
-    assert.match(dws.calls.steer[0].text, /工单键：yyzl\/demo#7/)
-    assert.match(dws.calls.steer[0].text, /foreman dispatch --issue yyzl\/demo#7/)
+    assert.equal(dws.calls.openNew.length, 1)
+    assert.equal(dws.calls.steer.length, 0, "hand 不再单独 steer 工单")
+    assert.match(dws.calls.openNew[0].prompt, /绑定工单：yyzl\/demo#7/)
+    assert.match(dws.calls.openNew[0].prompt, /工单键：yyzl\/demo#7/)
+    assert.match(dws.calls.openNew[0].prompt, /改 demo 的镜像页/)
+    assert.match(dws.calls.openNew[0].prompt, /foreman dispatch --issue yyzl\/demo#7/)
 
     const rec = new Book(cfg.stateFile).issue("yyzl/demo#7")
     assert.equal(rec.state, "handed")
@@ -150,7 +152,7 @@ test("自动巡检：每张工单各建独立编排并绑定，重复交同一�
     assert.equal(book.issue("yyzl/demo#8").orchestrator, second.convId)
     assert.equal(book.session(dws.calls.openNew[0].name).issueKey, "yyzl/demo#7")
     assert.equal(orchestratorTarget(book), "", "自动流程不再创建全局编排")
-    assert.equal(dws.calls.steer.at(-1).target, first.convId, "后续仍 steer 到这张单自己的编排")
+    assert.equal(dws.calls.steer.length, 0, "重复 hand 也不再 steer，首句已包含工单")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -197,6 +199,7 @@ test("dispatch：工作会话 id 绑到编排会话（账本 + 会话记录都�
     assert.equal(book.session(out[0].agent).kind, "worker", "工作会话要标成 worker，不能算编排会话")
     assert.equal(dws.calls.openNew.length, 2, "1 条工单编排 + 1 条工作会话")
     assert.match(dws.calls.openNew[0].name, /demo-7-编排/)
+    assert.ok(!dws.calls.openNew[0].prompt.includes("【foreman · 编排会话 · 收到工单】"), "直接 dispatch 不能再让编排重复派单")
     assert.equal(orchestratorTarget(book), "", "直接派单也不该创建全局编排")
     assert.deepEqual(workerOf(book, key).convId, out[0].convId)
   } finally {
@@ -496,7 +499,7 @@ test("用户自主发起 hand：直接交给调用方会话（不开全局编排
     const out = await handToOrchestrator(ctx, { repoCfg: repo, issue, orchestrator: "conv-user" })
     assert.equal(out.convId, "conv-user")
     assert.equal(dws.calls.openNew.length, 0, "调用方自己就是编排，不用再起会话")
-    assert.equal(dws.calls.steer[0].target, "conv-user")
+    assert.equal(dws.calls.steer.length, 0, "调用方已持有工单上下文，不再 steer")
     const rec = new Book(cfg.stateFile).issue("yyzl/demo#7")
     assert.equal(rec.state, "handed")
     assert.equal(rec.orchestrator, "conv-user")

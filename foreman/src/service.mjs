@@ -1951,7 +1951,7 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     })
   }
 
-  // hand：把一张工单交给编排会话（账本记 handed + steer 工单）。不建工作区、不开工作会话。
+  // hand：把一张工单交给编排会话（首句含编排职责与工单，账本记 handed）。不建工作区、不开工作会话。
   if (cmd === "hand") {
     if (!sessionFlowEnabled(ctx.cfg)) return fail("disabled", "sessionFlow.enabled=false，不走编排会话；用 foreman run --direct")
     const ref = String(req.issue ?? "").trim()
