@@ -367,6 +367,11 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 `pickup.auto: true` 时，服务自己就是调度器，不用外部 cron、也不用守着敲 `foreman run`：
 
 - 每 `pickup.intervalSeconds`（默认 1800 = 30 分钟）跑一轮捞单，且只在 `workHours`（工作日 08:30–17:30）里跑；
+- **一张单收口就立刻补下一张，不等 cron**（`pickup.kickAfterDone`，默认开）：合并关单、手动完成、`foreman clean` 收尾
+  三处都会在 3s 后自动补跑一轮同样的 `pickupOnce`——容量、工作时间窗、`run.lock`、节点暂停、`maxPerRound` 全部照旧把关，
+  所以只是把「等下一个 cron 点」换成「槽位一空就接着派」；同一时刻只排一轮（合并后编排再调 clean 不会排第二次），
+  巡检正忙（`busy`）或抢不到 `run.lock` 时 5s 后重试，最多 3 次，槽位满 / 下班只记一行日志不重试；
+  写 `pickup.kickAfterDone: false` 就退回「只在 cron 点巡检」；
 - 起服务 1s 后先跑一轮，重启即开始巡检；同一工单靠账本去重（`working` 状态不会再捞），不会重复派；
 - **同时 2 张单在跑**（`pickup.maxRunning`，默认 2）：在跑 = 账本 `planned`/`working` 且没 `lastFailure`；
   到顶回 `skipped: "slots-full"`，有空槽才补，每轮最多补 `maxPerRound`（默认 2）条——派活动作本身仍是一条一条来；

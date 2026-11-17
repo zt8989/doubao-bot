@@ -37,6 +37,10 @@ export const DEFAULTS = {
     // 保守开关：有被监听会话在跑时不派新会话（老行为）。默认关，
     // 关掉才能同时有 2 张单在跑；豆包窗口互相抢时再打开。
     pauseWhileRunning: false,
+    // 一张单收口（合并关单 / 手动完成 / clean 收尾）就立刻补下一张，不等自动巡检的 cron。
+    // 只补一轮，容量（maxRunning）、工作时间窗、run 锁、节点暂停照旧把关；
+    // 想退回「只在 cron 点巡检」就在配置里写 false。
+    kickAfterDone: true,
     // 自动巡检每张工单先新建自己的编排会话（首句含编排职责与工单），由它调 foreman dispatch 分配工作。
     // 设 false（或 CLI 带 --direct）退回老行为：run 自己建工作区、开工作会话。
     handToOrchestrator: true,

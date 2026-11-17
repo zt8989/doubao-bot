@@ -467,8 +467,52 @@ export async function pickupOnce(ctx, { run = runRound, force = false } = {}) {
   }
 }
 
-// 「待分配任务」列表：配置仓库里的**全部 open 工单**，只做账本去重；接单标签过滤只留给自动巡检。
-// gitea 列一遍要打三条命令，页面刷新会太吵：这里带 45s 缓存，refresh=true 才强拉。
+// kickPickup：一张单收口就立刻补下一张，不等自动巡检的 cron 点。
+// 每张单跑完（合并关单 / 手动完成 / clean 收尾）都调这里；不是另开一条派单通道——
+// 只是把「等下一个 cron」换成「过几秒就跑同一轮 pickupOnce」，容量、工作时间窗、run 锁、
+// 节点暂停、maxPerRound 全部照旧把关，所以不会因为收口接连发生就把队列一次抽干。
+// 防抖：同一时刻只排一轮（合并 + 编排随后 clean 会连着调两次，排一次就够）。
+// 巡检正在跑（busy）或和 CLI 的 foreman run 撞锁时，隔几秒再试，最多 3 次。
+const PICKUP_KICK_RETRY_MS = 5000
+const PICKUP_KICK_MAX_RETRY = 3
+
+export function kickPickup(ctx, reason = "", { delayMs = 0 } = {}) {
+  const { cfg, log = () => {} } = ctx ?? {}
+  if (!ctx || cfg?.pickup?.auto !== true) return false
+  if (cfg?.pickup?.kickAfterDone === false) return false
+  if (ctx.pickupKickTimer) return true
+  const wait = Number(delayMs) || Number(cfg?.pickup?.kickDelayMs) || 3000
+  const retryMs = Number(cfg?.pickup?.kickRetryMs) || PICKUP_KICK_RETRY_MS
+  const fire = async (attempt = 0) => {
+    ctx.pickupKickTimer = null
+    let out
+    try {
+      out = typeof ctx.pickup === "function" ? await ctx.pickup() : await pickupOnce(ctx)
+    } catch (e) {
+      log(`收口续跑失败${reason ? `（${reason}）` : ""}：${e.message}`)
+      return
+    }
+    // 巡检正忙 / 抢不到 run 锁：等它收工再补一次，别把续跑丢了。
+    if ((out?.skipped === "busy" || out?.skipped === "locked") && attempt < PICKUP_KICK_MAX_RETRY) {
+      ctx.pickupKickTimer = setTimeout(() => fire(attempt + 1), retryMs)
+      ctx.pickupKickTimer.unref?.()
+      return
+    }
+    if (out?.skipped) {
+      log(`收口续跑：本轮跳过（${out.skipped}）${reason ? ` · ${reason}` : ""}`)
+      return
+    }
+    log(
+      `收口续跑：接着派了 ${out?.dispatched ?? 0} 条、交给编排 ${out?.handed ?? 0} 条${reason ? `（${reason}）` : ""}`,
+    )
+  }
+  ctx.pickupKickTimer = setTimeout(() => fire(0), wait)
+  ctx.pickupKickTimer.unref?.()
+  log(`收口续跑：${wait / 1000}s 后补一轮巡检${reason ? `（${reason}）` : ""}`)
+  return true
+}
+
+// 「待分配任务」列表：配置仓库里的**全部 open 工单**，只做账本去重；接单标签过滤只留给自动巡检。// gitea 列一遍要打三条命令，页面刷新会太吵：这里带 45s 缓存，refresh=true 才强拉。
 const CANDIDATE_TTL_MS = 45_000
 let candidateCache = { at: 0, payload: null }
 
@@ -1362,6 +1406,9 @@ export async function runMergeTask(ctx, task = {}) {
       log(`合并结果 steer 编排会话失败：${e.message}`)
     }
   }
+  // 这张单合完就空出一个槽：立刻补下一张，不等自动巡检的 cron（pickup.kickAfterDone，默认开）。
+  // 只认真的关单（resolvedNo）：别人的 PR / 只是合了 PR 没关联工单的，不占接单名额也不续跑。
+  if (resolvedNo) kickPickup(ctx, `${resolvedKey} 合并关单`)
   // 结果只落账本 + 控制台；编排会话拿到的就是上面那条 steer。
   return { ok: true, alreadyMerged, notes, repo, issueKey: resolvedKey, worktree, branch }
 }
@@ -1379,6 +1426,7 @@ export async function completeIssue(ctx, { repo = "", number = 0 } = {}) {
   if (!rec) return { ok: false, error: "unknown-issue", message: `账本里没有这条工单：${issueKey}` }
   if (rec.state === "done") {
     const cleaned = await cleanIssue(ctx, { issueKey })
+    kickPickup(ctx, `${issueKey} 手动完成`)
     return { ok: true, skipped: "already-done", repo: issueRepo, number: issueNo, notes: cleaned.notes ?? [] }
   }
 
@@ -1444,6 +1492,8 @@ export async function completeIssue(ctx, { repo = "", number = 0 } = {}) {
   if (!cleaned.ok) return { ok: false, error: "cleanup-failed", message: cleaned.reason ?? `${issueKey} 清理失败`, notes }
   notes.push(...(cleaned.notes ?? []))
   try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
+  // 收尾完成 = 这张单真的结束了：立刻补下一张（同 runMergeTask 的续跑口径）。
+  kickPickup(ctx, `${issueKey} 手动完成`)
   return { ok: true, repo: issueRepo, number: issueNo, completed: true, prs: views.map((p) => ({ repo: p.repo, pr: p.pr })), notes }
 }
 
@@ -2178,6 +2228,7 @@ export async function handleRequest(ctx, req) {  const id = req?.id
       }
       try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
       ctx.log?.(`clean --all：清了 ${keys.length} 条单`)
+      if (keys.length) kickPickup(ctx, "clean --all")
       return ok({ cleaned: keys.length, keys, notes })
     }
     const ref = String(req.issue ?? "").trim()
@@ -2186,6 +2237,10 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     const out = await cleanIssue(ctx, { issueKey: `${m[1]}#${Number(m[2])}`, currentConv })
     if (!out.ok) return fail("bad-request", `账本里没有这条单：${m[1]}#${m[2]}`)
     ctx.log?.(`clean ${out.issueKey}：${out.notes.join("；") || "没有要清的"}`)
+    // 收尾即完成：立刻补下一张，不用等巡检 cron（编排合完调 clean 就是这条路径）。
+    if (["done", "cleaned"].includes(String(new Book(ctx.cfg.stateFile).issue(out.issueKey)?.state ?? ""))) {
+      kickPickup(ctx, `${out.issueKey} clean 收尾`)
+    }
     return ok(out)
   }
 

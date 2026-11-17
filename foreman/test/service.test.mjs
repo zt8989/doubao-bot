@@ -14,7 +14,9 @@ import {
   notifyDecision,
   handleRequest,
   archiveFinishedOrchestrators,
+  kickPickup,
 } from "../src/service.mjs"
+import { sleep } from "../src/util.mjs"
 import { Book } from "../src/book.mjs"
 
 function tmpDir() {
@@ -454,6 +456,78 @@ test("archiveFinishedOrchestrators：归档失败只记账，不推翻工单状�
     const after = new Book(cfg.stateFile)
     assert.equal(after.issue("yyzl/demo#8").state, "done", "工单状态不能被归档失败推翻")
     assert.equal(after.issue("yyzl/demo#8").orchestrator, "conv-bad", "记录留着下一轮再试")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ---- 收口后续跑：一张单完成就立刻补下一张，不等自动巡检的 cron ----
+test("kickPickup：自动巡检关着 / kickAfterDone=false 时不排", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = mkCfg(dir, { pickup: { auto: false } })
+    let calls = 0
+    const ctx = { cfg, state: { pickup: { running: false } }, log: () => {}, pickup: async () => { calls++ } }
+    assert.equal(kickPickup(ctx, "t"), false)
+    assert.equal(cfg && kickPickup(ctx, "t"), false)
+    const off = mkCfg(dir, { pickup: { auto: true, kickAfterDone: false } })
+    assert.equal(kickPickup({ ...ctx, cfg: off }, "t"), false)
+    await sleep(20)
+    assert.equal(calls, 0, "关掉就不该跑")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("kickPickup：自动巡检开着就补一轮；连着调只排一次（防抖）", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = mkCfg(dir, { pickup: { auto: true, kickDelayMs: 5 } })
+    const ran = []
+    const ctx = { cfg, state: { pickup: { running: false } }, log: () => {}, pickup: async () => { ran.push("x"); return { ok: true, dispatched: 1, handed: 0 } } }
+    assert.equal(kickPickup(ctx, "合并关单"), true)
+    // 编排随后还会调一次 clean：这一拍不该再排第二轮
+    assert.equal(kickPickup(ctx, "clean 收尾"), true)
+    await sleep(40)
+    assert.equal(ran.length, 1, "同一时刻只排一轮")
+    // 定时器清掉后，下一次收口还能再补
+    assert.equal(kickPickup(ctx, "下一张"), true)
+    await sleep(40)
+    assert.equal(ran.length, 2)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("kickPickup：巡检正忙时等它收工再补（最多 3 次），不把续跑丢掉", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = mkCfg(dir, { pickup: { auto: true, kickDelayMs: 5, kickRetryMs: 5 } })
+    const outs = [{ skipped: "busy" }, { skipped: "busy" }, { ok: true, dispatched: 1 }]
+    let calls = 0
+    const ctx = {
+      cfg,
+      state: { pickup: { running: false } },
+      log: () => {},
+      pickup: async () => { const out = outs[calls++]; return out },
+    }
+    kickPickup(ctx, "合并关单")
+    await sleep(60)
+    assert.equal(calls, 3, "busy → 重试 → 成功")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("kickPickup：槽位满/下班不算失败，不重试", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = mkCfg(dir, { pickup: { auto: true, kickDelayMs: 5, kickRetryMs: 5 } })
+    let calls = 0
+    const ctx = { cfg, state: { pickup: { running: false } }, log: () => {}, pickup: async () => { calls++; return { skipped: "slots-full" } } }
+    kickPickup(ctx, "合并关单")
+    await sleep(40)
+    assert.equal(calls, 1, "slots-full 不重试")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
