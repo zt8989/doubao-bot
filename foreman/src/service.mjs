@@ -1411,27 +1411,11 @@ export async function runMergeTask(ctx, task = {}) {
   try { ctx.consoleStore?.sync(new Book(cfg.stateFile)) } catch {}
   finishOperation(ctx, op, "success", `${alreadyMerged ? "原本已合并" : "合并成功"} · ${where}${notes.length ? ` · ${notes.join("；")}` : ""}`)
   log(`合并通道：已合并 ${repo}#${pr}（${key}）${resolvedNo ? `，关单 #${resolvedNo}` : ""} · ${where}`)
-  // 合并成功也要让编排会话知道：它拿到「已合并、已关单、接着 clean」这一条才收得动尾。
-  // 没有编排会话（老模型 / 还没 orch start）就静默跳过，不影响合并本身。
-  if (sessionFlowEnabled(cfg)) {
-    try {
-      const target = orchestratorOf(new Book(cfg.stateFile), resolvedKey)
-      await steerOrchestrator(
-        ctx,
-        [
-          `【合并完成】${repo}#${pr} 已合并${resolvedNo ? `，工单 ${resolvedKey} 已关单` : ""} · ${where}`,
-          resolvedNo ? `下一步：foreman clean --issue ${resolvedKey}（清 worktree 与工作会话）` : "",
-        ].filter(Boolean).join("\n"),
-        { kind: "merged", target }
-      )
-    } catch (e) {
-      log(`合并结果 steer 编排会话失败：${e.message}`)
-    }
-  }
+  // 合并结果不主动推消息给编排会话：收尾（关单、clean）由编排智能体自己主动调用，
+  // 结果只落账本 + 控制台（foreman tasks / merge 记录 / 控制台「操作日志」）。
   // 这张单合完就空出一个槽：立刻补下一张，不等自动巡检的 cron（pickup.kickAfterDone，默认开）。
   // 只认真的关单（resolvedNo）：别人的 PR / 只是合了 PR 没关联工单的，不占接单名额也不续跑。
   if (resolvedNo) kickPickup(ctx, `${resolvedKey} 合并关单`)
-  // 结果只落账本 + 控制台；编排会话拿到的就是上面那条 steer。
   return { ok: true, alreadyMerged, notes, repo, issueKey: resolvedKey, worktree, branch }
 }
 
