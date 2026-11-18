@@ -27,7 +27,14 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman watch poll [-c] [--no-service]
   foreman pr list [-c] [--no-service]
   foreman pr poll [-c] [--no-service]
-  foreman pr open --repo R --base <基线> --head <分支> --title <标题> [--body <正文>] [--issue <单号>] [--issue-repo <工单所在仓库>]
+  foreman pr open --repo R --base <基线> --head <分支> --title <标题> [--body <正文>] [--issue <单号>] [--issue-repo <工单所在仓库>] [--ui]
+  foreman pr merge <N> --repo R [--issue <单号>] [--style merge|rebase|squash] [--approved-by <人>] [--ui]
+  foreman mail send --to <邮箱>[,...] --subject <主题> [--body <正文>]
+  foreman mail request <owner/repo>#<N> [--url <PR链接>] [--issue <owner/repo>#<N> --title <标题>]
+  foreman mail poll
+  foreman mail requests
+  foreman mail approve <owner/repo>#<N> [--by <人>] [--note <说明>]
+  foreman mail reject  <owner/repo>#<N> [--by <人>] [--note <原因>]
   foreman ws add --repo <工程名|owner/name> --issue <owner/name>#<单号> [--base <基线>]
   foreman ws list --issue <owner/name>#<单号>
   foreman issue comment <N> --repo R --body <正文>
@@ -58,6 +65,11 @@ const HELP = `foreman — 接单编排 + 常驻服务
               会话中心（默认 sessionFlow.enabled）不走这条：更新一律 steer 进唯一编排会话。
   pr open     建 PR（唯一入口：agent 也走它，账本/控制台才记得到）
   pr merge <N> --repo R [--issue <单号>]   合并 PR（唯一入口：先核对关联工单再合；失败回理由）
+               --approved-by <人>  用户当面验收过、明确回了「合并」时带上；UI PR 的邮件验收闸门认这条
+               --ui                声明这条 PR 改了界面（不写就按 worktree diff 自动认）
+  mail        UI 验收邮件：PR 涉及 UI 时发信给 testers（主题末尾 [FM-…] 是筛选 ID），
+              服务按筛选 ID 把回复认回这张单、注回它的编排会话，收到「验收通过」就地合并。
+              send / request / poll / requests / approve / reject（详见 README「邮件验收」）
   ws add      一工程一工作区：工单跨工程时现开一个工作区（幂等），执行会话不许跨目录改
   ws list     看这条工单已经开了哪几个工程的工作区
   workflow view                            看两条流程（自有工单 / 他人 PR）的节点与累计次数
@@ -257,6 +269,8 @@ async function cmdPr(pos, flags) {
       issue: Number(strFlag(flags.issue)) || 0,
       // 跨工程的单：--issue-repo 指工单所在仓库，账本记到那条单上（不写就是 PR 自己的仓库）。
       issueRepo: strFlag(flags["issue-repo"]),
+      // 显式声明改了 UI；不写就由服务按 worktree diff 自动认。
+      ui: flags.ui === true,
     }, 300000)
     if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
     return out({ ok: true, ...r })
@@ -272,6 +286,9 @@ async function cmdPr(pos, flags) {
       issue: Number(strFlag(flags.issue)) || 0,
       style: strFlag(flags.style) || undefined,
       deleteBranch: flags["no-delete-branch"] ? false : undefined,
+      // 用户当面验收过、明确回了「合并」：带上 --approved-by <人>，UI 验收闸门认这条。
+      approvedBy: strFlag(flags["approved-by"]),
+      ui: flags.ui === true,
     }, 600000)
     if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
     return out({ ok: true, ...r })
@@ -447,6 +464,73 @@ function cmdRetry(pos, flags) {
   out({ ok: true, key, state: "reset" })
 }
 
+// mail：UI 验收邮件的发/收/判。testers 还是占位符时不发信、也不挡合并（沿用人工验收）。
+async function cmdMail(pos, flags) {
+  const cfg = loadConfig(flags.config)
+  const sub = pos.shift() || "requests"
+  const SUBS = ["send", "request", "poll", "requests", "approve", "reject"]
+  if (!SUBS.includes(sub)) throw new Error(`用法：foreman mail ${SUBS.join("|")} …`)
+  const port = await resolvePort(cfg)
+
+  if (sub === "send") {
+    const to = strFlag(flags.to)
+    const subject = strFlag(flags.subject)
+    if (!to) throw new Error("mail send 要 --to <邮箱>（多个用逗号分隔）")
+    if (!subject) throw new Error("mail send 要 --subject <主题>")
+    const r = await callRaw(port, { id: "cli", cmd: "mail send", to, subject, body: strFlag(flags.body) }, 300000)
+    if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
+    return out({ ok: true, ...r })
+  }
+
+  if (sub === "request") {
+    const key = String(pos[0] ?? "").trim()
+    if (!key) throw new Error("mail request 要 <owner/repo>#<N>")
+    const r = await callRaw(
+      port,
+      {
+        id: "cli",
+        cmd: "mail request",
+        key,
+        url: strFlag(flags.url),
+        issueKey: strFlag(flags.issue),
+        title: strFlag(flags.title),
+      },
+      300000
+    )
+    if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
+    return out({ ok: true, ...r })
+  }
+
+  if (sub === "poll") {
+    const r = await callRaw(port, { id: "cli", cmd: "mail poll" }, 300000)
+    if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
+    return out({ ok: true, ...r })
+  }
+
+  if (sub === "requests") {
+    const r = await callRaw(port, { id: "cli", cmd: "mail requests" }, 60000)
+    if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
+    return out({ ok: true, ...r })
+  }
+
+  // approve / reject：人工记一次验收结论（测试同学当面/群里说的，也走这里）。
+  const key = String(pos[0] ?? "").trim()
+  if (!key) throw new Error(`mail ${sub} 要 <owner/repo>#<N>`)
+  const r = await callRaw(
+    port,
+    {
+      id: "cli",
+      cmd: `mail ${sub}`,
+      key,
+      by: strFlag(flags.by),
+      note: strFlag(flags.note),
+    },
+    60000
+  )
+  if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
+  return out({ ok: true, ...r })
+}
+
 async function cmdDoctor(pos, flags) {
   const cfg = loadConfig(flags.config)
   const checks = []
@@ -492,6 +576,24 @@ async function cmdDoctor(pos, flags) {
     } catch (e) {
       checks.push({ name: "dws 窗口/登录", ok: false, detail: e.message })
     }
+  }
+
+  // 邮件通道：开了才查（没授权时发信会失败，提前在这里暴露比等合并被卡好）。
+  if (cfg.mail?.enabled === true) {
+    try {
+      const { MailDriver } = await import("../src/mail.mjs")
+      const { realRecipients } = await import("../src/mail.mjs")
+      const me = await new MailDriver({ bin: cfg.mail.bin }).me()
+      checks.push({
+        name: "邮件通道",
+        ok: true,
+        detail: `${me.email || "已授权"} · 验收人 ${realRecipients(cfg).join("、") || "未配置（占位符）"}`,
+      })
+    } catch (e) {
+      checks.push({ name: "邮件通道", ok: false, detail: e.message })
+    }
+  } else {
+    checks.push({ name: "邮件通道", ok: true, detail: "未启用（mail.enabled=false）" })
   }
 
   const ok = checks.every((c) => c.ok)
@@ -641,6 +743,8 @@ async function main() {
       return cmdTasks(pos, flags)
     case "retry":
       return cmdRetry(pos, flags)
+    case "mail":
+      return cmdMail(pos, flags)
     case "doctor":
       return cmdDoctor(pos, flags)
     case "help":

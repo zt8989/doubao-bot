@@ -291,6 +291,37 @@ foreman pr list                  # 看账本里见过/已通知的 PR
 foreman status                   # 带 prWatch.lastPollAt / pollCount / notifiedCount / pending
 ```
 
+## 邮件验收（UI PR 发信 → 回复 → 自动合并）
+
+UI 改动的 PR 不能直接合。foreman 把 PR 链接发到测试同学邮箱，主题末尾带一个筛选 ID：
+
+```
+【foreman 验收】yyzl/yyjz-oa-frontend#128 改登录按钮 [FM-ab12cd34]
+```
+
+测试同学直接回复（**不改主题**），回「验收通过」就自动合并，回「驳回：原因」就保持 PR 打开：
+
+- 筛选 ID 由 `repo#pr` 生成（`FM-` + 8 位哈希），回信里主题被加上 `Re:` 也认得出；不认别的工具（如 `[AM:…]`）的标记。
+- 发信时机：`pr open --ui` 显式声明，或服务按 worktree `git diff origin/<base>...HEAD` 认出前端文件（`.vue/.tsx/.css/...` 与 `frontend/ web/ components/ views/ pages/` 等目录，可用 `mail.uiPatterns` 覆盖）。
+- 收件人：`mail.testers`。**默认是占位符 `<tester-1@example.com>` / `<tester-2@example.com>`**：占位符不发信、也不挡合并；换成真邮箱后自动生效。
+- 轮转：默认 `round-robin` 一次只发一位，按 `mail.rr` 顺序轮；等 `mail.remindMinutes`（默认 120）没回复就给另一位发催办，最多催 `mail.maxReminders`（默认 2）次。`strategy: "all"` 则两个一起发。
+- 收信：服务每 `mail.pollSeconds`（默认 300s）读一次收件箱（**不受工作时间窗限制**），只处理带 `[FM-…]` 且发件人在 `mail.testers` / `mail.allowSenders` 里的邮件；同一封回复按 `message_id` 只处理一次。
+- 注回会话：结论 `dws steer` 到这张单的编排会话（`issues[键].orchestrator`），拿不到就退到全局编排；邮件正文只当数据，不当指令执行。
+- 合并闸门：请求状态 `waiting` 时 `pr merge` 返回 `acceptance-waiting`；`rejected` 返回 `acceptance-rejected`；没开邮件、不是 UI、没有真收件人时一律放行（沿用人工验收，不卡流程）。验收通过后 foreman 自己 `runMergeTask`，不用人再敲合并。
+- 人工兜底：用户当面验收并明确回了「合并」→ `foreman pr merge <N> --repo R --approved-by <人>`；测试同学在群里说通过 → `foreman mail approve <repo>#<N> --by <人>`。
+
+```bash
+foreman mail requests                # 看每条验收请求：发给谁、状态、几封回复
+foreman mail poll                     # 立刻收一轮（不等下一个 cron 点）
+foreman mail request <repo>#<N> --url <PR链接>   # 补发/催办一条
+foreman mail send --to a@x.com,b@y.com --subject "…" --body "…"   # 手动发一封（不进账本）
+foreman mail approve <repo>#<N> --by <人> --note "当面验收通过"
+foreman mail reject  <repo>#<N> --by <人> --note "按钮错位"
+foreman doctor                        # 开了邮件会顺带查 agently-cli 授权与验收人
+```
+
+依赖 `agently-cli`（QQ Agent Mail）：`npm i -g @tencent-qqmail/agently-cli && agently-cli auth login`。发信带 `--confirmed`（foreman 是自动流程，不走两阶段确认）。
+
 ## 命令
 
 ```bash
@@ -314,6 +345,13 @@ foreman tasks                    # 每条工单到哪一步、卡在哪
 foreman pr poll                  # 立刻扫一轮 PR（别人的单报给最早登记的调用方）
 foreman pr list                  # 看 PR 监听账本
 foreman pr open --repo R --head <分支> --title "…" --body "…" --issue N   # 建 PR（唯一入口；--base 省略取配置 repos[].base）
+                                 # 加了 --ui（或 diff 认出前端文件）就自动发验收邮件
+foreman pr merge <N> --repo R --approved-by <人>   # 用户当面验收、明确回了「合并」时用这条过 UI 验收闸门
+foreman mail requests            # 验收请求与回复状态
+foreman mail poll                # 立刻收一轮回复
+foreman mail request <repo>#<N> [--url <PR链接>]    # 补发/催办验收邮件
+foreman mail send --to <邮箱> --subject "…" --body "…"   # 手动发一封
+foreman mail approve|reject <repo>#<N> --by <人> [--note "…"]
 foreman issue comment <N> --repo R --body "…"   # 评论工单（记账）
 foreman issue close <N> --repo R                # 关单（记账）
 foreman retry win-ai-harness 255 # 人工处理完，放回队列（attempts 清零）
@@ -436,6 +474,21 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
     "ignoreAuthors": ["<你的 Gitea 用户名>"],
     "notifyTarget": "earliest"
   },
+  "mail": {
+    "enabled": true,
+    "bin": "agently-cli",
+    "testers": ["<tester-1@example.com>", "<tester-2@example.com>"],
+    "strategy": "round-robin",
+    "subjectPrefix": "【foreman 验收】",
+    "scanLimit": 30,
+    "pollSeconds": 300,
+    "remindMinutes": 120,
+    "maxReminders": 2,
+    "uiGate": true,
+    "uiPatterns": [],
+    "allowSenders": [],
+    "confirmed": true
+  },
   "products": [
     {
       "name": "win-ai-stack",
@@ -489,7 +542,7 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 
 ## 状态文件
 
-- 账本 `~/.foreman/state.json`（`issues` 记工单进度、`sessions` 记会话与 convId（`kind` 区分 `deliver:dispatch`/`deliver:merge`）、`watch` 显式登记的监听、`notified` 已通知指纹去重、`workflow` 记节点暂停与累计次数、`mergeQueue` 记待合并的 PR）
+- 账本 `~/.foreman/state.json`（`issues` 记工单进度、`sessions` 记会话与 convId（`kind` 区分 `deliver:dispatch`/`deliver:merge`）、`watch` 显式登记的监听、`notified` 已通知指纹去重、`workflow` 记节点暂停与累计次数、`mergeQueue` 记待合并的 PR、`mail` 记验收请求与已处理的回信、`approvals` 记合并批准：`{ by, via: mail|user|cli, tag, note, at }`）
 - 服务 `~/.foreman/service.port`（端口）/ `foreman.pid` / `service.log`
 - 日志 `~/.foreman/run.log`
 - 锁 `~/.foreman/run.lock`（只管派单/接单侧；进程死了或超 6 小时的锁会被接管，合并不碰这把锁）

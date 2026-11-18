@@ -145,6 +145,81 @@ export class Book {
     return this.data.mergeQueue ?? (this.data.mergeQueue = {})
   }
 
+  // 验收邮件账本：requests 按 "<repo>#<pr>" 记一次验收（主题带 [FM-…] 筛选 ID），
+  // seen 按 message_id 去重（同一封回复只处理一次），rr 是轮转发信的下标。
+  get mail() {
+    const m = this.data.mail ?? (this.data.mail = {})
+    m.requests = m.requests ?? {}
+    m.seen = m.seen ?? {}
+    m.rr = Number(m.rr ?? 0) || 0
+    return m
+  }
+
+  markMailRequest(key, patch = {}) {
+    this.reload()
+    const k = String(key)
+    const prev = this.mail.requests[k] ?? {}
+    this.mail.requests[k] = { ...prev, ...patch, key: k, updatedAt: nowIso() }
+    this.save()
+    return this.mail.requests[k]
+  }
+
+  markMailSeen(messageId, patch = {}) {
+    this.reload()
+    const id = String(messageId ?? "").trim()
+    if (!id) return null
+    this.mail.seen[id] = { ...(this.mail.seen[id] ?? {}), ...patch, at: patch.at ?? nowIso() }
+    // 只留最近 500 封：去重表不该无限长，回信本来也只关心最近一段时间。
+    const ids = Object.keys(this.mail.seen)
+    if (ids.length > 500) {
+      for (const old of ids.slice(0, ids.length - 500)) delete this.mail.seen[old]
+    }
+    this.save()
+    return this.mail.seen[id]
+  }
+
+  markMailPoll(info = {}) {
+    this.reload()
+    this.mail.lastPollAt = String(info.at ?? nowIso())
+    this.mail.pollCount = Number(this.mail.pollCount ?? 0) + 1
+    this.mail.lastChecked = Number(info.checked ?? 0) || 0
+    this.save()
+    return this.mail
+  }
+
+  setMailRr(next) {
+    this.reload()
+    this.mail.rr = Math.max(0, Number(next ?? 0) || 0)
+    this.save()
+    return this.mail.rr
+  }
+
+  // 合并批准账本：{ "<repo>#<pr>": { by, via: mail|cli|user, tag, note, at } }
+  // 邮件验收通过、或调用方带 --approved-by 时落在这里，合并闸门只认这本账。
+  get approvals() {
+    return this.data.approvals ?? (this.data.approvals = {})
+  }
+
+  markApproval(key, info = {}) {
+    this.reload()
+    const k = String(key)
+    const prev = this.approvals[k] ?? {}
+    this.approvals[k] = {
+      ...prev,
+      by: String(info.by ?? prev.by ?? ""),
+      via: String(info.via ?? prev.via ?? ""),
+      tag: String(info.tag ?? prev.tag ?? ""),
+      note: String(info.note ?? prev.note ?? ""),
+      at: nowIso(),
+    }
+    this.save()
+    return this.approvals[k]
+  }
+
+  approval(key) {
+    return this.approvals[String(key ?? "")] ?? null
+  }
+
   enqueueMerge(key, entry = {}) {
     this.reload()
     const k = String(key)

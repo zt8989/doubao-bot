@@ -93,6 +93,31 @@ export const DEFAULTS = {
     // 默认过滤有冲突的 PR（合不了，报了没用）；设 false 则照报。
     filterConflicts: true,
   },
+  // 邮件验收：PR 涉及 UI 时发信给测试同学，主题末尾带 [FM-<8位>] 筛选 ID；
+  // 服务每 pollSeconds 轮询一次收件箱，把回复按筛选 ID 认回这张单，注回它的编排会话，
+  // 收到「验收通过」就地合并（「驳回」保持 PR 打开）。
+  // testers 先写占位符 <tester-1@example.com>：占位符不发信、也不挡合并；换成真邮箱后自动生效。
+  mail: {
+    enabled: false,
+    bin: "agently-cli",
+    testers: ["<tester-1@example.com>", "<tester-2@example.com>"],
+    // round-robin：一次只发一位，按顺序轮着发（催办时换下一位）；all：两个一起发。
+    strategy: "round-robin",
+    subjectPrefix: "【foreman 验收】",
+    scanLimit: 30,
+    pollSeconds: 300,
+    // 等这么久没回复就给另一位测试同学发催办；0 表示不催。
+    remindMinutes: 120,
+    maxReminders: 2,
+    // UI 合并闸门：true 时，验收邮件发出去还在等回复的 PR 不许合并。
+    uiGate: true,
+    // 认 UI 改动的规则（正则字符串）；留空用代码里的默认（前端后缀 + 常见目录）。
+    uiPatterns: [],
+    // 白名单外的发件人回复一律忽略；留空 = 只认 testers。
+    allowSenders: [],
+    // 发信时带 --confirmed（foreman 自动发信，不可能走两阶段确认）。
+    confirmed: true,
+  },
   // 投递方式：结论/PR 不再塞回已有会话，默认每次新建一条豆包会话来接手。
   // mode=new 用 dws open 新开一条会话，首句 = 编排提示词（默认用代码内置的，配置给了路径才读那份运行时副本）+ 产品 + 监控项目 + 通知正文；
   // mode=existing 是旧行为（按 notify.session / prWatch.notifyTarget 找回已有会话塞消息）。
@@ -259,6 +284,45 @@ export function loadConfig(explicit) {
   const pwState = String(cfg.prWatch.state ?? "open")
   if (!["open", "closed", "all"].includes(pwState)) throw new Error(`配置项 prWatch.state 只能是 open/closed/all，现在是：${pwState}`)
   cfg.prWatch.state = pwState
+
+  // 邮件验收：占位符（<tester-1@example.com>）允许留在配置里；数值与策略写错直接报错。
+  cfg.mail = cfg.mail && typeof cfg.mail === "object" ? cfg.mail : {}
+  cfg.mail.enabled = cfg.mail.enabled === true
+  cfg.mail.uiGate = cfg.mail.uiGate !== false
+  cfg.mail.confirmed = cfg.mail.confirmed !== false
+  cfg.mail.bin = String(cfg.mail.bin ?? "agently-cli").trim() || "agently-cli"
+  cfg.mail.subjectPrefix = String(cfg.mail.subjectPrefix ?? "【foreman 验收】").trim() || "【foreman 验收】"
+  const mStrategy = String(cfg.mail.strategy ?? "round-robin").trim().toLowerCase()
+  if (!["round-robin", "all"].includes(mStrategy)) {
+    throw new Error(`配置项 mail.strategy 只能是 round-robin/all，现在是：${cfg.mail.strategy}`)
+  }
+  cfg.mail.strategy = mStrategy
+  for (const key of ["pollSeconds", "scanLimit"]) {
+    const n = Number(cfg.mail[key] ?? (key === "pollSeconds" ? 300 : 30))
+    if (!Number.isFinite(n) || n <= 0) throw new Error(`配置项 mail.${key} 要是正数，现在是：${cfg.mail[key]}`)
+    cfg.mail[key] = Math.floor(n)
+  }
+  for (const key of ["remindMinutes", "maxReminders"]) {
+    const n = Number(cfg.mail[key] ?? (key === "remindMinutes" ? 120 : 2))
+    if (!Number.isFinite(n) || n < 0) throw new Error(`配置项 mail.${key} 要是 0 或正数，现在是：${cfg.mail[key]}`)
+    cfg.mail[key] = Math.floor(n)
+  }
+  cfg.mail.testers = (Array.isArray(cfg.mail.testers) ? cfg.mail.testers : [])
+    .map((x) => String(x ?? "").trim())
+    .filter(Boolean)
+  cfg.mail.allowSenders = (Array.isArray(cfg.mail.allowSenders) ? cfg.mail.allowSenders : [])
+    .map((x) => String(x ?? "").trim())
+    .filter(Boolean)
+  cfg.mail.uiPatterns = (Array.isArray(cfg.mail.uiPatterns) ? cfg.mail.uiPatterns : [])
+    .map((x) => String(x ?? "").trim())
+    .filter(Boolean)
+  for (const p of cfg.mail.uiPatterns) {
+    try {
+      new RegExp(p, "i")
+    } catch (e) {
+      throw new Error(`配置项 mail.uiPatterns 里的正则不合法：${p}（${e.message}）`)
+    }
+  }
 
   // 投递：mode 只认 new/existing；promptFile / projectDir 按 stateFile 的规则展开（~ 与相对路径）。
   cfg.deliver = cfg.deliver && typeof cfg.deliver === "object" ? cfg.deliver : {}

@@ -31,6 +31,8 @@ import { NODE_TEARDOWN, runNodeCleanup, resolveIssueKey, issueKeyForPr } from ".
 import { DoubaoSessionAdapter } from "./workflow/adapters/doubao.mjs"
 import { GiteaTrackerAdapter } from "./workflow/adapters/gitea.mjs"
 import { prWatchOnce, prWatchTarget, mergeFailureReason } from "./prwatch.mjs"
+import { MailDriver, realRecipients } from "./mail.mjs"
+import { acceptanceGate, detectUiChange, mailPollOnce, requestAcceptance } from "./mailflow.mjs"
 import { inflightIssues } from "./planner.mjs"
 import { listPulls, mergePr, closeIssue, createPr, commentIssue } from "./gitea.mjs"
 import { ConsoleStore } from "./console.mjs"
@@ -736,6 +738,10 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     // 自动接单巡检运行时
     pickup: { lastAt: null, count: 0, lastResult: null, running: false },
     pickupInterval: null,
+    // 验收邮件轮询运行时
+    mail: { lastPollAt: null, pollCount: 0, polling: false, lastResult: null, nextAt: "" },
+    mailInterval: null,
+    mailKick: null,
     // 合并通道运行时（与派单通道分开：各排各的队，各用各的并发）
     merge: { lastSweepAt: null, sweeps: 0, lastResult: null, interval: null, kick: null },
   }
@@ -759,6 +765,17 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   // 用一条进程内的串行链（ctx.mergeChain）兜住并发，账本照样写。
   // 投递通道：new 模式每次新建会话；这里只做一次绑定，调用侧不用关心实现。
   ctx.deliver = (opts) => deliverNewSession(ctx, opts)
+  // 验收邮件：驱动一次绑定；验收回复注回会话、通过后合并都走这两个绑定，
+  // 邮件模块不反向 import service（避免循环依赖）。
+  ctx.mail = new MailDriver({ bin: cfg.mail?.bin ?? "agently-cli", confirmed: cfg.mail?.confirmed !== false, log })
+  // 验收邮件自动合并也走同一条串行链：和 CLI 的 `pr merge` 不并着合（合并要写账本）。
+  ctx.merge = (task) => {
+    const prev = ctx.mergeChain ?? Promise.resolve()
+    const mine = prev.then(() => runMergeTask(ctx, task), () => runMergeTask(ctx, task))
+    ctx.mergeChain = mine.then(() => {}, () => {})
+    return mine
+  }
+  ctx.mailPoll = (opts) => mailPollOnce(ctx, opts)
 
   // 服务重启后把账本里在跑的工单补成流程实例：容量按实例算，不补就会当成 0 又重复派单。
   try {
@@ -836,6 +853,25 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   ctx.prPoll = doPrPoll
   const doPickup = async () => pickupOnce(ctx)
   ctx.pickup = doPickup
+  // 验收邮件轮询：读收件箱，按主题里的 [FM-…] 把回复认回 PR 并注回会话。
+  // 回复可能在半夜到，所以这条定时器**不受工作时间窗限制**（只读收件箱，不打扰谁）。
+  const doMailPoll = async () => {
+    if (state.mail.polling) return { ok: true, skipped: "busy" }
+    state.mail.polling = true
+    try {
+      const r = await mailPollOnce(ctx)
+      if (r?.ok !== false) {
+        state.mail.lastPollAt = nowIso()
+        state.mail.pollCount++
+        state.mail.lastResult = `查 ${r.checked ?? 0} 封 · 认回 ${r.matched ?? 0} · 判定 ${r.verdicts ?? 0} · 合并 ${r.merged ?? 0}`
+        if (r.matched || r.reminders) log(`验收邮件：${state.mail.lastResult}${r.reminders ? ` · 催办 ${r.reminders}` : ""}`)
+      }
+      return r
+    } finally {
+      state.mail.polling = false
+    }
+  }
+  ctx.mailPollNow = doMailPoll
   // 控制台「待分配任务」：列候选（只读，带 45s 缓存）与手动接单（只派点中的那一条）。
   ctx.candidates = (opts) => candidatesOnce(ctx, opts)
   ctx.pickIssue = (args) => pickIssue(ctx, args)
@@ -844,6 +880,8 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   ctx.runSchedule = async (id) => {
     if (id === "pickup") return pickupOnce(ctx, { force: true })
     if (id === "prWatch") return prPollOnce(ctx, { force: true })
+    // 验收邮件：立即轮询一次收件箱（不受工作时间窗限制）。
+    if (id === "mail") return doMailPoll()
     // 续接调度跟着会话轮询走，立即执行就是立刻跑一轮轮询（收工的会话该催就催）。
     if (id === "planner") return pollOnce(ctx)
     throw Object.assign(new Error(`${id} 没有可以立即执行的动作`), { code: "schedule_not_runnable" })
@@ -853,14 +891,19 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   // PR 扫描（现在是「他人 PR 扫描」）、自动接单都由 cron 驱动：页面上改表达式立刻重排，不用重启服务。
   // 老的 intervalSeconds 仍会读，但没配 cron 时折成分钟级 cron（见 cronOf）。合并通道已取消。
   const armSchedules = () => {
-    for (const k of ["prInterval", "prKick", "pickupInterval", "pickupKick"]) {
+    for (const k of ["prInterval", "prKick", "pickupInterval", "pickupKick", "mailInterval", "mailKick"]) {
       if (state[k]) clearTimeout(state[k])
       state[k] = null
     }
     state.pr.nextAt = ""
     state.pickup.nextAt = ""
+    state.mail.nextAt = ""
 
-    const TIMERS = { pr: ["prInterval", "他人 PR 扫描"], pickup: ["pickupInterval", "自动巡检"] }
+    const TIMERS = {
+      pr: ["prInterval", "他人 PR 扫描"],
+      pickup: ["pickupInterval", "自动巡检"],
+      mail: ["mailInterval", "验收邮件轮询"],
+    }
     const armOne = (kind, expr, run) => {
       const [timerKey, label] = TIMERS[kind]
       let next
@@ -877,7 +920,8 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
       state[kind].nextAt = next.toISOString()
       state[timerKey] = setTimeout(() => {
         state[timerKey] = null
-        if (inWorkHours(cfg)) run().catch((e) => log(`${label}异常：${e.message}`))
+        // 邮件轮询不受工作时间窗限制：验收回复可能半夜到，读收件箱不打扰谁。
+        if (kind === "mail" || inWorkHours(cfg)) run().catch((e) => log(`${label}异常：${e.message}`))
         if (!state.closed) armOne(kind, expr, run)
       }, Math.max(0, next.getTime() - Date.now()))
       state[timerKey].unref?.()
@@ -902,6 +946,15 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
         doPickup().catch((e) => log(`自动巡检异常：${e.message}`))
       }, 1000)
       state.pickupKick.unref?.()
+    }
+
+    // 验收邮件轮询：mail.enabled===true 才起；起服务 1s 后先收一轮，不用等下一个 cron 点。
+    if (cfg.mail?.enabled === true) {
+      armOne("mail", cronOf(cfg, "mail"), doMailPoll)
+      state.mailKick = setTimeout(() => {
+        doMailPoll().catch((e) => log(`验收邮件轮询异常：${e.message}`))
+      }, 1000)
+      state.mailKick.unref?.()
     }
 
     // 合并通道已取消：这里不再挂「合并」定时任务（合并由 pr merge 当场执行）。
@@ -937,6 +990,8 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     if (state.prKick) clearTimeout(state.prKick)
     if (state.pickupInterval) clearTimeout(state.pickupInterval)
     if (state.pickupKick) clearTimeout(state.pickupKick)
+    if (state.mailInterval) clearTimeout(state.mailInterval)
+    if (state.mailKick) clearTimeout(state.mailKick)
     if (state.mergeInterval) clearTimeout(state.mergeInterval)
     if (state.mergeKick) clearTimeout(state.mergeKick)
     await new Promise((r) => consoleHttp.server.close(r))
@@ -1324,6 +1379,30 @@ export async function runMergeTask(ctx, task = {}) {
     // 也把工单键带回去：同步回包要能说清「这条 PR 属于哪张单」，别只回一个 skipped。
     return { ok: true, skipped: "already-merged", alreadyMerged: true, issueKey: plannedKey, worktree, branch, notes: [] }
   }
+
+  // 验收闸门：PR 涉及 UI、且验收邮件已经发出去在等回复时，先不许合。
+  // 邮件验收通过后 applyVerdict 会把 approvedBy 带进来；编排也可以显式 --approved-by（用户当面回了「合并」）。
+  // 没开邮件 / 不是 UI / 测试同学还没配真邮箱时一律放行，不把原来的流程卡死。
+  const gate = await acceptanceGate(ctx, {
+    repo,
+    pr,
+    issueKey: plannedKey,
+    url: String(task.url ?? ""),
+    title: String(recOf.title ?? ""),
+    ui: task.ui === true,
+    approvedBy: String(task.approvedBy ?? ""),
+  })
+  if (!gate.allow) {
+    new Book(cfg.stateFile).markMergeAsked(key, {
+      pr,
+      url: String(task.url ?? ""),
+      status: "waiting",
+      error: gate.message,
+    })
+    log(`合并 ${repo}#${pr} 等 UI 验收：${gate.message}`)
+    return { ok: false, reason: gate.reason, message: gate.message, gate, worktree, branch, issueKey: plannedKey }
+  }
+  if (gate.note) log(`合并 ${repo}#${pr}：${gate.note}`)
 
   const op = startOperation(ctx, "merge", `合并 PR ${repo}#${pr}`, {
     key,
@@ -1785,11 +1864,37 @@ export async function handleRequest(ctx, req) {  const id = req?.id
       to: "open",
       detail: `${base} ← ${head}${issueNo ? ` · 工单 ${issueRepo}#${issueNo}` : ""}`,
     })
+    // UI 验收：显式 --ui，或从这张单的 worktree diff 里认出前端文件。
+    // 认到 UI 就立刻发验收邮件（主题带 [FM-…] 筛选 ID）；testers 还是占位符时只记 no-recipient，不报错。
+    const acceptKey = issueNo ? `${issueRepo}#${issueNo}` : ""
+    let ui = req.ui === true
+    if (!ui && acceptKey) {
+      const det = await detectUiChange({ cfg: ctx.cfg, issueKey: acceptKey, repo })
+      ui = det.ui === true
+    }
+    let acceptance = null
+    if (ui) {
+      if (acceptKey) b.setIssue(acceptKey, { ui: true })
+      acceptance = await requestAcceptance(ctx, {
+        repo,
+        pr: number,
+        url: pr.url ?? "",
+        issueKey: acceptKey,
+        title,
+      })
+      ctx.log?.(
+        `PR 涉及 UI ${repo}#${number}：验收邮件${acceptance.ok ? `已发给 ${acceptance.to}（${acceptance.tag}）` : `跳过（${acceptance.skipped}）`}`
+      )
+    }
     // 立刻落库，控制台不用等下一轮同步。
     try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
     ctx.log?.(`PR 建好 ${repo}#${number} ${pr.url ?? ""}（走 foreman）`)
     finishOperation(ctx, op, "success", `${repo}#${number} · ${pr.url ?? ""}`)
-    return ok({ repo, pr: number, url: pr.url ?? "", issue: issueNo || null, issueRepo: issueNo ? issueRepo : null })
+    return ok({
+      repo, pr: number, url: pr.url ?? "", issue: issueNo || null, issueRepo: issueNo ? issueRepo : null,
+      ui,
+      acceptance,
+    })
   }
 
   // ws add：一工程一工作区。执行会话在跑的过程中发现还要改别的工程，就用这条现开一个工作区
@@ -2038,6 +2143,9 @@ export async function handleRequest(ctx, req) {  const id = req?.id
       runMergeTask(ctx, {
         key, repo, pr: number, issue: issueNo, url: String(req.url ?? ""),
         style, deleteBranch, source: "cli", notify: false, workflow,
+        // UI 验收：--ui 声明这条 PR 改了界面；--approved-by <人> 表示人已经当面验收过了（用户回「合并」）。
+        ui: req.ui === true,
+        approvedBy: String(req.approvedBy ?? "").trim(),
       })
     let result
     try {
@@ -2049,7 +2157,16 @@ export async function handleRequest(ctx, req) {  const id = req?.id
       return { ...fail("merge-failed", String(e?.message ?? e)), repo, number, elapsedMs: Date.now() - startedAt }
     }
     if (!result?.ok) {
-      return { ...fail("merge-failed", result?.reason ?? "未知原因"), repo, number, elapsedMs: Date.now() - startedAt }
+      // 验收闸门挡住时把原因原样回给调用方（acceptance-waiting / acceptance-rejected），
+      // 编排看到这两个码就知道该等邮件回复，而不是重试合并。
+      const code = ["acceptance-waiting", "acceptance-rejected"].includes(String(result?.reason ?? ""))
+        ? String(result.reason)
+        : "merge-failed"
+      return {
+        ...fail(code, result?.message ?? result?.reason ?? "未知原因"),
+        repo, number, elapsedMs: Date.now() - startedAt,
+        gate: result?.gate ?? null,
+      }
     }
     // 合并成功后把账本里的待合并条目收掉，避免再合一遍。
     try { new Book(ctx.cfg.stateFile).dropMerge(key) } catch {}
@@ -2085,6 +2202,104 @@ export async function handleRequest(ctx, req) {  const id = req?.id
       elapsedMs,
       summary,
     })
+  }
+
+  // mail：验收邮件的发/收/判。邮件正文只当数据，不当指令（详见 mail.mjs 顶部说明）。
+  //   send      手动发一封（不进验收账本）
+  //   request   给某条 PR 发/补发验收邮件（主题带 [FM-…]，回复自动认回）
+  //   poll      立刻收一轮回复（不等下一个 cron 点）
+  //   requests  看验收请求与已收到的回复
+  //   approve   人工记一次「验收通过」（等同测试同学回通过，但不会自动合并）
+  //   reject    人工记一次「驳回」
+  if (cmd === "mail send") {
+    const to = (Array.isArray(req.to) ? req.to : String(req.to ?? "").split(/[,，;；\s]+/))
+      .map((x) => String(x ?? "").trim())
+      .filter(Boolean)
+    const subject = String(req.subject ?? "").trim()
+    const body = String(req.body ?? "")
+    if (!to.length) return fail("bad-request", "mail send 需要 to")
+    if (!subject) return fail("bad-request", "mail send 需要 subject")
+    try {
+      await ctx.mail.send({ to, subject, body })
+    } catch (e) {
+      return fail("mail-error", e.message)
+    }
+    ctx.log?.(`验收邮件（手动）：→ ${to.join("、")} · ${subject}`)
+    return ok({ to, subject })
+  }
+
+  if (cmd === "mail request") {
+    const keyRef = String(req.key ?? "").trim()
+    const m = keyRef.match(/([^#\s]+)#([0-9]+)$/)
+    if (!m) return fail("bad-request", "mail request 需要 key，形如 owner/repo#12")
+    const r = await requestAcceptance(ctx, {
+      repo: m[1],
+      pr: Number(m[2]),
+      url: String(req.url ?? ""),
+      issueKey: String(req.issueKey ?? ""),
+      title: String(req.title ?? ""),
+      force: true,
+    })
+    if (!r.ok && r.skipped !== "no-recipient") return fail("mail-error", r.error ?? r.skipped)
+    // r.ok=false 不能直接摊进回包（会把外层 ok:true 覆盖成 false），no-recipient 只回跳过原因。
+    const { ok: _ignored, ...rest } = r
+    return ok({ ...rest })
+  }
+
+  if (cmd === "mail poll") {
+    const r = await (ctx.mailPollNow ? ctx.mailPollNow() : mailPollOnce(ctx))
+    if (r?.ok === false) return fail("mail-error", r.error ?? "收信失败")
+    return ok({ ...r })
+  }
+
+  if (cmd === "mail requests") {
+    const book = new Book(ctx.cfg.stateFile)
+    const list = Object.values(book.mail.requests).map((r) => ({
+      key: r.key,
+      tag: r.tag,
+      repo: r.repo,
+      pr: r.pr,
+      url: r.url,
+      to: r.to,
+      status: r.status,
+      sentAt: r.sentAt,
+      lastSentAt: r.lastSentAt,
+      sentCount: r.sentCount ?? 0,
+      reminders: r.reminders ?? 0,
+      replies: (r.replies ?? []).length,
+      lastVerdict: r.lastVerdict ?? null,
+      note: r.note ?? "",
+      error: r.error ?? "",
+      updatedAt: r.updatedAt,
+    }))
+    return ok({ requests: list, lastPollAt: book.mail.lastPollAt ?? "", rr: book.mail.rr ?? 0 })
+  }
+
+  if (cmd === "mail approve" || cmd === "mail reject") {
+    const keyRef = String(req.key ?? "").trim()
+    const m = keyRef.match(/([^#\s]+)#([0-9]+)$/)
+    if (!m) return fail("bad-request", `${cmd} 需要 key，形如 owner/repo#12`)
+    const key = `${m[1]}#${Number(m[2])}`
+    const book = new Book(ctx.cfg.stateFile)
+    const by = String(req.by ?? "").trim() || "人工"
+    const note = String(req.note ?? "").trim()
+    if (cmd === "mail reject") {
+      book.markMailRequest(key, {
+        status: "rejected",
+        lastReplyAt: nowIso(),
+        lastVerdict: { verdict: "rejected", from: by, summary: note || "人工驳回", messageId: "" },
+      })
+      ctx.log?.(`验收驳回（人工）：${key} · ${by}${note ? ` · ${note}` : ""}`)
+      return ok({ key, status: "rejected", by })
+    }
+    book.markApproval(key, { by, via: "user", note: note || "人工验收通过" })
+    book.markMailRequest(key, {
+      status: "approved",
+      lastReplyAt: nowIso(),
+      lastVerdict: { verdict: "approved", from: by, summary: note || "人工验收通过", messageId: "" },
+    })
+    ctx.log?.(`验收通过（人工）：${key} · ${by}${note ? ` · ${note}` : ""}`)
+    return ok({ key, status: "approved", by })
   }
 
   if (cmd === "issue comment") {
@@ -2167,6 +2382,7 @@ export async function handleRequest(ctx, req) {  const id = req?.id
   }
 
   if (cmd === "status") {
+    const bookNow = new Book(ctx.cfg.stateFile)
     return ok({
       pid: process.pid,
       version: ctx.state.version,
@@ -2244,6 +2460,24 @@ export async function handleRequest(ctx, req) {  const id = req?.id
         pollCount: ctx.state.pr?.pollCount ?? 0,
         notifiedCount: ctx.state.pr?.notifiedCount ?? 0,
         pending: ctx.state.pr?.pending ?? 0,
+      },
+      // 验收邮件：testers 还是占位符时 recipients=[]，此时不挡合并（沿用人工验收）。
+      mail: {
+        enabled: ctx.cfg.mail?.enabled === true,
+        uiGate: ctx.cfg.mail?.uiGate !== false,
+        bin: ctx.cfg.mail?.bin ?? "agently-cli",
+        testers: ctx.cfg.mail?.testers ?? [],
+        recipients: realRecipients(ctx.cfg),
+        strategy: ctx.cfg.mail?.strategy ?? "round-robin",
+        pollSeconds: ctx.cfg.mail?.pollSeconds ?? 300,
+        remindMinutes: ctx.cfg.mail?.remindMinutes ?? 0,
+        maxReminders: ctx.cfg.mail?.maxReminders ?? 0,
+        lastPollAt: ctx.state.mail?.lastPollAt ?? null,
+        pollCount: ctx.state.mail?.pollCount ?? 0,
+        lastResult: ctx.state.mail?.lastResult ?? null,
+        nextAt: ctx.state.mail?.nextAt ?? "",
+        polling: ctx.state.mail?.polling === true,
+        waiting: Object.values(bookNow.mail.requests).filter((r) => String(r?.status ?? "") === "waiting").length,
       },
       workflow: {
         // 两条流程（own 自有工单 / review 他人 PR）+ 节点（含暂停状态与累计执行次数）+ 在跑实例。

@@ -6,7 +6,7 @@ import { validateCron } from "./cron.mjs"
 
 const pad = (n) => String(n).padStart(2, "0")
 
-export const SCHEDULE_IDS = ["pickup", "prWatch", "planner", "workHours"]
+export const SCHEDULE_IDS = ["pickup", "prWatch", "mail", "planner", "workHours"]
 
 // 临时闭嘴恢复的时刻：今天还没到开始时间且今天是工作日就今天，否则下一个工作日。
 export function nextWorkdayStart(cfg, at = new Date()) {
@@ -34,7 +34,10 @@ const localIso = (d) =>
 export function cronOf(cfg, id) {
   const section = cfg?.[id] ?? {}
   if (String(section.cron ?? "").trim()) return String(section.cron).trim()
-  const seconds = Number(section.intervalSeconds ?? (id === "pickup" ? 1800 : 300))
+  const seconds = Number(
+    section.intervalSeconds ??
+      (id === "pickup" ? 1800 : id === "mail" ? cfg?.mail?.pollSeconds ?? 300 : 300)
+  )
   const minutes = Math.max(1, Math.round(seconds / 60))
   return minutes === 1 ? "* * * * *" : `*/${minutes} * * * *`
 }
@@ -76,6 +79,23 @@ export function listSchedules(cfg, state = {}) {
       runnable: true,
       runLabel: "立即扫描",
       running: state.pr?.polling === true,
+    },
+    {
+      id: "mail",
+      label: "验收邮件轮询",
+      enabled: cfg?.mail?.enabled === true,
+      cron: cronOf(cfg, "mail"),
+      nextAt: state.mail?.nextAt || "",
+      intervalSeconds: Number(cfg?.mail?.pollSeconds ?? 300),
+      detail: `PR 涉及 UI 时发验收邮件，按主题里的 [FM-…] 收回复；验收人 ${(cfg?.mail?.testers ?? []).length} 个${
+        (cfg?.mail?.testers ?? []).some((e) => /^</.test(String(e))) ? "（含占位符，未生效）" : ""
+      } · 不受工作时间窗限制`,
+      lastAt: state.mail?.lastPollAt || "",
+      count: Number(state.mail?.pollCount ?? 0),
+      lastResult: state.mail?.lastResult || "",
+      runnable: true,
+      runLabel: "立即收信",
+      running: state.mail?.polling === true,
     },
     {
       id: "planner",
@@ -139,7 +159,7 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
     if (!(id in patch)) continue
     const raw = patch[id]
     const obj = raw && typeof raw === "object" ? raw : { enabled: raw === true || raw === "true" }
-    if ("cron" in obj && !["pickup", "prWatch"].includes(id)) throw new Error(`${id} 不是独立定时任务，没有 cron 可改`)
+    if ("cron" in obj && !["pickup", "prWatch", "mail"].includes(id)) throw new Error(`${id} 不是独立定时任务，没有 cron 可改`)
     const next = {}
     if ("enabled" in obj) next.enabled = obj.enabled === true || obj.enabled === "true"
     if ("cron" in obj) {
@@ -155,6 +175,10 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
       cfg.prWatch = { ...(cfg.prWatch ?? {}) }
       if ("enabled" in next) cfg.prWatch.enabled = next.enabled
       if ("cron" in next) cfg.prWatch.cron = next.cron
+    } else if (id === "mail") {
+      cfg.mail = { ...(cfg.mail ?? {}) }
+      if ("enabled" in next) cfg.mail.enabled = next.enabled
+      if ("cron" in next) cfg.mail.cron = next.cron
     } else if (id === "planner") {
       if ("enabled" in next) cfg.planner = { ...(cfg.planner ?? {}), enabled: next.enabled }
     } else if (id === "workHours") {
@@ -166,7 +190,7 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
 }
 
 /** 开关对应的配置键名（pickup.auto，其余是 enabled）。 */
-const FLAG_KEY = { pickup: "auto", prWatch: "enabled", planner: "enabled" }
+const FLAG_KEY = { pickup: "auto", prWatch: "enabled", mail: "enabled", planner: "enabled" }
 
 /**
  * 写回配置文件：只改上面这四个开关，其余字段（含用户手写的格式/注释式排版）原样保留。
