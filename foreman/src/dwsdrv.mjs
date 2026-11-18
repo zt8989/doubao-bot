@@ -145,7 +145,7 @@ export class DwsDriver {
     return list.find((x) => x?.name === name) ?? list[0] ?? null
   }
 
-  // info：读整段对话，只保留最后一条 assistant 文本（RESULT 就在里面）。
+  // info：保留整段 messages 供无 RESULT 时回传，同时派生最后一条 assistant 文本用于解析 RESULT。
   async info(name) {
     const r = await this.json(["info", name, "--json"], { timeout: 180000 })
     const messages = Array.isArray(r?.messages) ? r.messages : []

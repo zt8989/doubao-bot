@@ -233,7 +233,8 @@ export function notifyDecision({ cfg, watcher, book, env = process.env, result }
   let event = "session-done"
   if (result && result.status) {
     event =
-      result.status === "done" ? "done"
+      result.status === "none" ? "session-done"
+      : result.status === "done" ? "done"
       : result.status === "need_decision" ? "needs-human"
       : result.status === "blocked" ? "blocked"
       : "failed"
@@ -256,6 +257,24 @@ export function notifyDecision({ cfg, watcher, book, env = process.env, result }
     return { send: false, target, event, reason: "event-filtered", text }
   }
   return { send: true, target, event, reason: "", text }
+}
+
+// 没有 RESULT 时给编排保留最近的完整对话，而不是只留最后一句；不带思考过程，避免无关上下文膨胀。
+export function conversationTail(messages, maxChars = 12000) {
+  const rows = (Array.isArray(messages) ? messages : [])
+    .map((m) => {
+      const text = String(m?.text ?? "").trim()
+      if (!text) return ""
+      const role = String(m?.role ?? m?.from ?? "").trim()
+      const name = role === "user" || role === "human" ? "用户"
+        : role === "assistant" || role === "bot" || role === "ai" ? "执行会话"
+        : role || "消息"
+      return `${name}：\n${text}`
+    })
+    .filter(Boolean)
+  const text = rows.join("\n\n")
+  if (text.length <= maxChars) return text
+  return `……（仅保留最后 ${maxChars} 字）\n${text.slice(-maxChars)}`
 }
 
 // 结论正文：编排会话读这一条就知道哪张单、什么结果、PR 与工作区。
@@ -298,7 +317,8 @@ export function updateTextFor({ watcher = {}, book = {}, result = null, event = 
     reason: result?.summary || result?.question || "",
     prs: Array.isArray(result?.prs) ? result.prs : [],
     tests: String(result?.tests ?? ""),
-    // 没解析出 RESULT：把最后一条回复带给编排会话（parseResult 的 none 分支把原文放在 text 里）。
+    // 没解析出 RESULT：优先贴最近多轮对话；老适配器只有 text 时仍保留最后回复兜底。
+    conversation: result?.status === "none" ? String(result?.conversation ?? "").trim() : "",
     lastReply: result?.status === "none" ? String(result?.text ?? "").trim() : "",
   }
   return notifyText(issueLike, outLike)
@@ -1087,7 +1107,10 @@ export async function pollOnce(ctx) {
       try {
         const info = await dws.info(w.target)
         const text = info?.lastReply || ""
-        if (text) result = parseResult(text)
+        const parsed = text ? parseResult(text) : { status: "none", raw: "", text: "" }
+        result = parsed.status === "none"
+          ? { ...parsed, conversation: conversationTail(info?.messages) }
+          : parsed
       } catch (e) {
         state.dwsErrors++
         log(`dws info ${w.target} 失败：${e.message}`)

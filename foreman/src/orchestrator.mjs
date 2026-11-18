@@ -73,8 +73,10 @@ export function notifyText(issue = {}, out = {}) {
       summary: summary.slice(0, 400),
     })}</RESULT>`)
   }
-  // 没有 RESULT 时把执行会话的最后一条回复贴出来：编排侧不用猜它卡在哪。
-  if (out.lastReply) {
+  // 没有 RESULT 不等于失败：贴最近多轮对话，编排侧才能判断实际进展；旧适配器仍用最后一句兜底。
+  if (out.conversation) {
+    lines.push("", "没有检测到 RESULT，执行会话的最后对话原文：", String(out.conversation))
+  } else if (out.lastReply) {
     lines.push("", "没有检测到 RESULT，执行会话的最后一条回复原文：", String(out.lastReply).slice(-1500))
   }
   return lines.join("\n")

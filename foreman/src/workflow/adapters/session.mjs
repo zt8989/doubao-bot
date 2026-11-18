@@ -6,7 +6,7 @@
 //   resumeExecution({ name, prompt })      往已有执行会话里续说
 //   deliver({ name, prompt, noWait })      开一条通知/编排会话，把首句投进去
 //   status(target)                         读会话状态（streaming/finished/chars/head/tail）
-//   info(target)                           读会话内容（至少给 lastReply）
+//   info(target)                           读会话内容（至少给 lastReply；有 messages 时可回传最近对话）
 //   notify(target, text)                   往既有会话里塞一条文本（existing 模式用）
 // 可选：
 //   runningMap()                           不打扰用户地读出「哪些会话还在跑」（豆包=侧边栏）

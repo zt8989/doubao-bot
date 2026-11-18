@@ -208,3 +208,55 @@ test("PR 已合并（会话已归档）：不再给编排会话补一条结论�
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("无 RESULT：不判失败，给编排会话贴执行会话的最后对话", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-poll-no-result-"))
+  try {
+    const cfg = {
+      stateFile: path.join(dir, "state.json"),
+      notify: { enabled: true, session: "boss", events: ["done", "failed"] },
+      deliver: { mode: "existing" },
+      sessionFlow: { enabled: true },
+    }
+    const book = new Book(cfg.stateFile)
+    book.setWatch({ target: "conv-worker", name: "w", issueKey: "demo/demo#1", repo: "demo/demo", number: 1, notifyTo: "boss" })
+    book.setIssue("demo/demo#1", { state: "working", title: "统一路由", orchestrator: "conv-orch" })
+    const steered = []
+    const ctx = {
+      cfg,
+      state: { polling: false, watchers: new Map(), dwsErrors: 0, notifiedCount: 0 },
+      log: () => {},
+      gitea: {},
+      engine: { lifecycle: { emit: async () => {} }, emit: async () => {} },
+      dws: {
+        runningMap: async () => ({ "conv-worker": { running: false, title: "w" } }),
+        status: async () => ({ streaming: false, finished: true, chars: 500, head: "H", tail: "T", status: "ok" }),
+        info: async () => ({
+          lastReply: "我先核对指定工作区的提交与未提交改动，只补齐尚未完成的部分。",
+          messages: [
+            { role: "user", text: "先检查现有改动，不要重复实现。" },
+            { role: "assistant", text: "已读完工单，现有分支还缺回归测试。" },
+            { role: "user", text: "继续补齐测试并提交。" },
+            { role: "assistant", text: "我先核对指定工作区的提交与未提交改动，只补齐尚未完成的部分。" },
+          ],
+        }),
+        steer: async (target, text) => { steered.push({ target, text }) },
+        notify: async () => {},
+      },
+    }
+
+    await pollOnce(ctx)
+
+    assert.equal(steered.length, 1)
+    assert.equal(steered[0].target, "conv-orch")
+    assert.match(steered[0].text, /状态：session-done/)
+    assert.doesNotMatch(steered[0].text, /状态：failed/)
+    assert.match(steered[0].text, /执行会话的最后对话原文/)
+    assert.match(steered[0].text, /先检查现有改动，不要重复实现。/)
+    assert.match(steered[0].text, /现有分支还缺回归测试。/)
+    assert.match(steered[0].text, /我先核对指定工作区的提交与未提交改动/)
+    assert.equal(new Book(cfg.stateFile).issue("demo/demo#1").state, "working", "没有 RESULT 不是工单失败结论")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

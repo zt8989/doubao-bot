@@ -344,6 +344,13 @@ export function nextStepLine({ issueKey = "", result = null, sessionId = "" } = 
   if (status === "need_decision") {
     return `下一步：把上面的问题给用户；答复后用 foreman resume ${session} 在同一工作会话里续跑（别新开）`
   }
+  if (status === "none") {
+    return [
+      "下一步：没有 RESULT 不代表执行失败，先根据上面的最后对话判断实际进展：",
+      `- 需要原会话继续：foreman resume ${session}`,
+      "- 不要仅因缺少 RESULT 就重跑；已有交付或需要用户拍板时按实际情况处理。",
+    ].join("\n")
+  }
   if (status === "blocked" || status === "failed") {
     return [
       "下一步：先根据上面的原因选择处理动作，不要固定续跑：",

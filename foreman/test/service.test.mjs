@@ -300,11 +300,15 @@ test("handleRequest：poll 走注入的 poll 函数；stop 返回 stopping", asy
   }
 })
 
-test("notifyDecision：无 RESULT 时正文带执行会话 id 与最后回复；有 RESULT 不贴原文", () => {
+test("notifyDecision：无 RESULT 按 session-done 通知并带最后回复；有 RESULT 不贴原文", () => {
   const cfg = { notify: { enabled: true, session: "boss", events: ["done", "failed"] }, deliver: { mode: "new" } }
   const watcher = { target: "conv-1", name: "开工", issueKey: "demo/demo#1", repo: "demo/demo", number: 1, notifyTo: "boss" }
   const book = { issue: () => ({ title: "统一路由", branch: "fix/issue-1" }) }
   const none = notifyDecision({ cfg, watcher, book, env: {}, result: { status: "none", text: "最后一句：卡在依赖安装" } })
+  assert.equal(none.event, "session-done")
+  assert.equal(none.send, true)
+  assert.match(none.text, /状态：session-done/)
+  assert.doesNotMatch(none.text, /状态：failed/)
   assert.match(none.text, /执行会话：conv-1（开工）/)
   assert.match(none.text, /没有检测到 RESULT/)
   assert.match(none.text, /最后一句：卡在依赖安装/)

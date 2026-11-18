@@ -296,6 +296,10 @@ test("失败处理提示：带会话 id，由编排归因选择补派、续跑�
   assert.match(blocked, /需要其他智能体协作/)
   assert.match(blocked, /dws msg --mode steer conv-worker-1/)
   assert.ok(!blocked.includes("resume --issue"), "续跑入口不能退回工单号")
+  const none = nextStepLine({ issueKey: "yyzl/demo#7", result: { status: "none" }, sessionId: "conv-worker-1" })
+  assert.match(none, /没有 RESULT 不代表执行失败/)
+  assert.match(none, /根据上面的最后对话判断实际进展/)
+  assert.match(none, /foreman resume conv-worker-1/)
   const done = nextStepLine({
     issueKey: "yyzl/demo#7",
     result: { status: "done", prs: [{ repo: "yyzl/demo", pr: 12 }] },
