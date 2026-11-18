@@ -2021,6 +2021,7 @@ export async function handleRequest(ctx, req) {  const id = req?.id
   }
 
   if (cmd === "pr merge") {
+    const startedAt = Date.now()
     const repo = String(req.repo ?? "").trim()
     const number = Number(req.number ?? 0)
     if (!repo || !number) return fail("bad-request", "pr merge 需要 repo / number")
@@ -2044,16 +2045,45 @@ export async function handleRequest(ctx, req) {  const id = req?.id
       ctx.mergeChain = mine.then(() => {}, () => {})
       result = await mine
     } catch (e) {
-      return fail("merge-failed", String(e?.message ?? e))
+      return { ...fail("merge-failed", String(e?.message ?? e)), repo, number, elapsedMs: Date.now() - startedAt }
     }
-    if (!result?.ok) return fail("merge-failed", result?.reason ?? "未知原因")
+    if (!result?.ok) {
+      return { ...fail("merge-failed", result?.reason ?? "未知原因"), repo, number, elapsedMs: Date.now() - startedAt }
+    }
     // 合并成功后把账本里的待合并条目收掉，避免再合一遍。
     try { new Book(ctx.cfg.stateFile).dropMerge(key) } catch {}
     // 通知会话收尾：它报的 PR 现在都合完了，自动归档，别把会话留在侧边栏。
     const notes = [...(result.notes ?? [])]
     try { notes.push(...(await archiveMergedNotices({ dws: ctx.dws, stateFile: ctx.cfg.stateFile, log: ctx.log }))) } catch {}
-    ctx.log?.(`已合并 ${repo}#${number}${issueNo ? `，关单 #${issueNo}` : ""}（走 foreman · 工程 ${repo}${result?.worktree ? ` · worktree ${result.worktree}` : ""}）${notes.length ? `；收尾：${notes.join("；")}` : ""}`)
-    return ok({ repo, number, merged: true, alreadyMerged: !!result.alreadyMerged, issue: issueNo || null, worktree: result?.worktree ?? "", cleanup: notes })
+    // 同步回包：调用方（编排会话）拿到的这一条就是合并结论，不用等任何后续消息。
+    // 关单事实按账本判定（close 节点会把工单置 done；多工程还有 PR 没合时先不关）。
+    const bookM = new Book(ctx.cfg.stateFile)
+    const issueKeyOut = String(result.issueKey ?? "") || (issueNo ? `${repo}#${issueNo}` : "")
+    const issueState = issueKeyOut ? String((bookM.issue(issueKeyOut) ?? {}).state ?? "") : ""
+    const closed = ["done", "cleaned"].includes(issueState)
+    const worktree = String(result?.worktree ?? "")
+    const where = `工程 ${repo} · worktree ${worktree || "无"}`
+    const elapsedMs = Date.now() - startedAt
+    const summary =
+      `${result.alreadyMerged ? "原本已合并" : "已合并"} ${repo}#${number}` +
+      (issueKeyOut ? `，工单 ${issueKeyOut} ${closed ? "已关单" : "未关单"}` : "，无关联工单") +
+      (notes.length ? `；收尾：${notes.join("；")}` : "；无需收尾")
+    ctx.log?.(`已合并 ${repo}#${number}${issueNo ? `，关单 #${issueNo}` : ""}（走 foreman · ${where}）${notes.length ? `；收尾：${notes.join("；")}` : ""}`)
+    return ok({
+      repo, number,
+      merged: true,
+      alreadyMerged: !!result.alreadyMerged,
+      style,
+      issue: issueNo || null,
+      issueKey: issueKeyOut || null,
+      closed,
+      worktree,
+      branch: String(result?.branch ?? ""),
+      where,
+      cleanup: notes,
+      elapsedMs,
+      summary,
+    })
   }
 
   if (cmd === "issue comment") {

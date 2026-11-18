@@ -7,4 +7,4 @@
 3. 无冲突：按通知给出的命令逐条合并；不 force、不重试。
 4. 有冲突：隔离 worktree 只解冲突块、自测、普通 push，再重新核对合并。
 5. 堆叠 PR、fork、身份对不上、越界或要改业务语义：不合并，说明需人工决定的问题。
-6. 最后用普通文字简述已合、未合及原因，不用 `<RESULT>`。
+6. `foreman pr merge` 同步回包（`merged` / `closed` / `cleanup` / `summary`），直接按回包汇报，不用 `<RESULT>`。

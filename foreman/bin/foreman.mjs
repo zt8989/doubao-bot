@@ -272,7 +272,7 @@ async function cmdPr(pos, flags) {
       issue: Number(strFlag(flags.issue)) || 0,
       style: strFlag(flags.style) || undefined,
       deleteBranch: flags["no-delete-branch"] ? false : undefined,
-    }, 300000)
+    }, 600000)
     if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
     return out({ ok: true, ...r })
   }
