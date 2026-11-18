@@ -78,3 +78,21 @@ test("排队时不涨消息数也算发出：输入框清空 + 出现排队气�
   assert.equal(r.ok, true)
   assert.equal(r.queued, true)
 })
+
+test("长会话虚拟列表：sends 不涨，末条 send 的 message_id 变了也算发出", async () => {
+  // 真实场景：会话很长，新消息挤掉一条旧的，[data-testid=send_message] 数量一直不变。
+  let sent = false
+  const page = {
+    closed: false,
+    key: async () => { sent = true },
+    eval: async (script) => {
+      if (script === READ) return { sends: 40, lastSendId: sent ? "m-new" : "m-old" }
+      if (script === INPUT_LEN) return 0
+      if (script === RUNNING_STATE) return {}
+      return 3
+    },
+  }
+  const r = await mkClient(page).message("继续改", { mode: "steer" })
+  assert.equal(r.ok, true, "消息其实发了，不能报失败")
+  assert.equal(r.sends, 40)
+})

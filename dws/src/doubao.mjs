@@ -711,7 +711,9 @@ export class Doubao {
     const key = keyForMode(m, d)
     const page = await this.connect(signal)
     const before = await page.eval(READ)
-    const baseline = { sends: before?.sends ?? 0 }
+    // 长会话的消息列表是虚拟列表：新消息进来会挤掉一条，sends 可能一直不变，
+    // 只比条数会把「其实已发出」误判成失败（foreman 于是一遍遍重试，编排会话收到重复注入）。
+    const baseline = { sends: before?.sends ?? 0, lastSendId: String(before?.lastSendId ?? "") }
     const n = await page.eval(fill(text))
     if (n < 0) throw new DoubaoError("豆包的输入框没有找到。", "doubao_ui")
     signal?.throwIfAborted?.()
@@ -724,6 +726,8 @@ export class Doubao {
     while (Date.now() < until) {
       await sleep(400, signal)
       const r = await page.eval(READ)
+      const nowId = String(r?.lastSendId ?? "")
+      if (nowId && nowId !== baseline.lastSendId) return { ok: true, mode: m, key, sends: r?.sends ?? baseline.sends, queued: false }
       if ((r?.sends ?? 0) > baseline.sends) return { ok: true, mode: m, key, sends: r.sends, queued: false }
       // 排队时这一轮的消息数不会涨：输入框清空、且出现排队气泡，就算已经排上了。
       let inputLen = -1
