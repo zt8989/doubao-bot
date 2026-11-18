@@ -84,6 +84,27 @@ test("polls 记录每轮扫描，且条数随轮次增长", () => {
   store.close()
 })
 
+test("今日任务先按状态排序，进行中优先，同状态按最后更新时间倒序", () => {
+  const store = tmpStore()
+  const now = Date.now()
+  const at = (minutesAgo) => new Date(now - minutesAgo * 60000).toISOString()
+  const book = {
+    issues: {
+      "a/b#1": { title: "刚完成", state: "done", updatedAt: at(1) },
+      "a/b#2": { title: "较早进行中", state: "working", updatedAt: at(30) },
+      "a/b#3": { title: "已计划", state: "planned", updatedAt: at(20) },
+      "a/b#4": { title: "最近进行中", state: "working", updatedAt: at(10) },
+      "a/b#5": { title: "已出 PR", state: "pr-open", updatedAt: at(5) },
+    },
+    prSeen: {},
+  }
+
+  store.sync(book)
+  const snap = store.snapshot({ book, cfg: {}, pr: {} })
+  assert.deepEqual(snap.tasks.map((t) => t.key), ["a/b#4", "a/b#2", "a/b#3", "a/b#5", "a/b#1"])
+  store.close()
+})
+
 test("今日口径按真实变化时间：账本没变的老单不会因为同步被算进今天", () => {
   const store = tmpStore()
   const old = new Date(Date.now() - 3 * 86400000).toISOString()

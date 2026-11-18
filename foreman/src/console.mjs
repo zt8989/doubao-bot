@@ -9,6 +9,13 @@ import { DatabaseSync } from "node:sqlite"
 
 const pad = (n) => String(n).padStart(2, "0")
 
+// 今日任务先按状态分组：进行中优先，待处理状态居中，完成与未知状态最后。
+const TASK_STATE_ORDER = ["working", "planned", "pr-open", "needs-human", "blocked", "escalated", "failed", "reset", "done", "unknown"]
+const taskStateRank = (state) => {
+  const rank = TASK_STATE_ORDER.indexOf(state)
+  return rank < 0 ? TASK_STATE_ORDER.length : rank
+}
+
 export function localDay(v) {
   const d = v instanceof Date ? v : new Date(v)
   if (!v || Number.isNaN(d.getTime())) return ""
@@ -533,7 +540,12 @@ export class ConsoleStore {
         updatedAtClock: clockOf(updatedAt),
         firstSeenClock: clockOf(r.first_seen_at),
       }
-    })
+    }).sort((a, b) =>
+      taskStateRank(a.state) - taskStateRank(b.state) ||
+      String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")) ||
+      b.number - a.number ||
+      a.key.localeCompare(b.key)
+    )
 
     const prs = prRows.map((r) => {
       const past = pastOf(r)
