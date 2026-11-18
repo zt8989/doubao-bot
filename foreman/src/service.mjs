@@ -1321,7 +1321,8 @@ export async function runMergeTask(ctx, task = {}) {
 
   if (book0.mergeAsk?.[key]?.status === "merged" && task.alreadyMerged !== true) {
     book0.markMergeTask(key, { status: "merged", detail: "账本里已是合并状态" })
-    return { ok: true, skipped: "already-merged" }
+    // 也把工单键带回去：同步回包要能说清「这条 PR 属于哪张单」，别只回一个 skipped。
+    return { ok: true, skipped: "already-merged", alreadyMerged: true, issueKey: plannedKey, worktree, branch, notes: [] }
   }
 
   const op = startOperation(ctx, "merge", `合并 PR ${repo}#${pr}`, {
