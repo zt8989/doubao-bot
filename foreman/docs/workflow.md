@@ -67,24 +67,20 @@ workflow 面板能看到两条流程的全部节点。
 - 状态落在 `state.json` 的 `workflow` 键：`{ paused: ["pickup"], counts: { pickup: { count, lastAt, firstAt, detail } } }`。
 - 接口：`foreman workflow view|pause|resume <节点>`（RPC），控制台走 `GET/POST /api/workflow`。
 
-## 合并：合并助手只判断，workflow 落地
+## 合并：合并助手核对后直接执行
 
-合并不再有独立通道、独立定时任务、独立并发槽。合不合由**合并助手会话**判断：
+合并不再有独立通道、独立定时任务、独立并发槽。合不合由**合并助手会话**判断并执行：
 
-1. `prWatch` 扫到别人的 open PR → 投递一条合并会话（`sessions.notice = "PR待合并"`）；
-2. 合并助手核对归属/基线，有冲突就在隔离工作区解掉并普通 push，然后交一个 RESULT
-   （`status` / `mergeable` / `conflict` / `repo` / `pr` / `prUrl`）；
-3. 服务的 `mergeVerdictOnce`（每轮 `pollOnce` 末尾，复用同一次侧边栏读取）消费这份结论：
-   - `mergeable=true` → 走 `runMergeTask`（与 CLI `foreman pr merge` 共用 `ctx.mergeChain`）合并 + 收尾流水线；
-   - `need_decision` / `blocked` / merge 失败 → 记 `mergeJudge`，写控制台 `pr_judge` 事件，交给人；
-   - 判过就不再读这条会话（读 `dws info` 要切用户窗口）；`merge.verdictAutoMerge: false` 时只判断不合。
+1. `prWatch` 扫到别人的 open PR → 投递一条合并会话（`sessions.notice = "PR待合并"`），通知里逐条给出 `foreman pr merge` 命令；
+2. 合并助手核对归属/基线，有冲突就在隔离工作区解掉并普通 push；可合就直接执行通知里的 `foreman pr merge`，**不交 RESULT**；
+3. `foreman pr merge` 通过 `runMergeTask` 当场完成合并与收尾；需要人工拍板或不可合时，合并助手用普通文字说明原因，服务不再读取合并会话结论、不再二次合并；
 4. 合并结果只落账本与控制台（`mergeAsk` / `mergeTask` / `pr_merge`），**不回执、不通知任何人**：
-   关单 / 清工作区 / 归档做完就收工，合并助手交完 RESULT 也停手；合失败同样只记账，原因看 `mergeAsk.error`。
+   关单 / 清工作区 / 归档做完就收工；合失败同样只记账，原因看 `mergeAsk.error`。
 5. **合并要指出工程与 worktree**：日志 / 控制台事件 / CLI 回包都写 `工程 <仓库> · worktree <路径>`，
    worktree 取账本里这条单的实现工作区（一工程一工作区时按 PR 所在仓库对号）；别人的 PR 没有工作区时写
    「无 worktree」并留一行说明，清理 notes 也带路径（`worktree 已删除：<路径>`）。
 
-会话跑完仍会把「PR 已开好」记进账本（notify 节点只落痕、不发消息），真正落地合并的是 workflow，不是会话自己。
+会话跑完仍会把「PR 已开好」记进账本（notify 节点只落痕、不发消息），合并统一经 `foreman pr merge` 落地。
 
 ## 适配器契约
 

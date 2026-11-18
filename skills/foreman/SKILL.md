@@ -140,7 +140,7 @@ foreman watch poll               # 立刻跑一轮（checked / settled / notifie
 - 作者在 `prWatch.ignoreAuthors`（自己的账号，由 `pickup.me` 补齐）里的单跳过，只记 `skipped: "self"`。
 - 其余 PR 合成一条消息投递：`deliver.mode: "new"`（默认）**新建一条合并会话**（读合并提示词 + 监控项目，会话名 `foreman-合并-<YYYYMMDD-HHmm>`）；`existing` 才用 `dws notify` 发给 `prWatch.notifyTarget`：`earliest`（默认）= 账本 `sessions` 里最早登记、有 `convId` 的会话（第一个调用方）；也可写死会话 id/侧边栏标题。
 - 先按 `pr-view` 的 `mergeNote`/`mergeable` 判冲突，**有冲突的默认过滤掉**（`prWatch.filterConflicts`，默认 `true`；这类单合不了，报了没用，冲突解掉下一轮会自动恢复），记 `skipped: "conflict"`。
-- **别人家的 PR 只通知、不在监听里直接合**：监听看不到关联工单，通知合并助手核对并交 `<RESULT>`；`mergeable=true` 的 PR 由 foreman 自动执行 `runMergeTask` 合并。通知里的 `foreman pr merge <N> --repo R` 仅供人工兜底，合不了会直接回理由（`pr-merge` 报错 + `pr-view` 的 `mergeNote`）。
+- **别人家的 PR 只通知、不在监听里直接合**：监听看不到关联工单，通知合并助手核对；可合就由合并助手直接执行通知里的 `foreman pr merge <N> --repo R`，不要交 `<RESULT>`，服务也不再根据 RESULT 二次合并。合不了会直接回理由（`pr-merge` 报错 + `pr-view` 的 `mergeNote`）。
 - 去重记在 `state.json` 的 `prWatch` 键（`<repo>#<number>`），发成功才盖 `notifiedAt`；失败下一轮重试，重启不重发。`existing` 模式下账本里还没有调用方时不发也不记账；`new` 模式每次新建会话，不受影响。
 - 起服务 1s 后先扫一遍，之后按间隔跑。
 

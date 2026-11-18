@@ -68,14 +68,15 @@ test("prWatchTarget：写死目标优先，earliest/auto 回落最早调用方",
   assert.equal(prWatchTarget({}, book), "conv-first")
 })
 
-test("prNotifyText：列出待合并 PR，明确核对后由 foreman 自动合并", () => {
+test("prNotifyText：列出待合并 PR，明确核对后直接执行合并", () => {
   const text = prNotifyText([{ repo: "demo/demo", number: 2, title: "改了点东西", author: "zhangsan", url: "http://x/pulls/2" }])
-  assert.match(text, /核对后可合的会自动合并/)
+  assert.match(text, /核对后可合的请直接合并/)
   assert.match(text, /demo\/demo#2 改了点东西/)
   assert.match(text, /作者：zhangsan/)
-  assert.match(text, /人工兜底：foreman pr merge 2 --repo demo\/demo/)
-  assert.match(text, /按合并提示词输出 RESULT/)
-  assert.match(text, /不要在合并会话里直接执行/)
+  assert.match(text, /合并：foreman pr merge 2 --repo demo\/demo/)
+  assert.match(text, /可合就直接执行上面的合并命令/)
+  assert.match(text, /不要输出 RESULT/)
+  assert.doesNotMatch(text, /人工兜底/)
 })
 
 test("prWatchOnce：别人的 PR 报一次、自己的不报、重复扫描不重发", async () => {

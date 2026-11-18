@@ -265,22 +265,10 @@ function tryJson(s) {
   }
 }
 
-// 合并助手旧提示词没有写清多条 PR 的格式，可能直接交顶层数组。
-// 新提示词统一用 { items: [...] }；这里兼容旧结果，避免已完成的判断卡死、永远不触发自动合并。
+// 工作会话的结果必须是一个 JSON 对象；旧的合并助手数组结论不再转换或消费。
 function normalizeParsed(parsed, raw, block) {
-  if (!Array.isArray(parsed)) return normalize(parsed, raw, block)
-  const rows = parsed.filter((it) => it && typeof it === "object" && !Array.isArray(it))
-  if (!rows.length) return { status: "none", raw, text: raw.trim() }
-  const items = rows.map(normalizeItem).filter((it) => it.repo || it.pr)
-  const status = rows.every((it) => String(it.status ?? "").trim() === "done")
-    ? "done"
-    : String(rows.find((it) => String(it.status ?? "").trim() !== "done")?.status ?? "failed")
-  const mergeable = items.some((it) => it.mergeable === true) ? true
-    : items.some((it) => it.mergeable === false) ? false : null
-  const summary = rows.map((it) => String(it.summary ?? "").trim()).filter(Boolean).join("；")
-  const tests = rows.map((it) => String(it.tests ?? "").trim()).filter(Boolean).join("；")
-  const question = rows.map((it) => String(it.question ?? "").trim()).find(Boolean) ?? ""
-  return normalize({ status, mergeable, items: rows, summary, tests, question }, raw, block)
+  if (Array.isArray(parsed)) return { status: "none", raw, text: raw.trim() }
+  return normalize(parsed, raw, block)
 }
 
 function normalize(o, raw, block) {
@@ -310,31 +298,8 @@ function normalize(o, raw, block) {
     summary: String(o.summary ?? o.note ?? ""),
     question: String(o.question ?? ""),
     prs,
-    // 合并助手的结论字段：派单会话不填，但解析时一并带出来，
-    // 「读 RESULT 决定合不合」的地方就不用再自己抠原文。
-    mergeable: truthOf(o.mergeable),
-    conflict: String(o.conflict ?? "").trim(),
-    repo: String(o.repo ?? "").trim(),
-    base: String(o.base ?? "").trim(),
-    merged: truthOf(o.merged) === true,
-    items: Array.isArray(o.items) ? o.items.map(normalizeItem).filter((it) => it.repo || it.pr) : [],
     raw,
     block,
-  }
-}
-
-// 逐条结论（合并助手一次交多条 PR）：只留判断要用的几个字段。
-function normalizeItem(it) {
-  const o = it ?? {}
-  const pr = Number(o.pr) > 0 ? Number(o.pr) : null
-  return {
-    status: String(o.status ?? "").trim(),
-    repo: String(o.repo ?? "").trim(),
-    pr,
-    prUrl: String(o.prUrl ?? ""),
-    mergeable: truthOf(o.mergeable),
-    conflict: String(o.conflict ?? "").trim(),
-    reason: String(o.reason ?? o.summary ?? "").trim(),
   }
 }
 
@@ -348,14 +313,4 @@ function normalizePr(it) {
     pr,
     prUrl: String(o.prUrl ?? "").trim(),
   }
-}
-
-// truthOf：布尔/字符串都认（"true"/"1"/"yes"），没填返回 null——「没表态」不等于「可以合」。
-function truthOf(v) {
-  if (v === undefined || v === null || v === "") return null
-  if (v === true || v === false) return v
-  const t = String(v).trim().toLowerCase()
-  if (["true", "1", "yes", "y", "可以", "可合", "mergeable"].includes(t)) return true
-  if (["false", "0", "no", "n", "不可以", "不可合"].includes(t)) return false
-  return null
 }

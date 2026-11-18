@@ -68,9 +68,6 @@ export const DEFAULTS = {
     concurrency: 1,
     intervalSeconds: 60,
     cron: "",
-    // 合并助手交回 RESULT 后由 workflow 合并：mergeable=true 就自动走 runMergeTask。
-    // 置 false 只判断、不合（结论仍记进 mergeJudge，交给人处理）。
-    verdictAutoMerge: true,
   },
   // 收口通知的配置位：保留语义，但 **notify 节点当前只落痕、不投递**（暂时不需要向谁通知）。
   // 恢复投递后：每条工单处理完用 dws send 回给「调用方会话」；session 写 "auto" 取
@@ -84,7 +81,7 @@ export const DEFAULTS = {
     events: ["done", "pr-open", "needs-human", "blocked", "escalated", "failed"],
   },
   // PR 监听：每 intervalSeconds 扫一遍各仓库 open PR，过滤自己的 PR 与冲突 PR。
-  // deliver.mode=new 时每轮新建合并会话并附 PR 链接，由它核对并交 RESULT，可合的由 foreman 自动合并；existing 才通知已有会话。
+  // deliver.mode=new 时每轮新建合并会话并附 PR 链接，由它核对后直接执行 foreman pr merge；existing 才通知已有会话。
   prWatch: {
     enabled: true,
     intervalSeconds: 300,

@@ -1,5 +1,5 @@
-// PR 监听：定时扫配置里各仓库的 open PR，作者不是自己（pickup.me / prWatch.ignoreAuthors）的单**通知合并助手核对**
-// （监听只看得到 PR，看不到关联工单；助手交回可合结论后由 foreman 自动合并）。去重记在账本 prWatch 键下。
+// PR 监听：定时扫配置里各仓库的 open PR，作者不是自己（pickup.me / prWatch.ignoreAuthors）的单**通知合并助手核对并直接合并**。
+// 监听只看得到 PR，看不到关联工单，自身不在监听里合并。去重记在账本 prWatch 键下。
 import { nowIso } from "./util.mjs"
 import { Book } from "./book.mjs"
 
@@ -69,18 +69,18 @@ export async function mergeFailureReason({ gitea, repo, pr, error } = {}) {
   return reason.slice(0, 300)
 }
 
-// 通知正文：列清楚每条待合并 PR；合并助手交回结论后，可合的由 foreman 自动合并。
+// 通知正文：列清楚每条待合并 PR 与合并命令；合并助手核对后直接执行，不交 RESULT。
 export function prNotifyText(prs = []) {
-  const lines = [`【foreman】别人家的 PR ${prs.length} 条，核对后可合的会自动合并`]
+  const lines = [`【foreman】别人家的 PR ${prs.length} 条，核对后可合的请直接合并`]
   for (const pr of prs) {
     lines.push("")
     lines.push(`· ${pr.repo}#${pr.number} ${pr.title ?? ""}`.trim())
     lines.push(`  作者：${pr.author || "未知"}`)
     if (pr.url) lines.push(`  链接：${pr.url}`)
-    lines.push(`  人工兜底：foreman pr merge ${pr.number} --repo ${pr.repo}`)
+    lines.push(`  合并：foreman pr merge ${pr.number} --repo ${pr.repo}`)
   }
   lines.push("")
-  lines.push("先核对 PR 关联的工单与改动，再按合并提示词输出 RESULT；可合的由 foreman 自动合并，不要在合并会话里直接执行上面的人工兜底命令。")
+  lines.push("先核对 PR 关联的工单与改动；可合就直接执行上面的合并命令，不可合或需要拍板就普通文字说明原因，不要输出 RESULT。")
   return lines.join("\n")
 }
 

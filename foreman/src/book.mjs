@@ -95,27 +95,6 @@ export class Book {
     return this.mergeAsk[key]
   }
 
-  // 合并助手的判断账：{ "<合并会话名>": { status, reason, tasks, attempts, at } }
-  // status：merging / merged / merge-failed / held / no-result / gone。
-  // 一次判断只消费一次：判过就不再读这条会话（单实例下读 info 要切用户窗口）。
-  get mergeJudge() {
-    return this.data.mergeJudge ?? (this.data.mergeJudge = {})
-  }
-
-  markMergeJudge(name, patch = {}) {
-    this.reload()
-    const k = String(name ?? "")
-    const prev = this.mergeJudge[k] ?? {}
-    this.mergeJudge[k] = {
-      ...prev,
-      ...patch,
-      at: nowIso(),
-      attempts: Number(patch.attempts ?? prev.attempts ?? 0) || 0,
-    }
-    this.save()
-    return this.mergeJudge[k]
-  }
-
   // 唯一编排会话：{ convId, name, at }。全程只有这一条，工作会话都绑在它身上。
   // 不是数组、不按产品分——需要第二条的时候是设计错了，不是配置少了。
   get orchestrator() {

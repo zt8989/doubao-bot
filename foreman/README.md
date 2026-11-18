@@ -84,32 +84,30 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 | 流程 | 干什么 | 并发 | 谁在推进 |
 | --- | --- | --- | --- |
 | **自有工单（own）** | 接单 → 建工作区 → 派活 → 开发 → 出 PR → 合并 → 关单 → 清理 → 归档 → 通知 | **同时最多 2 条在跑**（按 workflow 实例数算） | `pickup.auto` 定时器 + `foreman run` |
-| **他人 PR（review）** | 扫到 → 核对/判可合 → 解冲突 → **合并助手交 RESULT** → 合并 → 关单 → 清理 → 归档 → 通知 | 不占接单名额 | 「他人 PR 扫描」定时器 + 合并助手 + `runMergeTask` |
+| **他人 PR（review）** | 扫到 → 核对/判可合 → 解冲突 → **合并助手直接执行 `foreman pr merge`** → 关单 → 清理 → 归档 → 通知 | 不占接单名额 | 「他人 PR 扫描」定时器 + 合并助手 + `runMergeTask` |
 
 - **合并通道已取消**：没有独立 lane、没有合并定时任务、没有独立并发槽（`src/lanes.mjs` 已删除）。
   `foreman pr merge` 当场执行合并，进程内一条串行链兜住并发，账本照样写。
-- **合并助手只判断、不合并**：`foreman-合并-*` 会话收到「PR 待合并」后核对归属/基线、帮解冲突，
-  然后交一个 RESULT（`mergeable` / `conflict` / `pr`）。服务的 `mergeVerdictOnce`（每轮 poll 末尾）消费这份结论：
-  `mergeable=true` 就走 `runMergeTask`（与 CLI 共用 `ctx.mergeChain`）合并并收尾；
-  `need_decision` / `blocked` 只记账 `mergeJudge` + 写控制台 `pr_judge` 事件，交给人。
-  `merge.verdictAutoMerge: false` 就只判断、不合。
+- **合并助手核对后直接合并**：`foreman-合并-*` 会话收到「PR 待合并」后核对归属/基线、帮解冲突，
+  可合就逐条执行通知里的 `foreman pr merge`，由 `runMergeTask` 当场合并并收尾，**不交 RESULT**。
+  不可合或需要人工拍板时直接用普通文字说明原因；服务不再读取合并会话结论，也不再根据 RESULT 二次合并。
 - **`pickup.maxRunning`（默认 2）** 只限制定时巡检的「自有工单流程在跑数」：`engine.active("own").length` 到顶就 `skipped: "slots-full"`；
   账本 `planned`/`working` 的单数只作兜底，服务重启时 `engine.restore(book)` 会把在跑的实例补回来。
   每轮补单数 = `min(maxRunning - 在跑数, maxPerRound)`，所以 `maxPerRound` 默认也跟着变成 2（空着两个槽就一轮补两条）。
   **agent 主动调 `foreman dispatch` 不读这个上限**，即使定时巡检已经 `slots-full` 也仍可派单。
 - 派单侧仍靠 `run.lock`（含 CLI `foreman run`）；合并不在定时器里跑，所以「正在合 PR」不会挡「正在派单」。
 - 会话层也分开：**派单会话**（`foreman-派单-<时间戳>`，读派单提示词，只做续跑/接单）与**合并会话**
-  （`foreman-合并-<时间戳>`，读合并提示词，判断可合性 + 解冲突，不自己合）。账本 `sessions.kind` 记 `deliver:dispatch` / `deliver:merge`，
-  `sessions.notice` 记触发类型（只有「PR待合并」会被合并判断链路消费）。
+  （`foreman-合并-<时间戳>`，读合并提示词，判断可合性 + 解冲突 + 直接执行 `foreman pr merge`）。账本 `sessions.kind` 记 `deliver:dispatch` / `deliver:merge`，
+  `sessions.notice` 记触发类型。
 - 派单判定完一条会话，**不再当场合并、也不再入队**：会话自己 push + 开 PR，工单置 `pr-open`，
   然后立刻返回（notify 节点只落痕，不发消息；见下面「通知口径」）。
-- 合并结果不另开会话、也不回执：CLI `foreman pr merge` 与合并判断（`mergeable=true`）触发的合并都只落账本 + 控制台
+- 合并结果不另开会话、也不回执：`foreman pr merge` 触发的合并只落账本 + 控制台
   （`mergeAsk` / `mergeTask` / `pr_merge`），关单 / 清工作区 / 归档做完即收工。
 - **合并要指明「工程 + worktree」**：日志、控制台 `pr_merge`、CLI 回包都写成 `工程 <仓库> · worktree <路径>`；
   worktree 取账本里这条单的实现工作区（一工程一工作区时按 PR 所在仓库对号），别人的 PR / 没有工作区时写
   「无 worktree」并留一行说明；本地清理的每条 notes 也带路径（`worktree 已删除：<路径>`）。
 - `foreman status` 里能看：`pickup.maxRunning / inflight`、`lanes.dispatch.workflowActive`、`merge.queued`、
-  `merge.judge`（合并助手判断账：pending / merged / held / failed）、`workflow.{workflows,stages,nodes,active,runs,recent}`。
+  `workflow.{workflows,stages,nodes,active,runs,recent}`。
 
 ## 常驻服务与会话监听
 
@@ -280,7 +278,7 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
   - `earliest`（默认）= 账本 `sessions` 里**最早登记**、有 `convId` 的那个会话，即第一个调用方；
   - 也可以直接写死会话 id 或侧边栏标题。
 - 有冲突的 PR 默认过滤（`prWatch.filterConflicts`，查 `pr-view` 的 `mergeNote`），不合也不报。
-- 作者不是自己的 PR **只通知、监听里不合**（看不到关联工单）；通知先交给合并助手核对归属/基线、解冲突，它交回的 RESULT 里 `mergeable=true` 才由 workflow（`runMergeTask`）合并，判不下来就记 `mergeJudge` 交给人。
+- 作者不是自己的 PR **只通知、监听里不合**（看不到关联工单）；通知先交给合并助手核对归属/基线、解冲突，可合就由合并助手直接执行通知里的 `foreman pr merge`，不可合或需要拍板就用普通文字说明原因，不交 RESULT。
 - 去重记在 `state.json` 的 `prWatch` 键（`<repo>#<number>`），**发成功才盖 `notifiedAt`**；发送失败下一轮重试，重启不重发。
 - 账本里还没有调用方会话时：`existing` 模式这轮不发、也不记账；`new` 模式不受影响（每次都新建会话）。
 - 起服务 1s 后先扫一遍，之后按间隔跑。
