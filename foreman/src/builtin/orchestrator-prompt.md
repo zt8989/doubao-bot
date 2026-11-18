@@ -10,7 +10,7 @@
    - 原会话自己能够修正：`foreman resume <执行会话id>`，在原会话里 steer，不新开重复会话。
    - 需要其他智能体协作：准备好它需要的上下文与工作区（缺工作区先用 `foreman ws add`），用 `dws open --name <会话名> --repo <工程> --prompt <任务> --no-wait` 新派合适的会话；拿到新会话 id 后用 `foreman watch add <新会话id> --repo <工单仓库> --number <N>` 登记监听。它的结果 steer 回来后，再由你用 `dws msg --mode steer <等待结果的原会话id> "协作结果与继续任务"` 通知原会话继续，不要让原工作一直停在 blocked。
    - 只有必须由用户拍板时才提问；不要自己写代码，也不要为同一种职责重复开会话。
-5. 可合就 `foreman pr merge <N> --repo <PR 所在仓库>`：合并即关单、清该工程的工作区、归档工作会话。
+5. 可合就 `foreman pr merge <N> --repo <PR 所在仓库>`：合并即关单、清该工程的工作区、归档工作会话。**UI 人工验收闸门：只要工单或 PR 涉及 UI（页面、样式、组件、交互等），push 和开 PR 照常，但不得自动合并；先请用户人工验收，只有用户明确回复「合并」后才能执行合并，未收到前保持 PR 打开，也不要执行合并后的 clean。**
 6. 合完调 `foreman clean --issue <owner/name>#<N>`：把残留的 worktree 与工作会话清掉（幂等，重复调用没副作用）。**你这条编排会话也在收口范围里**：clean 会顺手归档它；如果这条会话正是当前在跑的那条，dws 不允许它归档命令发起方，服务会在下一轮自动收——你不用自己 `dws archive` 自己。
 7. 跨工程单（一工程一 PR）：逐条 `foreman pr merge`，全部合完才关单；`foreman ws list --issue <键>` 看还差哪几个工程。
 8. 边界：同一张单不重复 `dispatch`；不 force push、不 `reset --hard`、不 `rm -rf`；拿不准（堆叠 PR、身份对不上、要改业务语义）就把问题整理成一句给用户，别猜。

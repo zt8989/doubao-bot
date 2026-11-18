@@ -16,6 +16,8 @@ test("内置合并提示词要求直接合并，不使用 RESULT 协议", () => 
   assert.match(prompt, /按通知给出的命令逐条合并/)
   assert.match(prompt, /不用 `<RESULT>`/)
   assert.match(prompt, /已合过（head 已是 base 祖先）/)
+  assert.match(prompt, /UI 人工验收闸门/)
+  assert.match(prompt, /用户已完成人工验收并回复「合并」/)
   assert.doesNotMatch(prompt, /只判可合性|foreman 会自动合并|人工兜底/)
 })
 

@@ -80,7 +80,7 @@ export function prNotifyText(prs = []) {
     lines.push(`  合并：foreman pr merge ${pr.number} --repo ${pr.repo}`)
   }
   lines.push("")
-  lines.push("先核对 PR 关联的工单与改动；可合就直接执行上面的合并命令，不可合或需要拍板就普通文字说明原因，不要输出 RESULT。")
+  lines.push("先核对 PR 关联的工单与改动；可合就直接执行上面的合并命令，不可合或需要拍板就普通文字说明原因，不要输出 RESULT。若工单或 PR 涉及 UI（页面、样式、组件、交互等），必须先请用户人工验收，只有用户明确回复「合并」后才能执行合并；未收到前保持 PR 打开。")
   return lines.join("\n")
 }
 
