@@ -1098,7 +1098,13 @@ export async function pollOnce(ctx) {
       if (decision.phase === "finished" || decision.phase === "settled") out.settled++
       if (!decision.shouldNotify) {
         // status 说还在跑（侧边栏那一下是慢半拍）就别落 idle，下一轮再看。
-        if (decision.phase !== "running") park()
+        if (decision.phase !== "running") {
+          // resume 先清 idle，侧边栏和 status 却可能还没进入新一轮；此时读到的旧指纹
+          // 不能再次落 idle，否则真正的新 RESULT 会被上面的 idle 分支永久跳过。
+          const waitingForResumedResult = decision.phase === "finished"
+            && Boolean(prev.wokeAt) && prev.fingerprint === decision.fingerprint
+          if (!waitingForResumedResult) park()
+        }
         continue
       }
 

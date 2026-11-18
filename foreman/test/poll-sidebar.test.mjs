@@ -105,6 +105,39 @@ test("收工那一轮处理完就落 idle，下一轮不再读 status", async ()
   }
 })
 
+test("续跑后先读到旧完成指纹：不重新 idle，新结果仍会被消费", async () => {
+  const oldStatus = { streaming: false, finished: true, chars: 500, head: "H1", tail: "T1", status: "ok" }
+  const newStatus = { streaming: false, finished: true, chars: 900, head: "H2", tail: "T2", status: "ok" }
+  let currentStatus = oldStatus
+  const { ctx, calls, dir } = mkCtx({
+    runningMap: async () => ({ "conv-a": { running: false, title: "w" } }),
+    status: async () => currentStatus,
+    notify: async () => ({ ok: true }),
+  })
+  try {
+    await pollOnce(ctx)
+    const first = new Book(ctx.cfg.stateFile).notified["conv-a"]
+    assert.equal(first.idle, true)
+    assert.equal(calls.info, 1)
+
+    // resumeWorker 先 clearIdle，再 steer；侧边栏来不及报 running 时，status 仍可能还是上一轮。
+    new Book(ctx.cfg.stateFile).clearIdle("conv-a")
+    await pollOnce(ctx)
+    const waiting = new Book(ctx.cfg.stateFile).notified["conv-a"]
+    assert.equal(waiting.idle, false, "唤醒后的旧指纹只是残留状态，不能把监听重新休眠")
+    assert.equal(calls.info, 1, "旧指纹不重复消费")
+
+    currentStatus = newStatus
+    await pollOnce(ctx)
+    const finished = new Book(ctx.cfg.stateFile).notified["conv-a"]
+    assert.equal(calls.info, 2, "续跑后的新指纹必须继续回收")
+    assert.notEqual(finished.fingerprint, first.fingerprint)
+    assert.equal(finished.idle, true)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("侧边栏又报 running：清掉 idle，收工后再判一轮并再通知", async () => {
   let running = true
   const { ctx, calls, dir } = mkCtx({
