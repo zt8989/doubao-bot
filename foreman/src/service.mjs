@@ -843,8 +843,10 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
 
   // 轮询。
   const doPoll = async () => pollOnce(ctx)
+  // 会话轮询**不受工作时间窗限制**：执行会话经常在夜里或清早跑完，
+  // 结论压到 08:30 才投递，对编排会话来说等于没回。
+  // 这条轮询平时只读侧边栏（不切窗口），只有真有新结论时才 goto 一次读 status 并 steer。
   state.interval = setInterval(() => {
-    if (!inWorkHours(cfg)) return // 只在工作时间跑，下班/周末不打扰
     doPoll().catch((e) => log(`poll 异常：${e.message}`))
   }, cfg.pollSeconds * 1000)
   state.interval.unref?.()
@@ -1158,6 +1160,12 @@ export async function pollOnce(ctx) {
           // 不能再次落 idle，否则真正的新 RESULT 会被上面的 idle 分支永久跳过。
           const waitingForResumedResult = decision.phase === "finished"
             && Boolean(prev.wokeAt) && prev.fingerprint === decision.fingerprint
+          // 同一指纹重试到上限还没送达：明确记一条日志再休眠，免得以后查不到「为什么没回」。
+          const attempts = Number(prev.attempts ?? 0)
+          const gaveUp = decision.phase === "finished"
+            && prev.fingerprint === decision.fingerprint
+            && attempts >= notifyMaxAttempts(cfg)
+          if (gaveUp) log(`放弃通知 ${w.target}：同一结论已尝试 ${attempts} 次仍未送达（${prev.lastError || "无错误信息"}）`)
           if (!waitingForResumedResult) park()
         }
         continue
@@ -1288,9 +1296,18 @@ export async function pollOnce(ctx) {
           else await engine.emit("notice.delivered", payload)
           log(`已 steer 进编排会话 ${orchId}：${w.target}（${nd.event || "session-done"}）`)
         } catch (e) {
-          // 不记指纹，下一轮同一条更新会重试；次数上限由 judgePoll 的 markAttempted 兜住。
+          // 投递失败 ≠ 已处理：只记一次尝试（同一指纹最多 notifyMaxAttempts 次），不落 idle，
+          // 下一轮同一条更新继续重试。以前这里不记账、末尾还统一 park，
+          // 一次 steer 失败就把这条结论永久吞掉了。
           state.dwsErrors = (state.dwsErrors ?? 0) + 1
-          log(`steer 编排会话失败（${w.target}）：${e.message}；下一轮重试`)
+          new Book(cfg.stateFile).markAttempted(w.target, decision.fingerprint, {
+            phase: decision.phase,
+            chars: status?.chars ?? 0,
+            error: String(e?.message ?? e).slice(0, 200),
+          })
+          rec.notifiedAt = nowIso()
+          log(`steer 编排会话失败（${w.target}）：${e.message}；已记一次尝试，下一轮重试`)
+          continue
         }
       } else {
         // 没有编排会话（还没 foreman orch start）或适配器不支持 steer：只落一次痕，不新建会话。

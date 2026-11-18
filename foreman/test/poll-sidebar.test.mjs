@@ -293,3 +293,53 @@ test("无 RESULT：不判失败，给编排会话贴执行会话的最后对话"
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("steer 编排会话失败：记一次尝试但不落 idle，下一轮继续重试", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-poll-steer-retry-"))
+  try {
+    const cfg = {
+      stateFile: path.join(dir, "state.json"),
+      notify: { enabled: true, session: "auto", maxAttempts: 2, events: ["done", "failed"] },
+      deliver: { mode: "existing" },
+      sessionFlow: { enabled: true },
+    }
+    const book = new Book(cfg.stateFile)
+    book.setWatch({ target: "conv-worker", name: "w", issueKey: "demo/demo#1", repo: "demo/demo", number: 1 })
+    book.setIssue("demo/demo#1", { state: "working", title: "测试单", orchestrator: "conv-orch" })
+    let fail = true
+    const steered = []
+    const ctx = {
+      cfg,
+      state: { polling: false, watchers: new Map(), dwsErrors: 0, notifiedCount: 0 },
+      log: () => {},
+      gitea: {},
+      engine: { lifecycle: { emit: async () => {} }, emit: async () => {} },
+      dws: {
+        runningMap: async () => ({ "conv-worker": { running: false, title: "w" } }),
+        status: async () => ({ streaming: false, finished: true, chars: 500, head: "H", tail: "T", status: "ok" }),
+        info: async () => ({ lastReply: "改完了，已 commit。" }),
+        steer: async (target, text) => {
+          if (fail) {
+            fail = false
+            throw new Error("豆包没有把这条消息发出去（模式 steer，按键 enter）")
+          }
+          steered.push({ target, text })
+        },
+      },
+    }
+
+    const r1 = await pollOnce(ctx)
+    assert.equal(r1.steered ?? 0, 0, "第一次发言失败，不算已投递")
+    const afterFail = new Book(cfg.stateFile).notified["conv-worker"]
+    assert.equal(afterFail.idle, undefined, "投递失败不能落 idle，否则这条结论被永久吞掉")
+    assert.equal(afterFail.attempts, 1, "失败也要记一次尝试，供 judgePoll 封顶")
+
+    const r2 = await pollOnce(ctx)
+    assert.equal(r2.steered, 1, "下一轮必须重试同一条结论")
+    assert.equal(steered.length, 1)
+    assert.equal(steered[0].target, "conv-orch")
+    assert.equal(new Book(cfg.stateFile).notified["conv-worker"].idle, true, "送达后才落 idle")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
