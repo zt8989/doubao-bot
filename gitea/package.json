@@ -1,0 +1,15 @@
+{
+  "name": "gitea-rest",
+  "version": "0.1.0",
+  "description": "内网 Gitea 的 REST API 客户端与 CLI（替代 opencli 浏览器自动化）",
+  "type": "module",
+  "bin": {
+    "gitea": "bin/gitea.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

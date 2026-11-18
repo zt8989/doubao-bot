@@ -19,7 +19,7 @@ service.mjs                  常驻服务、定时器、RPC；只在关键节点
       ├─ workflow/nodes.mjs       节点暂停/继续 + 累计执行次数（落 state.json）
       └─ workflow/adapters/       每个外部工具一个适配器
           ├─ doubao.mjs           会话（豆包 / dws）
-          ├─ gitea.mjs            工单与 PR（Gitea / opencli）
+          ├─ gitea.mjs            工单与 PR（Gitea REST 包）
           ├─ herdr.mjs            工作区（herdr + git worktree）
           └─ session.mjs          SessionAdapter 契约（ assertSessionAdapter ）
 ```

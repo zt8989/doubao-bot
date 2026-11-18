@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// foreman：接单编排（opencli + dws + herdr）+ 常驻服务（会话监听与异步通知）。
+// foreman：接单编排（gitea REST + dws + herdr）+ 常驻服务（会话监听与异步通知）。
 import fs from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -74,7 +74,7 @@ const HELP = `foreman — 接单编排 + 常驻服务
   ws list     看这条工单已经开了哪几个工程的工作区
   workflow view                            看两条流程（自有工单 / 他人 PR）的节点与累计次数
   workflow pause|resume <节点>             暂停/继续某个节点（只停这个节点，不停止整条流程）
-  issue comment|close   评论/关单（可选：用它才会记账，直接 opencli gitea 也行）
+  issue comment|close   评论/关单（可选：用它才会记账，直接 gitea 也行）
   --no-service  跳过自动握手与拉起（逃生口）
 
 run 以编排会话为中心：捞到单先交给编排会话（dws steer），由它调 foreman dispatch 分配工作；
@@ -547,8 +547,9 @@ async function cmdDoctor(pos, flags) {
 
   const dws = await binCheck(cfg.dws?.bin ?? "dws")
   checks.push({ name: "dws", ...dws })
-  const opencli = await binCheck("opencli", ["--version"])
-  checks.push({ name: "opencli", ...opencli })
+  const { giteaHealth } = await import("../src/gitea.mjs")
+  const giteaCheck = await giteaHealth()
+  checks.push({ name: "gitea", ...giteaCheck })
   const herdr = await binCheck(cfg.herdr?.bin ?? "herdr", ["--version"])
   checks.push({ name: "herdr", ...herdr })
 

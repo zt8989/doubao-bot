@@ -4,7 +4,7 @@
 //   GET  /api/snapshot?day=YYYY-MM-DD  当天（或指定某天）任务 + PR + 统计；看今天时先跟账本对齐
 //   GET  /api/polls        最近几轮扫描记录
 //   GET  /api/history?days=7&day=YYYY-MM-DD&repo=R&key=<owner>/<repo>#<N>  历史事件（按天分组）
-//   POST /api/sync         立刻扫一轮 PR（opencli）+ 落库，返回最新快照
+//   POST /api/sync         立刻扫一轮 PR（Gitea REST）+ 落库，返回最新快照
 import fs from "node:fs"
 import http from "node:http"
 import path from "node:path"

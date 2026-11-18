@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# 【已停用】旧 opencli 浏览器适配器挂载脚本。Gitea 读写已改走 REST（gitea 包 / CLI），
+# 保留此文件仅供回滚参考，publish.sh 不再调用它。
+#
 # 把 **已发布** 的 gitea 适配器挂到 opencli 能认的位置（可重复执行）。
 #
 # 为什么要文件级软链：opencli 的发现逻辑是 readdir(clis, {withFileTypes}) 后

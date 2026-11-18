@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # 把 doubao-bot 里所有可上线的东西发布到 dist/，再把链接指到 dist（不再指源码）。
 #
-#   bin（npm link 装到全局）：foreman、dws
+#   bin（npm link 装到全局）：gitea、foreman、dws
 #   skill（软链到 ~/Doubao/skills）：skills/ 下的每个技能目录
-#   adapter（文件级软链到 ~/.opencli/clis/gitea）：adapters/gitea
 #
 # 口径：改源码 → commit → 本脚本 → 线上才变。工作区脏的单元默认不发布（防止半成品上线）。
-# 用法：scripts/publish.sh [--allow-dirty] [foreman|dws|skills|adapters ...]（不给单元就是全部）
+# 用法：scripts/publish.sh [--allow-dirty] [gitea|foreman|dws|skills ...]（不给单元就是全部）
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,12 +17,12 @@ UNITS=()
 for arg in "$@"; do
   case "$arg" in
     --allow-dirty) ALLOW_DIRTY=1 ;;
-    foreman|dws|skills|adapters) UNITS+=("$arg") ;;
+    gitea|foreman|dws|skills) UNITS+=("$arg") ;;
     -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
-    *) echo "不认识的单元：$arg（只有 foreman / dws / skills / adapters）" >&2; exit 1 ;;
+    *) echo "不认识的单元：$arg（只有 gitea / foreman / dws / skills）" >&2; exit 1 ;;
   esac
 done
-[ "${#UNITS[@]}" -gt 0 ] || UNITS=(foreman dws skills adapters)
+[ "${#UNITS[@]}" -gt 0 ] || UNITS=(gitea foreman dws skills)
 
 COMMIT="$(git -C "$REPO" rev-parse --short HEAD)"
 MANIFEST="$DIST/MANIFEST.json"
@@ -112,26 +111,19 @@ publish_skills() {
   done
 }
 
-# 发布 opencli 的 gitea 适配器，再按文件级软链挂到 ~/.opencli/clis/gitea（链接逻辑在 link-adapter.sh）。
-publish_adapters() {
-  skip_if_dirty "adapters" "adapters" || return 1
-  local dst="$DIST/adapters/gitea"
-  rm -rf "$DIST/adapters"
-  mkdir -p "$dst"
-  cp -R "$REPO/adapters/gitea/." "$dst/"
-  printf '{\n  "commit": "%s",\n  "at": "%s",\n  "source": "%s"\n}\n' \
-    "$COMMIT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$REPO/adapters/gitea" > "$dst/PUBLISHED.json"
-  echo "已发布 adapter：gitea → ${dst}"
-  "$REPO/scripts/link-adapter.sh"
-}
-
 PUBLISHED=()
 for unit in "${UNITS[@]}"; do
   case "$unit" in
-    foreman) publish_bin foreman && PUBLISHED+=("foreman") ;;
+    gitea) publish_bin gitea && PUBLISHED+=("gitea") ;;
+    foreman)
+      # foreman/src/gitea.mjs 直接 import ../../gitea/src/api.mjs，发布 foreman 必须带 gitea。
+      if [[ " ${PUBLISHED[*]:-} " != *" gitea "* ]]; then
+        publish_bin gitea && PUBLISHED+=("gitea")
+      fi
+      publish_bin foreman && PUBLISHED+=("foreman")
+      ;;
     dws) publish_bin dws config.example.json && PUBLISHED+=("dws") ;;
     skills) publish_skills && PUBLISHED+=("skills") ;;
-    adapters) publish_adapters && PUBLISHED+=("adapters") ;;
   esac
 done
 

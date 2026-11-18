@@ -1,6 +1,7 @@
-// Gitea：一律走 opencli 的 gitea 子命令（复用 Chrome 已登录会话，不需要 token）。
-// 注意：每条命令 20–40 秒（要开浏览器），调用方要么后台跑要么给足超时。
-import { exec, extractJson } from "./util.mjs"
+// Gitea 适配层：一律走 REST API（令牌放在 ~/.foreman/gitea-token）。
+// 以前这里是 opencli 浏览器自动化（每条 20–40s）；现在单次调用几十毫秒，无需 Chrome 登录态。
+import * as api from "../../gitea/src/api.mjs"
+import { GiteaApiError, loadGiteaSettings, ping } from "../../gitea/src/client.mjs"
 
 export class GiteaError extends Error {
   constructor(message, extra = {}) {
@@ -9,125 +10,63 @@ export class GiteaError extends Error {
   }
 }
 
-export async function gitea(args, { timeout = 180000 } = {}) {
-  let raw
+function wrap(fn) {
+  return async (...args) => {
+    try {
+      return await fn(...args)
+    } catch (e) {
+      if (e instanceof GiteaApiError) throw new GiteaError(e.message, { code: e.code, status: e.status, body: e.body })
+      throw e
+    }
+  }
+}
+
+export const settings = () => loadGiteaSettings()
+
+export const giteaHealth = async () => {
+  const s = loadGiteaSettings()
+  if (!s.token) {
+    return { ok: false, detail: `缺少令牌：写入 ${s.tokenFile || "~/.foreman/gitea-token"}（Gitea 设置 → 应用）` }
+  }
   try {
-    const r = await exec("opencli", ["gitea", ...args, "-f", "json"], { timeout })
-    raw = r.stdout
+    const v = await ping({ settings: s })
+    return { ok: true, detail: `REST 可用（${s.baseUrl}，Gitea ${v?.version ?? "?"}，令牌 ${s.tokenSource}）` }
   } catch (e) {
-    raw = `${e.stdout ?? ""}\n${e.stderr ?? ""}`.trim()
-    throw new GiteaError(`opencli gitea ${args[0]} 失败：${raw.slice(-2000) || e.message}`, {
-      args,
-      output: raw,
-    })
-  }
-  let parsed
-  try {
-    parsed = extractJson(raw)
-  } catch (e) {
-    throw new GiteaError(`opencli gitea ${args[0]} 输出无法解析：${raw.slice(-1500)}`, { args })
-  }
-  if (parsed.ok === false) {
-    throw new GiteaError(`opencli gitea ${args[0]}：${parsed.error ?? "未知错误"}`, { args, output: parsed })
-  }
-  return parsed
-}
-
-const data = (r) => r?.data ?? r
-
-export async function listIssues(repo, { state = "open", label = "", page = 1 } = {}) {
-  const args = ["search", "", "--repo", repo, "--state", state]
-  if (label) args.push("--label", label)
-  if (page > 1) args.push("--page", String(page))
-  const d = data(await gitea(args))
-  const list = Array.isArray(d) ? d : (d?.issues ?? d?.items ?? [])
-  return list.map((x) => ({
-    number: Number(x.number ?? x.issueNumber),
-    title: x.title ?? "",
-    state: x.state ?? "",
-    labels: (x.labels ?? []).map((l) => (typeof l === "string" ? l : l.name)).filter(Boolean),
-    assignees: (x.assignees ?? []).map((a) => (typeof a === "string" ? a : a.name ?? a.username)).filter(Boolean),
-    author: x.author?.name ?? x.author?.username ?? x.creator?.name ?? x.creator ?? "",
-    url: x.url ?? "",
-    createdAt: x.createdAt ?? x.created_at ?? "",
-  }))
-}
-
-export async function viewIssue(repo, n) {
-  const d = data(await gitea(["issue-view", String(n), "--repo", repo]))
-  const obj = Array.isArray(d) ? d[0] : d
-  return {
-    number: Number(obj?.number ?? obj?.issueNumber ?? n),
-    title: obj?.title ?? "",
-    state: obj?.state ?? "",
-    body: obj?.body ?? obj?.description ?? "",
-    labels: (obj?.labels ?? []).map((l) => (typeof l === "string" ? l : l.name)).filter(Boolean),
-    assignees: (obj?.assignees ?? []).map((a) => (typeof a === "string" ? a : a.name ?? a.username)).filter(Boolean),
-    url: obj?.url ?? "",
-    comments: obj?.comments ?? [],
-    raw: obj,
+    return { ok: false, detail: String(e.message).slice(0, 200) }
   }
 }
 
-export async function commentIssue(repo, n, body) {
-  return data(await gitea(["issue-comment", String(n), body, "--repo", repo]))
-}
+export const listIssues = wrap(async (repo, { state = "open", label = "", page = 1 } = {}) =>
+  api.listIssues(repo, { state, labels: label, page }))
 
-export async function closeIssue(repo, n) {
-  return data(await gitea(["close", String(n), "--repo", repo]))
-}
+export const viewIssue = wrap(async (repo, n) => api.viewIssue(repo, n))
 
-export async function editLabels(repo, n, { add = "", remove = "" } = {}) {
-  const args = ["issue-edit", String(n), "--repo", repo]
-  if (add) args.push("--label-add", add)
-  if (remove) args.push("--label-remove", remove)
-  if (args.length === 4) return null
-  return data(await gitea(args))
-}
+export const commentIssue = wrap(async (repo, n, body) => api.commentIssue(repo, n, body))
 
-export async function viewPr(repo, pr) {
-  return data(await gitea(["pr-view", String(pr), "--repo", repo]))
-}
+export const closeIssue = wrap(async (repo, n) => api.setIssueState(repo, n, "closed"))
 
-// 列仓库的合并请求（open/closed/all），带回 author；列表页不回 base/head，要看分支用 viewPr。
-export async function listPulls(repo, { state = "open", page = 1 } = {}) {
-  const args = ["pull-list", "--repo", repo, "--state", state]
-  if (page > 1) args.push("--page", String(page))
-  const d = data(await gitea(args))
-  const list = Array.isArray(d) ? d : (d?.pulls ?? d?.items ?? [])
-  return list.map((x) => ({
-    number: Number(x.number ?? x.pullNumber),
-    repo: x.repo ?? repo,
-    title: x.title ?? "",
-    state: x.state ?? "",
-    author: x.author ?? null,
-    labels: (x.labels ?? []).map((l) => (typeof l === "string" ? l : l.name)).filter(Boolean),
-    assignees: (x.assignees ?? []).map((a) => (typeof a === "string" ? a : a.name ?? a.username)).filter(Boolean),
-    author: x.author?.name ?? x.author?.username ?? x.creator?.name ?? x.creator ?? "",
-    url: x.url ?? "",
-    createdAt: x.createdAt ?? x.created_at ?? "",
-    updatedAt: x.updatedAt ?? x.updated_at ?? "",
-  }))
-}
+export const reopenIssue = wrap(async (repo, n) => api.setIssueState(repo, n, "open"))
 
-export async function createPr({ repo, base, head, title, body = "" }) {
-  const d = data(
-    await gitea(["pr", "--repo", repo, "--base", base, "--head", head, "--title", title, "--body", body])
-  )
-  const obj = Array.isArray(d) ? d[0] : d
-  const number = Number(
-    obj?.prNumber ?? obj?.number ?? obj?.pullNumber ?? (String(obj?.url ?? "").match(/\/pulls\/(\d+)/) ?? [])[1]
-  )
-  return { number, url: obj?.url ?? "", raw: obj }
-}
+export const editLabels = wrap(async (repo, n, { add = "", remove = "" } = {}) => {
+  const toList = (v) => String(v ?? "").split(",").map((s) => s.trim()).filter(Boolean)
+  const a = toList(add)
+  const d = toList(remove)
+  if (!a.length && !d.length) return null
+  return api.editIssueLabels(repo, n, { add: a, remove: d })
+})
 
-export async function mergePr(repo, pr, { style = "merge", deleteBranch = false, timeout = 180000 } = {}) {
-  const args = ["pr-merge", String(pr), "--repo", repo, "--style", style]
-  if (deleteBranch) args.push("--delete-branch")
-  return data(await gitea(args, { timeout }))
-}
+export const viewPr = wrap(async (repo, pr) => api.viewPull(repo, pr))
+
+export const listPulls = wrap(async (repo, { state = "open", page = 1 } = {}) =>
+  api.listPulls(repo, { state, page }))
+
+export const createPr = wrap(async ({ repo, base, head, title, body = "" }) =>
+  api.createPull(repo, { base, head, title, body }))
+
+export const mergePr = wrap(async (repo, pr, { style = "merge", deleteBranch = false, timeout = 30000 } = {}) =>
+  api.mergePull(repo, pr, { style, deleteBranch, timeout }))
 
 export function repoOfUrl(url) {
-  const m = String(url ?? "").match(/^http:\/\/[^/]+\/([^/]+)\/([^/]+)\/issues\//)
+  const m = String(url ?? "").match(/^http:\/\/[^/]+\/([^/]+)\/([^/]+)\/(issues|pulls)\//)
   return m ? `${m[1]}/${m[2]}` : ""
 }

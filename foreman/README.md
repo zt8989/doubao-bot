@@ -5,12 +5,12 @@
 
 | 谁 | 管什么 | foreman 怎么用 |
 | --- | --- | --- |
-| **opencli** | Gitea 读写（复用 Chrome 登录态，无 token） | `opencli gitea search/issue-view/issue-comment/issue-edit/pr/pr-merge/close` |
+| **gitea** | Gitea 读写（REST API，令牌在 `~/.foreman/gitea-token`，秒级返回） | `gitea search/issue-view/issue-comment/issue-edit/pr/pr-merge/close` |
 | **herdr** | 创建 git worktree（同时挂到她自己的工作区视图） | `herdr worktree create --cwd <repo> --branch <分支> --base origin/<基线> --path <路径> --no-focus` |
 | **dws** | 豆包会话（开会话、发指令、读状态/对话、打断） | `dws open/send/status/info/stop` |
 
 foreman 自己不碰豆包内部实现（只走 dws 的命令行），也不手写 worktree（交给 herdr），
-Gitea 侧一律走 opencli。
+Gitea 侧一律走 REST（`gitea` 包/CLI）。
 
 **架构：通用 workflow = 生命周期 + 适配器**（`src/workflow/`）。流程只认生命周期事件
 （捞单 → 工作区 → 派活 → 监听 → 结论 → 合并 → 清理 → 归档 → 通知），豆包 / Gitea / herdr 的差异全部收在
@@ -57,7 +57,7 @@ Gitea 侧一律走 opencli。
 ## 一轮做什么
 
 ```
-opencli 读 ready-for-agent 工单
+gitea 读 ready-for-agent 工单
       ↓
 herdr 从 origin/<base> 开 worktree（分支 fix/issue-N）
       ↓
@@ -273,7 +273,7 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 
 服务里还有一条独立定时器，每 `prWatch.intervalSeconds`（默认 300s）扫一遍 `repos[]` 下各仓库的 open PR：
 
-- 列表走 `opencli gitea pull-list --repo <owner/name> --state open`（新加的只读适配器命令，带回 `author`）。
+- 列表走 `gitea pull-list --repo <owner/name> --state open`（REST 列表，带回 `author`/`base`/`head`）。
 - 作者在 `prWatch.ignoreAuthors`（自己的账号，由 `pickup.me` 补齐）里的 PR 跳过，只记一笔 `skipped: "self"`。
 - 其余 PR 合成一条消息投递出去：`deliver.mode: "new"`（默认）**新建一条合并会话**（读合并提示词 + 监控项目；
   会话名形如 `foreman-合并-<YYYYMMDD-HHmm>`）；`deliver.mode: "existing"` 才用 `dws notify` 发给 `prWatch.notifyTarget`：
@@ -355,7 +355,7 @@ foreman mail approve|reject <repo>#<N> --by <人> [--note "…"]
 foreman issue comment <N> --repo R --body "…"   # 评论工单（记账）
 foreman issue close <N> --repo R                # 关单（记账）
 foreman retry win-ai-harness 255 # 人工处理完，放回队列（attempts 清零）
-foreman doctor                   # 自检：dws/opencli/herdr/仓库基线
+foreman doctor                   # 自检：dws/gitea/herdr/仓库基线
 foreman doctor --start            # 额外读一次豆包窗口状态（会连窗口，不新建任务）
 ```
 
@@ -512,9 +512,9 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 要点：
 
 - **基线写在 `products[].repos[].base`**（没配 products 时是顶层 `repos[].base`；本工程当前 `sit-20261126`），代码不写死；分支、worktree、验收的 `origin/<base>..HEAD` 都按它算。
-- **`pickup.labelIds` 必须用数字 id，别用名字**。opencli 的列表接口不回 labels，
-  按名字配会静默捞 0 条；`label-list` 能查名→id（`ready-for-agent` 当前是 5）。
-- 配了 `labelIds` 后不再拿名字做二次过滤（列表里本来就没有 labels）。
+- **`pickup.labelIds` 必须用数字 id，别用名字**。REST 的 `labels` 参数只认名字，foreman 会把 id 翻成名字再按 id 精确过滤，
+  id 写错会直接报 `not_found`，不会再静默捞全量；`label-list` 能查名→id（`ready-for-agent` 当前是 5）。
+- 配了 `labelIds` 后，结果再按 id 精确过滤一次（REST 的 `labels` 是“任一匹配”语义）。
 - **合并通道已取消**：会话 `done` 只把 PR 记进账本，合不合由编排会话核对工单后
   `foreman pr merge <N> --repo R` **当场执行**。每张 PR 只合一次（账本 `mergeAsk` 记 `merged`/`failed`），
   冲突只记录、不 force merge；合完/合失败都不回执通知，原因看账本与控制台。
@@ -554,7 +554,7 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 ## 边界
 
 - 会话负责"在 worktree 里改 + 自测 + `git push` + `foreman pr open` 开 PR"，边界写进首句提示词。
-- **收口只有两条：建 PR（`pr open`）与合并（`pr merge`）**——账本要把 PR 挂到「单 + 会话」，合并要幂等。工单侧的读、建单、评论、改标签、关单都直接 `opencli gitea`，`herdr`、`dws` 会话也直连；这些动作只是不留痕于 `console.db`。
+- **收口只有两条：建 PR（`pr open`）与合并（`pr merge`）**——账本要把 PR 挂到「单 + 会话」，合并要幂等。工单侧的读、建单、评论、改标签、关单都直接 `gitea`，`herdr`、`dws` 会话也直连；这些动作只是不留痕于 `console.db`。
 - 合并由服务在 `merge.enabled: true` 时执行，**走独立合并通道（1 并发）**，会话不合并；`verify` / `publish` 代码保留但没接线。
 - 不做 force merge：合并失败就停下，工单留言交人。
 - 豆包是单实例：用户自己开着豆包时 dws 会报 `app_busy`，整轮终止（不逐条重试），让对方 ⌘Q 后再跑。

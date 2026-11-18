@@ -1436,7 +1436,7 @@ export async function runMergeTask(ctx, task = {}) {
       await ctx.gitea.mergePr(repo, pr, { style, deleteBranch })
     } catch (e) {
       const msg = String(e?.message ?? e ?? "")
-      // 「已经合并」不算失败：opencli 对已合的 PR 回 EMPTY_RESULT + 提示无需重复合并。
+      // 「已经合并」不算失败：REST 包对已合的 PR 回 empty_result + 提示无需重复合并。
       if (/无需重复合并|已经合并|已合并/.test(msg)) {
         alreadyMerged = true
         log(`${repo}#${pr} 已经是合并状态，按已合并收尾（${key}）`)
@@ -1611,7 +1611,7 @@ export async function completeIssue(ctx, { repo = "", number = 0 } = {}) {
 //   merge（合并事实落账）→ close（关单 + 摘接单标签 + 工单 done）
 //   → pr-open（PR 记 merged）→ dispatch（摘会话监听）→ workspace（关 herdr / 删 worktree / 删分支）
 //   → cleanup（兜底清扫）
-// opencli 对已经合并的 PR 会回 EMPTY_RESULT + 提示「无需重复合并」，字面当失败的话台账
+// REST 包对已经合并的 PR 会回 empty_result + 提示「无需重复合并」，字面当失败的话台账
 // 还会卡成 merge-failed、再没人收尾，所以这里也接受 alreadyMerged=true。
 export async function finishMergedPr({
   gitea,

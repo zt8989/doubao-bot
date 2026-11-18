@@ -34,7 +34,7 @@ export function kickoff({ repo, issue, worktree, branch, base, workspaces, faile
     `要改的工程不在上面：先别动手，交 blocked，summary 写「缺工作区：<owner/name>」——工作区由外面补开，你不用自己开，也不要在主 checkout 里改。`,
     `改完就 commit，然后结束。提交完就停：不要 push、不要开 PR、不要合并、不要关工单、不要动 worktree 或会话——push、PR、合并、收尾都由外面做。`,
     `提交信息用中文，首行写 “fix(#${issue.number}): <一句话>”，正文写清改法与验证方式。工作区里不要留未提交的改动。`,
-    `想多看工单细节可以读：opencli gitea issue-view --repo ${repo} ${issue.number}（只读，别改工单）。`,
+    `想多看工单细节可以读：gitea issue-view --repo ${repo} ${issue.number}（只读，别改工单）。`,
     `先读各仓库里的 AGENTS.md / docs/agents/ 约定（如果有），按仓库自己的规矩来。`,
     multi
       ? `改完必须自己在每个动过的工程里跑相关测试；某个工程跑不了就在 tests 里写清是哪个工程、为什么，不要假装跑过。`
@@ -87,8 +87,8 @@ export function decisionKickoff({ repo, issue, base, workspaces = [], labels = [
     (issue.body ?? "").trim() || "（正文为空，按标题理解）",
     ``,
     `这张单带着「需要人参与 / 信息不足」类标签，所以这次不是直接派活，是请你先判断再决定动不动手：`,
-    `1. 先读工单与评论（opencli gitea issue-view --repo ${repo} ${issue.number}），必要时翻代码，弄清它到底要什么。`,
-    `2. 信息不够、或有多种合理做法：不要猜、不要硬做。写清缺什么信息、有哪些方案、你推荐哪个；需要人回答的，用 opencli gitea issue-comment 回到工单上。`,
+    `1. 先读工单与评论（gitea issue-view --repo ${repo} ${issue.number}），必要时翻代码，弄清它到底要什么。`,
+    `2. 信息不够、或有多种合理做法：不要猜、不要硬做。写清缺什么信息、有哪些方案、你推荐哪个；需要人回答的，用 gitea issue-comment 回到工单上。`,
     `3. 判断下来确实能做、做法也明确：可以直接做。只在自己那条工作区里改，改完自己跑相关测试并 commit；不要 push、不要开 PR、不要合并、不要关工单。`,
     `4. 判断下来不该做（重复、已解决、方向不对）：说明理由并给出建议，但不要自己关单、不要自己改标签。`,
     `5. 这次没有人监听你跑完后的状态：结论、疑问、建议都要在会话里写完整，别只丢一个 RESULT 块。`

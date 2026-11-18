@@ -1,21 +1,27 @@
 ---
-name: gitea-opencli
-description: 通过 opencli 浏览器自动化操作内网 Gitea（http://106.54.199.229:3000，仓库 yyzl/win-ai-harness）。当用户给出该域名下的任意链接（/pulls/N、/issues/N、/src/…、仓库首页）、或提到 win-ai-harness 的工单/PR 编号、或要求建单、看单、评论、打标签、指派、合并/关闭 PR 时使用。看到 106.54.199.229:3000 的链接即直接执行对应命令，不要反问用户，也不要用 web_fetch/curl 抓页面（私有库会返回 404）。它只负责读写，接单编排见 foreman。
+name: gitea
+description: 通过 REST API 操作内网 Gitea（http://106.54.199.229:3000，仓库 yyzl/win-ai-harness）。当用户给出该域名下的任意链接（/pulls/N、/issues/N、/src/…、仓库首页）、或提到 win-ai-harness 的工单/PR 编号、或要求建单、看单、评论、打标签、指派、合并/关闭 PR 时使用。看到 106.54.199.229:3000 的链接即直接执行对应命令，不要反问用户，也不要用 web_fetch 抓页面（私有库匿名访问会返回 404）。它只负责读写，接单编排见 foreman。
 ---
 
 # Gitea（内网 106.54.199.229:3000）
 
-opencli 复用 **Chrome 已登录会话**做页面自动化，无需 token。统一走包装脚本
-`scripts/gitea.sh`（已处理 PATH 与 JSON 清洗）：
+用 REST API，令牌放在 `~/.foreman/gitea-token`。统一走包装脚本 `scripts/gitea.sh`
+（已处理 PATH 并直接透传 JSON）：
 
 ```bash
 bash "$SKILL_DIR/scripts/gitea.sh" pr-view 217 --repo yyzl/win-ai-harness
 ```
 
-适配器源码在 `~/Documents/workspace/doubao-bot/adapters/gitea`；`~/.opencli/clis/gitea` 是真目录，
-里面每个 `.js` 都软链回仓库（opencli 的发现逻辑只认真目录，目录整体软链会让 gitea 命令整条消失）。
-改适配器直接改仓库里的文件，`opencli` 下次调用立刻生效；新增/删除文件后跑一次
-`bash ~/Documents/workspace/doubao-bot/scripts/link-adapter.sh` 补链。
+命令实现在仓库 `gitea/` 包（CLI 入口 `gitea/bin/gitea.mjs`），foreman 直接 import 同一份
+`gitea/src/api.mjs`，不再有浏览器适配器。单次调用是秒级，不用后台跑、不用等 20–40s。
+
+## 令牌
+
+优先级：`GITEA_TOKEN` → `GITEA_TOKEN_FILE` → `~/.foreman/gitea-token` → `~/.config/gitea/token`。
+站点地址：`GITEA_BASE_URL` → `~/.foreman/config.json` 的 `gitea.baseUrl` → 默认内网地址。
+
+生成：Gitea「设置 → 应用 → 管理 Access Token」，至少勾 issue / repository / organization 的读写，
+令牌只显示一次，写入文件后 `chmod 600`。令牌失效时接口返回 `auth_required`，重新生成即可，不要反复重试。
 
 ## URL → 命令路由
 
@@ -23,7 +29,7 @@ bash "$SKILL_DIR/scripts/gitea.sh" pr-view 217 --repo yyzl/win-ai-harness
 |---|---|
 | `…/pulls/N` | `pr-view N --repo <owner/name>`；问「为什么不能合并」先读 `mergeNote` |
 | `…/issues/N` | `issue-view N --repo <owner/name>` |
-| `…/pulls` / `…/issues`（列表页） | `search "" --repo <owner/name> --state open` 或 `explore pull-requests` |
+| `…/pulls` / `…/issues`（列表页） | `search "" --repo <owner/name> --state open` 或 `explore pulls` |
 | `…/src/branch/<name>`、commit 链接 | 归 git：`git log` / `git diff`，不走 gitea |
 | 只给编号、没给仓库 | 取 foreman 配置 `repos[]` 里的仓库；不确定就问 |
 
@@ -33,25 +39,25 @@ bash "$SKILL_DIR/scripts/gitea.sh" pr-view 217 --repo yyzl/win-ai-harness
 
 ```bash
 # 读
-pr-view <pr> --repo R            # 状态/正文/mergeNote（--files 实测报"无法访问"，别用）
-pull-list --repo R --state open  # 列仓库 PR，带回 author（列表页不回 base/head）
+pr-view <pr> --repo R [--files]  # 状态/正文/mergeNote/改动文件
+pull-list --repo R --state open  # 列仓库 PR（带回 author、base、head）
 issue-view <issue> --repo R
 search "关键词" --repo R --state open --label <id>
-label-list --repo R              # search --label 只认 id，先查名→id
+label-list --repo R              # 仓库级 + 组织级标签；查名→id
 milestone "" --repo R
-explore pull-requests|issues|milestones|repos
+explore issues|pulls|milestones|repos
 
 # 写（用户明确要求才执行）
 issue --repo R --title "标题" --body "md" --label needs-triage
 issue-comment <n> "md" --repo R
 issue-edit <n> --repo R --title/--body/--append/--label-add/--label-remove/--set-labels
 close <n> --repo R ; reopen <n> --repo R        # 工单与 PR 共用编号，对 PR 一样有效
-pr --repo R --base <目标> --head <源> --title "标题" --body "md"
+pr --repo R --base <目标> --head <源> --title "标题" --body "md" [--draft]
 pr-merge <pr> --repo R [--style merge|rebase|squash] [--delete-branch]
 assign <n> <user> --repo R ; due <n> <date> --repo R ; milestone-set <n> <ms> --repo R
 ```
 
-完整参数表（23 条命令，含 positionals/options）见 `references/commands.md`。
+完整参数表（23 条命令）见 `references/commands.md`。
 
 ## 判断「没什么可合并」
 
@@ -68,26 +74,27 @@ git log --oneline <base>..<head>   # 空 = 0 提交
 
 ## 写操作收口（只有两处）
 
-opencli 的写命令基本都能直接用，**只有两步必须交给 foreman**，因为它们要写账本、要幂等：
+gitea 的写命令基本都能直接用，**只有两步必须交给 foreman**，因为它们要写账本、要幂等：
 
 ```bash
 foreman pr open --repo R --head <分支> --title "…" --body "…" --issue N   # 建 PR，基线取配置 repos[].base
 foreman pr merge <N> --repo R                                              # 合并：每张 PR 只合一次
 ```
 
-- 直接 `opencli gitea pr` 建的 PR 不会进账本，控制台看不到这条、也挂不上「单 + 会话」。
+- 直接 `gitea pr` 建的 PR 不会进账本，控制台看不到这条、也挂不上「单 + 会话」。
 - 合并走 `foreman pr merge` 才有幂等（`mergeAsk`）与合完推进状态。
 
 其余写——建单 `issue`、评论 `issue-comment`、改 `issue-edit`、`close`/`reopen`、`assign`/`due`/`milestone-set`——直接调就行，不用绕 foreman；代价只是这些动作不进 `~/.foreman/console.db`，工作流照走（下一轮 `search --label` 会读到最新值）。
 
 ## 执行注意
 
-- **耗时**：每条 20–40s（要开浏览器）。用 `run_in_background: true` + `TaskOutput(block=true, timeout=120000)`，别用 15s 前台等待。
-- **PATH**：Bash 非登录 shell 里 `opencli` 不在 PATH；`scripts/gitea.sh` 已内置
-  `$HOME/.nvm/versions/node/v22.21.1/bin`，环境变了用 `OPENCLI_BIN_DIR` 覆盖。
-- **输出噪声**：末尾常带 `Update available …`，直接 `json.loads` 会析构失败；脚本已截取首个 `{` 到末个 `}`。
-- **登录态失效**：返回 401 或「请确认登录态有效」时，让用户在该 Chrome 登录 Gitea 后重试，不要反复重跑。
-- **web_fetch / curl 必 404**：私有库匿名访问一律 not found，不能用它判断链接是否失效。
+- **错误口径**：输出 `{ok:false,error:{code,message,status?}}`。`auth_required` 重生成令牌；
+  `not_found` 看编号/仓库；`empty_result` 表示“已经是目标状态/无需重复操作”，不是故障。
+- **标签 id vs 名字**：`search --label` 收 id（内部翻成名字再按 id 精确过滤）；`issue --label` /
+  `issue-edit --label-add` 收名字或 id。组织级标签（`needs-triage` 等）会被 `label-list` 合并返回。
+- **里程碑名可能全是数字**（`1105`、`1126`）：先按 id、再按名字匹配。
+- **列表不带正文**：`search` / `pull-list` 只回收敛字段；正文用 `issue-view` / `pr-view`。
+- **web_fetch 必 404**：私有库匿名访问一律 not found，不能用它判断链接是否失效。
 
 ## 本仓约定（yyzl/win-ai-harness）
 

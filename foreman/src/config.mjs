@@ -10,12 +10,14 @@ export const DEFAULTS = {
   worktreeDir: "~/.foreman/worktrees",
   dws: { bin: "dws", mode: "local", model: "auto" },
   herdr: { bin: "herdr", enabled: true },
+  // Gitea REST：baseUrl 用于控制台拼链接；令牌实际由 gitea 包按 ~/.foreman/gitea-token 解析。
+  gitea: { baseUrl: "http://106.54.199.229:3000", tokenFile: "~/.foreman/gitea-token" },
   pollSeconds: 20,
   timeoutMinutes: 90,
   maxAttempts: 3,
   perRepoPerRound: 2,
   pickup: {
-    // labelIds 走服务端过滤：opencli 的列表接口不返回 labels，只按名字过滤会静默捞 0 条。
+    // labelIds 走服务端过滤：REST 的列表接口按 label id 过滤，名字过滤会静默捞 0 条。
     labelIds: [],
     labels: [],
     excludeLabels: [...DEFAULT_EXCLUDE],
