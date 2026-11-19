@@ -1,4 +1,4 @@
-// 定时任务开关：pickup.auto / prWatch.enabled / planner.enabled / workHours.offUntil
+// 定时任务开关：prWatch.enabled / mail.enabled / inspector.enabled / workHours.offUntil
 // 页面上一键启停，写回 config.json 并立刻重排服务里的定时器（不用重启）。
 import fs from "node:fs"
 import { inWorkHours } from "./util.mjs"
@@ -6,7 +6,7 @@ import { validateCron } from "./cron.mjs"
 
 const pad = (n) => String(n).padStart(2, "0")
 
-export const SCHEDULE_IDS = ["pickup", "prWatch", "mail", "planner", "workHours"]
+export const SCHEDULE_IDS = ["prWatch", "mail", "inspector", "workHours"]
 
 // 临时闭嘴恢复的时刻：今天还没到开始时间且今天是工作日就今天，否则下一个工作日。
 export function nextWorkdayStart(cfg, at = new Date()) {
@@ -36,7 +36,7 @@ export function cronOf(cfg, id) {
   if (String(section.cron ?? "").trim()) return String(section.cron).trim()
   const seconds = Number(
     section.intervalSeconds ??
-      (id === "pickup" ? 1800 : id === "mail" ? cfg?.mail?.pollSeconds ?? 300 : 300)
+      (id === "pickup" ? 1800 : id === "inspector" ? 600 : id === "mail" ? cfg?.mail?.pollSeconds ?? 300 : 300)
   )
   const minutes = Math.max(1, Math.round(seconds / 60))
   return minutes === 1 ? "* * * * *" : `*/${minutes} * * * *`
@@ -46,25 +46,8 @@ export function listSchedules(cfg, state = {}) {
   const w = cfg?.workHours ?? {}
   const offUntil = String(w.offUntil ?? "")
   const paused = offUntil ? new Date(offUntil).getTime() > Date.now() : false
-  const pickup = cfg?.pickup ?? {}
   const prw = cfg?.prWatch ?? {}
-  const pl = cfg?.planner ?? {}
   return [
-    {
-      id: "pickup",
-      label: "自动接单",
-      enabled: pickup.auto === true,
-      cron: cronOf(cfg, "pickup"),
-      nextAt: state.pickup?.nextAt || "",
-      intervalSeconds: Number(pickup.intervalSeconds ?? 1800),
-      detail: `在跑上限 ${Number(pickup.maxRunning ?? 2)} · 每轮最多 ${Number(pickup.maxPerRound ?? 2)} 条`,
-      lastAt: state.pickup?.lastAt || "",
-      count: Number(state.pickup?.count ?? 0),
-      lastResult: state.pickup?.lastResult || "",
-      runnable: true,
-      runLabel: "立即巡检",
-      running: state.pickup?.running === true,
-    },
     {
       id: "prWatch",
       label: "他人 PR 扫描",
@@ -98,17 +81,19 @@ export function listSchedules(cfg, state = {}) {
       running: state.mail?.polling === true,
     },
     {
-      id: "planner",
-      label: "续接调度",
-      enabled: pl.enabled === true,
-      intervalSeconds: 0,
-      detail: `跟随监听轮询；在跑上限 ${Number(pl.maxRunning ?? pickup.maxRunning ?? 2)}`,
-      lastAt: "",
-      count: 0,
-      lastResult: pl.enabled === true ? "" : "关闭后跑完不再催编排接单",
+      id: "inspector",
+      label: "检查智能体巡检",
+      enabled: cfg?.inspector?.enabled !== false,
+      cron: cronOf(cfg, "inspector"),
+      nextAt: state.inspector?.nextAt || "",
+      intervalSeconds: Number(cfg?.inspector?.intervalSeconds ?? 600),
+      detail: `每 ${Math.round(Number(cfg?.inspector?.intervalSeconds ?? 600) / 60)} 分钟 steer 同一检查会话；由智能体按优先级和上限接单 · 连续 ${Number(cfg?.inspector?.recreateAfterHours ?? 24)} 小时投递失败才换会话 · 不受工作时间窗限制`,
+      lastAt: state.inspector?.lastAt || "",
+      count: Number(state.inspector?.count ?? 0),
+      lastResult: state.inspector?.lastResult ?? null,
       runnable: true,
-      runLabel: "立即轮询",
-      running: state.polling === true,
+      runLabel: "立即巡检",
+      running: state.inspector?.running === true,
     },
     {
       id: "workHours",
@@ -150,7 +135,7 @@ function normalizeWorkHours(value, cfg) {
 /**
  * 改开关与 cron：只动内存里的 cfg，返回新状态。
  * patch 每项可以是布尔（纯开关），也可以是对象：
- *   { pickup: { enabled: true, cron: "*\/15 8-17 * * 1-5" } }
+ *   { inspector: { enabled: true, cron: "*\/10 * * * *" } }
  * enabled 省略表示只改 cron；cron 非法直接抛错，不落盘、不重排。
  * workHours 的开关语义是「临时闭嘴 / 恢复」，不是改工作时段本身。
  */
@@ -159,7 +144,7 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
     if (!(id in patch)) continue
     const raw = patch[id]
     const obj = raw && typeof raw === "object" ? raw : { enabled: raw === true || raw === "true" }
-    if ("cron" in obj && !["pickup", "prWatch", "mail"].includes(id)) throw new Error(`${id} 不是独立定时任务，没有 cron 可改`)
+    if ("cron" in obj && !["prWatch", "mail", "inspector"].includes(id)) throw new Error(`${id} 不是独立定时任务，没有 cron 可改`)
     const next = {}
     if ("enabled" in obj) next.enabled = obj.enabled === true || obj.enabled === "true"
     if ("cron" in obj) {
@@ -167,11 +152,7 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
       if (!v.ok) throw new Error(`${id} 的 cron 不合法：${v.error}`)
       next.cron = v.expression
     }
-    if (id === "pickup") {
-      cfg.pickup = { ...(cfg.pickup ?? {}) }
-      if ("enabled" in next) cfg.pickup.auto = next.enabled
-      if ("cron" in next) cfg.pickup.cron = next.cron
-    } else if (id === "prWatch") {
+    if (id === "prWatch") {
       cfg.prWatch = { ...(cfg.prWatch ?? {}) }
       if ("enabled" in next) cfg.prWatch.enabled = next.enabled
       if ("cron" in next) cfg.prWatch.cron = next.cron
@@ -179,8 +160,10 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
       cfg.mail = { ...(cfg.mail ?? {}) }
       if ("enabled" in next) cfg.mail.enabled = next.enabled
       if ("cron" in next) cfg.mail.cron = next.cron
-    } else if (id === "planner") {
-      if ("enabled" in next) cfg.planner = { ...(cfg.planner ?? {}), enabled: next.enabled }
+    } else if (id === "inspector") {
+      cfg.inspector = { ...(cfg.inspector ?? {}) }
+      if ("enabled" in next) cfg.inspector.enabled = next.enabled
+      if ("cron" in next) cfg.inspector.cron = next.cron
     } else if (id === "workHours") {
       if ("start" in obj || "end" in obj) cfg.workHours = { ...(cfg.workHours ?? {}), ...normalizeWorkHours(obj, cfg) }
       if ("enabled" in next) cfg.workHours = { ...(cfg.workHours ?? {}), offUntil: next.enabled ? "" : localIso(nextWorkdayStart(cfg, at)) }
@@ -189,8 +172,8 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
   return listSchedules(cfg)
 }
 
-/** 开关对应的配置键名（pickup.auto，其余是 enabled）。 */
-const FLAG_KEY = { pickup: "auto", prWatch: "enabled", mail: "enabled", planner: "enabled" }
+/** 开关对应的配置键名（这几个节点都是 enabled）。 */
+const FLAG_KEY = { prWatch: "enabled", mail: "enabled", inspector: "enabled" }
 
 /**
  * 写回配置文件：只改上面这四个开关，其余字段（含用户手写的格式/注释式排版）原样保留。

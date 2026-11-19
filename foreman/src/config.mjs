@@ -62,6 +62,14 @@ export const DEFAULTS = {
     // 只确认首句送达、不等回复（等回复会把服务轮询拖死）。
     waitFirstReply: false,
   },
+  // 检查智能体：Foreman 只定时 steer 同一条会话，不自行收工或接单。
+  // 24 小时连续未成功投递才新建检查会话；巡检不限制工作时间窗。
+  inspector: {
+    enabled: true,
+    intervalSeconds: 600,
+    recreateAfterHours: 24,
+    projectDir: "",
+  },
   // 合并通道：与派单通道独立排队，默认一次只合一条（合并要写账本，不能并发）。
   merge: {
     enabled: false,
@@ -216,6 +224,11 @@ export function loadConfig(explicit) {
     const n = Number(cfg[key])
     if (!Number.isFinite(n) || n <= 0) throw new Error(`配置项 ${key} 要是正数，现在是：${cfg[key]}`)
     cfg[key] = n
+  }
+  for (const key of ["intervalSeconds", "recreateAfterHours"]) {
+    const n = Number(cfg.inspector[key])
+    if (!Number.isFinite(n) || n <= 0) throw new Error(`配置项 inspector.${key} 要是正数，现在是：${cfg.inspector[key]}`)
+    cfg.inspector[key] = n
   }
   cfg.repos = normalizeRepos(cfg)
   // 身份（自己的 Gitea 账号）与基线都从配置来：me 与 ignoreAuthors 互相补齐，缺了就留空。

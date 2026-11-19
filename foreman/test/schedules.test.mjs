@@ -12,33 +12,31 @@ import { startConsoleHttp } from "../src/consolehttp.mjs"
 const baseCfg = () => ({
   pickup: { auto: false, intervalSeconds: 1800, maxPerRound: 1 },
   prWatch: { enabled: true, intervalSeconds: 300 },
-  planner: { enabled: true, maxRunning: 2 },
+  inspector: { enabled: true, intervalSeconds: 600, recreateAfterHours: 24 },
   workHours: { enabled: true, days: [1, 2, 3, 4, 5], start: "08:30", end: "17:30", offUntil: "" },
 })
 
-test("listSchedules：五个开关（派单 / 他人 PR 扫描 / 验收邮件 / 续接 / 工作时间窗），合并通道已取消", () => {
+test("listSchedules：保留 PR/邮件，检查智能体取代自动接单与执行收工轮询", () => {
   const cfg = baseCfg()
   const rows = listSchedules(cfg)
-  assert.deepEqual(rows.map((r) => r.id), ["pickup", "prWatch", "mail", "planner", "workHours"])
-  assert.equal(rows[0].enabled, false)
-  assert.equal(rows[1].enabled, true)
-  assert.equal(rows[1].label, "他人 PR 扫描")
-  assert.match(rows[0].detail, /在跑上限 2/)
-  assert.equal(rows[0].cron, "*/30 * * * *")
-  assert.equal(rows[1].cron, "*/5 * * * *")
+  assert.deepEqual(rows.map((r) => r.id), ["prWatch", "mail", "inspector", "workHours"])
+  const inspector = rows.find((r) => r.id === "inspector")
+  assert.equal(inspector.enabled, true)
+  assert.equal(inspector.cron, "*/10 * * * *")
+  assert.equal(inspector.runLabel, "立即巡检")
+  assert.match(inspector.detail, /steer 同一检查会话/)
+  assert.match(inspector.detail, /24/)
+  assert.equal(rows.find((r) => r.id === "prWatch").enabled, true)
+  assert.equal(rows.find((r) => r.id === "prWatch").cron, "*/5 * * * *")
   // 验收邮件默认关（testers 还是占位符），cron 用 mail.pollSeconds。
   const mailRow = rows.find((r) => r.id === "mail")
   assert.equal(mailRow.enabled, false)
   assert.equal(mailRow.cron, "*/5 * * * *")
   assert.match(mailRow.detail, /[FM-…]/)
-  assert.equal(rows.some((r) => r.id === "merge"), false, "合并通道不再是一项定时任务")
-  // 「立即执行」只给真能跑一轮的几项；工作时间窗是个判断条件，不给按钮。
-  assert.deepEqual(rows.filter((r) => r.runnable).map((r) => r.id), ["pickup", "prWatch", "mail", "planner"])
+  assert.equal(rows.some((r) => ["merge", "pickup", "planner"].includes(r.id)), false)
+  assert.deepEqual(rows.filter((r) => r.runnable).map((r) => r.id), ["prWatch", "mail", "inspector"])
   assert.equal(rows.find((r) => r.id === "workHours").runnable, false)
-  assert.equal(rows.find((r) => r.id === "pickup").runLabel, "立即巡检")
   assert.equal(mailRow.runLabel, "立即收信")
-  // 用工作日中午的时间点判断，避免跑测试时正好在窗口外
-  const noon = new Date()
   const inside = applySchedules(cfg, {})
   assert.equal(inside.find((r) => r.id === "workHours").enabled, true)
 })
@@ -51,31 +49,31 @@ test("cron：校验表达式、计算下一次，配置优先于 intervalSeconds
   assert.equal(next.getHours(), 10)
   assert.equal(next.getMinutes(), 15)
   const cfg = baseCfg()
-  assert.equal(cronOf(cfg, "pickup"), "*/30 * * * *")
-  assert.equal(cronOf({ pickup: { cron: "0 9 * * 1-5", intervalSeconds: 1800 } }, "pickup"), "0 9 * * 1-5")
+  assert.equal(cronOf(cfg, "inspector"), "*/10 * * * *")
+  assert.equal(cronOf({ inspector: { cron: "0 9 * * 1-5", intervalSeconds: 600 } }, "inspector"), "0 9 * * 1-5")
 })
 
-test("applySchedules：对象 patch 可只改 cron 或同时改开关，非法 cron 不落内存", () => {
+test("applySchedules：检查智能体可改 cron 与开关，非法 cron 不落内存", () => {
   const cfg = baseCfg()
-  const rows = applySchedules(cfg, { pickup: { cron: "*/15 8-17 * * 1-5" } })
-  assert.equal(cfg.pickup.cron, "*/15 8-17 * * 1-5")
-  assert.equal(cfg.pickup.auto, false, "只改时间不应顺手打开")
-  assert.equal(rows[0].cron, "*/15 8-17 * * 1-5")
+  const rows = applySchedules(cfg, { inspector: { cron: "*/15 8-17 * * 1-5" } })
+  assert.equal(cfg.inspector.cron, "*/15 8-17 * * 1-5")
+  assert.equal(cfg.inspector.enabled, true, "只改时间不应顺手关闭")
+  assert.equal(rows.find((r) => r.id === "inspector").cron, "*/15 8-17 * * 1-5")
   applySchedules(cfg, { prWatch: { enabled: false, cron: "0 */2 * * *" } })
   assert.equal(cfg.prWatch.enabled, false)
   assert.equal(cfg.prWatch.cron, "0 */2 * * *")
-  assert.throws(() => applySchedules(cfg, { pickup: { cron: "bad" } }), /cron 不合法/)
-  assert.equal(cfg.pickup.cron, "*/15 8-17 * * 1-5")
-  assert.throws(() => applySchedules(cfg, { planner: { cron: "* * * * *" } }), /没有 cron/)
+  assert.throws(() => applySchedules(cfg, { inspector: { cron: "bad" } }), /cron 不合法/)
+  assert.equal(cfg.inspector.cron, "*/15 8-17 * * 1-5")
+  assert.throws(() => applySchedules(cfg, { workHours: { cron: "* * * * *" } }), /没有 cron/)
 })
 
-test("applySchedules：翻转 pickup / prWatch / planner", () => {
+test("applySchedules：翻转 prWatch / inspector，旧 pickup 不再成为定时任务", () => {
   const cfg = baseCfg()
-  const rows = applySchedules(cfg, { pickup: true, prWatch: false, planner: false })
-  assert.equal(cfg.pickup.auto, true)
+  const rows = applySchedules(cfg, { pickup: true, prWatch: false, inspector: false })
+  assert.equal(cfg.pickup.auto, false, "旧 pickup.auto 不能被控制台重新打开")
   assert.equal(cfg.prWatch.enabled, false)
-  assert.equal(cfg.planner.enabled, false)
-  assert.equal(rows.find((r) => r.id === "pickup").enabled, true)
+  assert.equal(cfg.inspector.enabled, false)
+  assert.equal(rows.find((r) => r.id === "inspector").enabled, false)
   assert.equal(rows.find((r) => r.id === "prWatch").enabled, false)
 })
 
@@ -133,7 +131,7 @@ test("persistSchedules：只改开关字段，其余配置原样保留", () => {
         repos: [{ repo: "yyzl/win-ai-harness", dir: "~/x", base: "sit-20261126" }],
         pickup: { auto: false, me: "233151", intervalSeconds: 1800 },
         prWatch: { enabled: true, ignoreAuthors: ["233151"] },
-        planner: { enabled: true, maxRunning: 2 },
+        inspector: { enabled: true, intervalSeconds: 600 },
         workHours: { start: "08:30", end: "17:30", days: [1, 2, 3, 4, 5] },
       },
       null,
@@ -141,11 +139,13 @@ test("persistSchedules：只改开关字段，其余配置原样保留", () => {
     )
   )
   const cfg = baseCfg()
-  applySchedules(cfg, { pickup: true, workHours: false })
-  assert.equal(persistSchedules(file, { pickup: true, workHours: false }, cfg), true)
+  applySchedules(cfg, { inspector: false, workHours: false })
+  assert.equal(persistSchedules(file, { inspector: false, workHours: false }, cfg), true)
 
   const raw = JSON.parse(fs.readFileSync(file, "utf8"))
-  assert.equal(raw.pickup.auto, true)
+  assert.equal(raw.inspector.enabled, false)
+  assert.equal(raw.inspector.intervalSeconds, 600)
+  assert.equal(raw.pickup.auto, false, "旧自动接单开关不再被调度接口修改")
   assert.equal(raw.pickup.me, "233151", "同段别的字段要留着")
   assert.equal(raw.prWatch.ignoreAuthors[0], "233151")
   assert.equal(raw.workHours.offUntil, cfg.workHours.offUntil)
@@ -158,14 +158,14 @@ test("persistSchedules：只改开关字段，其余配置原样保留", () => {
 test("persistSchedules：对象 patch 同时写 enabled 与 cron", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-sched-cron-"))
   const file = path.join(dir, "config.json")
-  fs.writeFileSync(file, JSON.stringify({ pickup: { auto: false, me: "233151" }, prWatch: { enabled: true } }))
+  fs.writeFileSync(file, JSON.stringify({ inspector: { enabled: false, intervalSeconds: 600 }, prWatch: { enabled: true } }))
   const cfg = baseCfg()
-  applySchedules(cfg, { pickup: { enabled: true, cron: "*/15 8-17 * * 1-5" } })
-  persistSchedules(file, { pickup: { enabled: true, cron: "*/15 8-17 * * 1-5" } }, cfg)
+  applySchedules(cfg, { inspector: { enabled: true, cron: "*/15 8-17 * * 1-5" } })
+  persistSchedules(file, { inspector: { enabled: true, cron: "*/15 8-17 * * 1-5" } }, cfg)
   const raw = JSON.parse(fs.readFileSync(file, "utf8"))
-  assert.equal(raw.pickup.auto, true)
-  assert.equal(raw.pickup.cron, "*/15 8-17 * * 1-5")
-  assert.equal(raw.pickup.me, "233151")
+  assert.equal(raw.inspector.enabled, true)
+  assert.equal(raw.inspector.cron, "*/15 8-17 * * 1-5")
+  assert.equal(raw.inspector.intervalSeconds, 600)
 })
 
 test("HTTP：/api/schedules 读写开关，/api/pickup 立刻跑一轮", async () => {
@@ -190,19 +190,19 @@ test("HTTP：/api/schedules 读写开关，/api/pickup 立刻跑一轮", async (
   try {
     const list = await (await fetch(`${base}/api/schedules`)).json()
     assert.equal(list.ok, true)
-    assert.equal(list.schedules.find((s) => s.id === "pickup").enabled, false)
+    assert.equal(list.schedules.find((s) => s.id === "inspector").enabled, true)
     assert.deepEqual(list.workHours, { start: "08:30", end: "17:30" })
 
     const set = await (
       await fetch(`${base}/api/schedules`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ patch: { pickup: true } }),
+        body: JSON.stringify({ patch: { inspector: false } }),
       })
     ).json()
     assert.equal(set.ok, true)
-    assert.equal(set.schedules.find((s) => s.id === "pickup").enabled, true)
-    assert.deepEqual(calls.patches, [{ pickup: true }])
+    assert.equal(set.schedules.find((s) => s.id === "inspector").enabled, false)
+    assert.deepEqual(calls.patches, [{ inspector: false }])
 
     const hours = await (
       await fetch(`${base}/api/schedules`, {

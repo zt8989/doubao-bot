@@ -18,24 +18,24 @@ Gitea 侧一律走 REST（`gitea` 包/CLI）。
 
 ## 以编排会话为中心（默认）
 
-自动巡检时，每张工单都有**自己的一条编排智能体会话**（`foreman-<仓库>-<单号>-编排`），绑定在 `issues[键].orchestrator`：
+检查智能体决定接单时，每张工单都有**自己的一条编排智能体会话**（`foreman-<仓库>-<单号>-编排`），绑定在 `issues[键].orchestrator`：
 
 ```
 捞到工单 → hand：新建/复用这张单的编排会话，steer 工单进去（账本记 handed）
               ↓（编排读工单，自己决定怎么派）
          dispatch：建一工程一工作区 + 开工作会话，会话 id 绑回编排（issues[键].agentConvId / .orchestrator）
               ↓
-         工作会话自己改、自测、push、开 PR；每次收工由服务把结论 steer 回编排（不再新建会话、不再 notify）
+         工作会话只改代码、自测、commit；检查智能体发现收工后按需 watch poll，由 foreman push、开 PR 并把结论 steer 回编排
               ↓
          失败/卡住 → 编排先归因：原会话能修正才 resume <执行会话id>；需要协作就补派并在完成后 steer 回原会话
               ↓
          编排核对 → pr merge（合并即关单）→ clean：清 worktree、本地分支、工作会话与监听（幂等）
 ```
 
-- **按单独立**：自动接单时 `ensureIssueOrchestrator` 按工单幂等——这张单已有 `convId` 就复用，不重复开；不同工单绝不共用。
+- **按单独立**：检查智能体或人工接单时 `ensureIssueOrchestrator` 按工单幂等——这张单已有 `convId` 就复用，不重复开；不同工单绝不共用。确认原编排失联时才用 `foreman hand <键> --fresh` 重派独立编排。
   用户自己发起的会话不需要另起：发起方就是编排（见下）。PR 监听独立走 `deliver.mode=new`，新建「合并会话」。
 - **编排会话从哪来（两种都绑同一种字段 `issues[键].orchestrator`）**：
-  1. **定时任务自动接单**：`foreman hand` → foreman 新建/复用这张单自己的编排会话；
+  1. **检查智能体接单**：它先 `foreman run --dry-run --once` 核对优先级与空余容量，确认后 `foreman run --once`，由 `hand` 新建/复用这张单自己的编排会话；
   2. **用户自主发起**：用户在某个豆包会话里调 `foreman dispatch`（或 hand/resume），
      发起方会话 id（`--orchestrator <id>`，不传则取 `MCP_VM_CONVERSATION_ID`）直接绑成这张单的编排，
      工作会话的更新都 steer 回那条发起方会话，不会再另起编排会话。
@@ -44,7 +44,7 @@ Gitea 侧一律走 REST（`gitea` 包/CLI）。
   续跑计数与 `lastFailure` 都写账本。
 - **收尾两步**：`pr merge` 合并关单 → `foreman clean <键>` 清残留 worktree / 分支 / 工作会话，并归档**这张单自己的编排会话**（worktree 有未提交改动就保留，不删别人正在写的东西）。
   clean 只认 `book.sessions` 里 `kind: "orchestrator"` 且带这张单 `issueKey` 的会话：全局编排和「用户发起方就是编排」的会话不归档。
-  编排会话万一没被 clean 收掉（比如它没跑完、或 clean 时正是命令发起方），服务每轮巡检会把**已收口（done/cleaned）**工单的编排会话补归档一次（还在跑的不动，下一轮再收）。
+  编排会话万一没被 clean 收掉（比如它没跑完、或 clean 时正是命令发起方），检查智能体或人工执行 `watch poll` 时会把**已收口（done/cleaned）**工单的编排会话补归档一次（还在跑的不动，后续再收）。
 - **降级**：`sessionFlow.enabled: false`（或 `foreman run --direct`）退回老的多会话模型：run 自己建工作区派活、收工只落痕、PR 监听按 `deliver.mode` 投递。
 
 配置（默认已开，不用写也能用）：
@@ -63,14 +63,13 @@ herdr 从 origin/<base> 开 worktree（分支 fix/issue-N）
       ↓
 dws 开会话，把工单 + 边界 + RESULT 协议一次发进去
       ↓
-记账 + 登记监听 → 返回 dispatched（会话随后自己改、自测、push、开 PR）
+记账 + 登记监听 → 返回 dispatched（会话随后自己改、自测、commit）
 ```
 
 run 到这里就返回：**不在进程里等回复、不读 RESULT、不验收、不 push/PR、不发通知**。
-会话跑完没有、结果是什么、通知谁，全由常驻服务在后台异步完成（见下一节）。
-当前 notify 节点只落痕、不投递（暂时不需要向谁通知），结论照常推进工单状态与账本。
-`verify` / `publish`（验收、push、开 PR）的代码还在，但当前没接线，run 不自动调用——
-push 与开 PR 由会话自己在自测通过后做完，foreman 只负责派活、监听、通知。
+代码不再按 `pollSeconds` 定时读取执行会话；检查智能体发现会话已收工后按需执行 `foreman watch poll`，由它推进账本、push、开 PR，并把结论 steer 回本单编排。
+当前 notify 节点只落痕、不投递（暂时不需要向谁通知）。
+`verify` / `publish` 的旧代码路径不作为当前入口；正常收口由 `watch poll` 内的 foreman 发布步骤完成。
 
 worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for-human` / `agent-blocked`），返回 blocked。
 
@@ -83,7 +82,7 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 
 | 流程 | 干什么 | 并发 | 谁在推进 |
 | --- | --- | --- | --- |
-| **自有工单（own）** | 接单 → 建工作区 → 派活 → 开发 → 出 PR → 合并 → 关单 → 清理 → 归档 → 通知 | **同时最多 2 条在跑**（按 workflow 实例数算） | `pickup.auto` 定时器 + `foreman run` |
+| **自有工单（own）** | 接单 → 建工作区 → 派活 → 开发 → 出 PR → 合并 → 关单 → 清理 → 归档 → 通知 | **同时最多 2 条在跑**（按 workflow 实例数算） | 检查智能体定时接收 steer，决策后调用 `foreman run` |
 | **他人 PR（review）** | 扫到 → 核对/判可合 → 解冲突 → **合并助手直接执行 `foreman pr merge`** → 关单 → 清理 → 归档 → 通知 | 不占接单名额 | 「他人 PR 扫描」定时器 + 合并助手 + `runMergeTask` |
 
 - **合并通道已取消**：没有独立 lane、没有合并定时任务、没有独立并发槽（`src/lanes.mjs` 已删除）。
@@ -91,15 +90,15 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 - **合并助手核对后直接合并**：`foreman-合并-*` 会话收到「PR 待合并」后核对归属/基线、帮解冲突，
   可合就逐条执行通知里的 `foreman pr merge`，由 `runMergeTask` 当场合并并收尾，**不交 RESULT**。
   不可合或需要人工拍板时直接用普通文字说明原因；服务不再读取合并会话结论，也不再根据 RESULT 二次合并。
-- **`pickup.maxRunning`（默认 2）** 只限制定时巡检的「自有工单流程在跑数」：`engine.active("own").length` 到顶就 `skipped: "slots-full"`；
+- **`pickup.maxRunning`（默认 2）** 限制检查智能体调用 `foreman run` 或人工调用 `foreman pickup` 时的「自有工单流程在跑数」：`engine.active("own").length` 到顶就 `skipped: "slots-full"`；
   账本 `planned`/`working` 的单数只作兜底，服务重启时 `engine.restore(book)` 会把在跑的实例补回来。
   每轮补单数 = `min(maxRunning - 在跑数, maxPerRound)`，所以 `maxPerRound` 默认也跟着变成 2（空着两个槽就一轮补两条）。
-  **agent 主动调 `foreman dispatch` 不读这个上限**，即使定时巡检已经 `slots-full` 也仍可派单。
+  **agent 主动调 `foreman dispatch` 不读这个上限**，即使候选巡检已经 `slots-full` 也仍可派单。
 - 派单侧仍靠 `run.lock`（含 CLI `foreman run`）；合并不在定时器里跑，所以「正在合 PR」不会挡「正在派单」。
 - 会话层也分开：**派单会话**（`foreman-派单-<时间戳>`，读派单提示词，只做续跑/接单）与**合并会话**
   （`foreman-合并-<时间戳>`，读合并提示词，判断可合性 + 解冲突 + 直接执行 `foreman pr merge`）。账本 `sessions.kind` 记 `deliver:dispatch` / `deliver:merge`，
   `sessions.notice` 记触发类型。
-- 派单判定完一条会话，**不再当场合并、也不再入队**：会话自己 push + 开 PR，工单置 `pr-open`，
+- 派单判定完一条会话，**不再当场合并、也不再入队**：`watch poll` 发现 commit 收工后由 foreman push + 开 PR，工单置 `pr-open`，
   然后立刻返回（notify 节点只落痕，不发消息；见下面「通知口径」）。
 - 合并结果不另开会话、也不回执：`foreman pr merge` 触发的合并只落账本 + 控制台
   （`mergeAsk` / `mergeTask` / `pr_merge`），关单 / 清工作区 / 归档做完即收工。
@@ -111,11 +110,15 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 - `foreman status` 里能看：`pickup.maxRunning / inflight`、`lanes.dispatch.workflowActive`、`merge.queued`、
   `workflow.{workflows,stages,nodes,active,runs,recent}`。
 
-## 常驻服务与会话监听
+## 常驻服务与检查智能体
 
-通知只有一条路：常驻服务在后台轮询被监听的会话，判定「这一轮跑完了」再走 notify 节点。
-run 自己不发任何通知——没有同步发送的第二条路，也没有降级分支。
-**notify 节点当前只落痕、不投递**：判定照做、指纹照记，但不新建会话、不 `dws notify`。
+常驻服务保留三类定时器：**检查智能体巡检、他人 PR 扫描、验收邮件**。执行会话收工轮询和自动接单定时器已删除，收口后的代码自动补单也已删除。
+
+- 每 `inspector.intervalSeconds`（默认 600 秒）向同一条检查会话 `steer` 一次；首次 `openNew` 创建。
+- 以最后一次成功投递为轮换基准；从未成功时从首次失败计时，连续 `inspector.recreateAfterHours`（默认 24 小时）未成功才新建检查会话。
+- 定时器只投递，不读取工单状态自行派单。检查智能体负责健康检查、按现有优先级与 `pickup.maxRunning` 接单、必要时 `hand --fresh` 重派独立编排，以及用 `issue settle` 修复本地完成状态。
+- `watch poll` 保留为检查智能体/人工按需入口：处理已收工执行会话、推进账本、push/开 PR、steer 回本单编排。
+- **notify 节点当前只落痕、不投递**：判定照做、指纹照记，但不新建会话、不 `dws notify`。
 
 ### 起与停
 
@@ -162,12 +165,12 @@ foreman status                # 在不在 + 监听明细 + lastPollAt / pollCoun
   「分配任务」卡片另有两个：`GET /api/candidates`（待分配队列，服务端缓存 45s，`?refresh=1` 强拉）、
   `POST /api/pick`（`{"repo":"<owner/name>","number":N}` 手动接单，只派这一条）。
 - 「分配任务」卡片分两个页签：**「今日任务」/「待分配任务」**。待分配列出配置仓库里**所有 open 工单**
-  （接单标签 `pickup.labelIds` 只管自动巡检，不管这里），账本里已处理（`done` / `pr-open`）、已交编排（`handed`）、
+  （接单标签 `pickup.labelIds` 只管检查智能体的候选巡检，不管这里），账本里已处理（`done` / `pr-open`）、已交编排（`handed`）、
   在飞（`working` 且无失败）、试到 `maxAttempts` 上限的不列；按归属分「我的 / 无人认领 / 他人认领」；
   **按归属排序（我的 → 无人认领 → 他人认领），同档按创建时间老的在前，最多显示 10 条**，响应里 `total` 是全量条数，
   超过 10 条时页脚会写明「共 N 条待分配 · 只显示前 10 条」；
-  点行尾「接单」= 建工作区 + 开执行会话，**不看 `pickup.auto` 与工作时间**，但 `run.lock`、节点暂停、账本查重照旧守着，
-  不会和 CLI / 自动巡检把同一张单派两遍。页脚显示「在跑 n/上限」。
+  点行尾「接单」= 建工作区 + 开执行会话，**显式人工动作，不受工作时间限制**，但 `run.lock`、节点暂停、账本查重照旧守着，
+  不会和 CLI / 检查智能体把同一张单派两遍。页脚显示「在跑 n/上限」。
   - **决策单**：工单带着 `pickup.excludeLabels` 里的标签（`needs-info` / `needs-human` / `ready-for-human` / `wontfix` / `agent-blocked`）
     时，接单走另一套提示词（`decisionKickoff`）：让 agent 先读懂工单、自己判断该不该做——信息不够就把缺的和方案写清、
     需要人答的回工单评论，判断能做才动手，不该做就说明理由（不许自己关单/改标签）。
@@ -185,10 +188,10 @@ foreman status                # 在不在 + 监听明细 + lastPollAt / pollCoun
   - 还没构建时 `/` 回 **503 + 构建提示页**，不会只给一个 404。
 - 页面右上角可切主题：亮 / 暗 / 自动（跟随系统）；选择存 `localStorage`，跟随系统时深浅色变化实时生效。
 - 左侧导航栏提供 **「工单」（可切日期回看某天）**、**「定时任务」** 和 **「操作日志」** 三个入口，图标加文字，可折叠成纯图标并记住折叠状态；窄屏自动只显示图标。
-  - 「定时任务」列出自动接单（`pickup.auto`）、他人 PR 扫描（`prWatch.enabled`）、续接调度（`planner.enabled`）、工作时间窗（`workHours.offUntil` 临时闭嘴）四项（合并通道已取消），带运行状态、上次时间、下次触发与已跑轮数；
-  - 自动接单、他人 PR 扫描的时间可自由编辑 **cron 表达式**：标准 5 段「分 时 日 月 周」，也支持第 6 段秒；对应配置 `pickup.cron` / `prWatch.cron`。没配 cron 时仍兼容旧的 `intervalSeconds`，折成分钟级表达式；
-  - 点「开启/停止」或「保存时间」会 `POST /api/schedules`（如 `{"patch":{"pickup":{"enabled":true,"cron":"*/15 8-17 * * 1-5"}}}`）：先校验并改内存 cfg、再写回 `config.json`、然后立刻重排定时器，**不用重启服务**；非法 cron 返回 400，不会落盘；
-  - 「立即巡检」走 `POST /api/pickup`，等价于手动 `foreman pickup`。
+  - 「定时任务」列出检查智能体巡检（`inspector.enabled`）、他人 PR 扫描（`prWatch.enabled`）、验收邮件（`mail.enabled`）、工作时间窗（`workHours.offUntil` 临时闭嘴）四项，带运行状态、上次时间、下次触发与已跑轮数；
+  - 检查智能体、他人 PR 扫描、验收邮件的时间可编辑 **cron 表达式**；对应配置 `inspector.cron` / `prWatch.cron` / `mail.cron`。没配 cron 时兼容 `intervalSeconds`，折成分钟级表达式；
+  - 点「开启/停止」或「保存时间」会 `POST /api/schedules`（如 `{"patch":{"inspector":{"enabled":true,"cron":"*/10 * * * *"}}}`）：先校验并改内存 cfg、再写回 `config.json`、然后立刻重排定时器，**不用重启服务**；非法 cron 返回 400，不会落盘；
+  - 检查智能体的「立即巡检」走 `POST /api/schedules/run`，等价于手动 `foreman inspect`；它只是提前 steer，不代替智能体决策。
   - `GET /api/schedules` 返回同一份状态，脚本/CLI 也可用。
 - **「操作日志」页面**：派单、投递编排通知、建/合 PR、合并后清理、执行会话归档都会先记一条「进行中」，结束再更新为「成功 / 失败」；服务重启时未收尾的记录标为「已中断」，不会永远显示正在执行。支持按状态筛选，每 15 秒自动刷新。
   - 数据在同一个 `console.db` 的 `operations` 表；查询接口 `GET /api/operations?limit=100&status=running&action=merge`（后两个参数可省略）。
@@ -216,7 +219,7 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 
 在听的会话 = 这轮 run 派出去的（自动登记）∪ `watch add` 显式盯的，按会话去重，显式优先。
 
-服务每 `pollSeconds`（默认 20s）先 `dws list --json` 读一次侧边栏（不切窗口），**以侧边栏的 `running` 为监听主判据**：
+代码不再每 `pollSeconds` 自动轮询。检查智能体或人工执行 `foreman watch poll` 时，先 `dws list --json` 读一次侧边栏（不切窗口），**以侧边栏的 `running` 为监听主判据**：
 
 - `running` 真 → 只记一笔，`dws status` / `dws info` 都不碰（这两个内部都要 `goto`，一个都不读才不会把用户窗口拽走）；
 - `running` 假、且这次收工已经处理过 → 直接跳过，一个字节都不读（`notified` 里记 `idle`）；
@@ -225,7 +228,7 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 
 读不到侧边栏（`dws list` 失败）时，尚未消费的会话仍退化为逐条 `dws status`；一旦 RESULT 已消费就同样落 `idle`，不再每轮重读。后续由侧边栏重新出现 `running`，或 `resume` / 重派 steer 显式清掉 `idle`，再读取下一次结果。
 
-自动巡检也先读侧边栏，但**默认不因此停派**（派单通道要并行 2 张单）：只有在配置里显式打开 `pickup.pauseWhileRunning: true`（想回到「豆包单实例一次只跑一条」的老行为）时，才有在跑会话就跳过本轮（`window-busy`）。
+检查智能体决定执行 `run` / `pickup` 时也会先读侧边栏，但**默认不因此停派**（派单通道要并行 2 张单）：只有显式打开 `pickup.pauseWhileRunning: true` 时，才有在跑会话就跳过本轮（`window-busy`）。
 
 收工那轮对 `dws status` 的判定：
 
@@ -250,7 +253,7 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 
 ### 服务没在跑时，结论没人判
 
-异步的代价：服务没跑的时间段里跑完的会话，没人轮询判定（不会发通知，也不会推进工单状态）。这不是 bug，补法：
+服务没跑时，检查智能体定时投递不会发生；已收工会话也不会被自动读取。补法：
 
 1. `foreman watch list` —— 登记在账本里，不依赖服务活着，先看会话还在不在听。
 2. `foreman watch poll` —— 立刻重放一轮，已跑完且指纹没通知过的会补发。
@@ -258,7 +261,7 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 
 ## 工作时间窗
 
-两套定时器（会话监听、他人 PR 扫描）只在 `workHours` 窗口里跑，窗口外跳过，不打扰：
+他人 PR 扫描只在 `workHours` 窗口里跑；检查智能体巡检与验收邮件不受工作时间窗限制。执行收工不再有代码定时器：
 
 ```json
 "workHours": { "enabled": true, "days": [1,2,3,4,5], "start": "08:30", "end": "18:30", "offUntil": "" }
@@ -266,7 +269,7 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 
 - `days`：1=周一 … 7=周日；`start`/`end` 左闭右开（到 18:30 就停）
 - `offUntil`：临时闭嘴时间点（ISO 带时区），到点自动恢复
-- 不配 `workHours` 或 `enabled: false` = 全天跑；手动 `foreman pr poll` / `watch poll` 不受窗口限制
+- 不配 `workHours` 或 `enabled: false` = PR 扫描全天跑；手动 `foreman pr poll` / `watch poll` / `inspect` 不受窗口限制
 - `foreman status` 里 `workHours.active` 显示当前是否在窗口内
 
 ## PR 监听（默认 5 分钟一轮）
@@ -325,17 +328,17 @@ foreman doctor                        # 开了邮件会顺带查 agently-cli 授
 ## 命令
 
 ```bash
+foreman inspect                   # 立即 steer 检查智能体一轮；不代替它做决策
 foreman run --dry-run --once     # 只打印会捞哪条、交给谁；零副作用
 foreman run --once               # 跑一轮：捞到单交给编排会话（hand）
 foreman run --direct --once      # 这一轮自己派活（老行为，不交给编排）
-foreman run --every 1800         # 常驻，每 1800s 一轮
 foreman run --notify <会话id|标题>  # 这一轮派出的会话，登记监听时通知目标写谁
 foreman run --no-notify          # 这一轮不登记监听，因此不会有通知（连同其它参数一起用）
-foreman orch start               # 手工兼容入口：起/复用顶层全局编排（自动巡检不用它）
+foreman orch start               # 手工兼容入口：起/复用顶层全局编排（检查智能体接单不用它）
 foreman orch show                 # 每条编排会话绑了哪些工作会话、最近 steer 了什么
 foreman sessions                  # 只列当前会话派出的工作/补派会话（默认取 MCP_VM_CONVERSATION_ID）
 foreman sessions --orchestrator <会话id>  # 终端里查询指定会话派出的全部会话
-foreman hand <owner/name>#N      # 把工单交给编排会话（不建工作区、不开工作会话）
+foreman hand <owner/name>#N [--fresh]  # 默认复用本单编排；确认原编排失联时才 --fresh 重派
 foreman dispatch <owner/name>#N (--prompt <编排指令> | --file <指令文件>) [--repo <工程名|owner/name>]...
                                  # 默认只建工单所在仓；额外工程重复传 --repo，正文提到不会自动建
                                  # 提示词必填：编排分析、任务范围与验收随首句注入，头部带完整工单 ID 和 URL；重派随 steer 发送
@@ -343,7 +346,7 @@ foreman resume <执行会话id>   # 原会话可修正时：按会话 id steer �
                                  # 上面三条都支持 --orchestrator <会话id>：绑到发起方会话（不传取 MCP_VM_CONVERSATION_ID）
 foreman clean <owner/name>#N     # 合并关单后清 worktree / 分支 / 工作会话（幂等）
 foreman clean --all              # 清所有终端态工单的残留（worktree / 分支 / 会话）
-foreman pickup                   # 手动催服务跑一轮自动巡检（不用等下一个间隔）
+foreman pickup                   # 手动/检查智能体处理一轮候选；没有代码定时器会自动调用它
 foreman tasks                    # 每条工单到哪一步、卡在哪
 foreman pr poll                  # 立刻扫一轮 PR（别人的单报给最早登记的调用方）
 foreman pr list                  # 看 PR 监听账本
@@ -356,6 +359,7 @@ foreman mail request <repo>#<N> [--url <PR链接>]    # 补发/催办验收邮�
 foreman mail send --to <邮箱> --subject "…" --body "…"   # 手动发一封
 foreman mail approve|reject <repo>#<N> --by <人> [--note "…"]
 foreman issue comment <N> --repo R --body "…"   # 评论工单（记账）
+foreman issue settle <N> --repo R --note "完成依据"  # 仅本地完成：不关 Gitea、不清 worktree、不合 PR
 foreman issue close <N> --repo R                # 关单（记账）
 foreman retry win-ai-harness 255 # 人工处理完，放回队列（attempts 清零）
 foreman doctor                   # 自检：dws/gitea/herdr/仓库基线
@@ -403,23 +407,16 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 - 加新产品只改配置：加一段 `products[]`（提示词不写就用内置），重启服务即可，不用动代码；
 - PR 一轮可能跨多个仓库：全部来自同一仓库才按产品取提示词，混合时用全局 `deliver`。
 
-### 自动巡检（pickup.auto）
+### 检查智能体巡检（inspector）
 
-`pickup.auto: true` 时，服务自己就是调度器，不用外部 cron、也不用守着敲 `foreman run`：
+`pickup.auto` / `pickup.kickAfterDone` 已成为不再生效的历史配置。代码不会按 pickup cron、执行收工轮询或工单收口自动接单，`run --every` 也已拒绝执行。
 
-- 每 `pickup.intervalSeconds`（默认 1800 = 30 分钟）跑一轮捞单，且只在 `workHours`（工作日 08:30–17:30）里跑；
-- **一张单收口就立刻补下一张，不等 cron**（`pickup.kickAfterDone`，默认开）：合并关单、手动完成、`foreman clean` 收尾
-  三处都会在 3s 后自动补跑一轮同样的 `pickupOnce`——容量、工作时间窗、`run.lock`、节点暂停、`maxPerRound` 全部照旧把关，
-  所以只是把「等下一个 cron 点」换成「槽位一空就接着派」；同一时刻只排一轮（合并后编排再调 clean 不会排第二次），
-  巡检正忙（`busy`）或抢不到 `run.lock` 时 5s 后重试，最多 3 次，槽位满 / 下班只记一行日志不重试；
-  写 `pickup.kickAfterDone: false` 就退回「只在 cron 点巡检」；
-- 起服务 1s 后先跑一轮，重启即开始巡检；同一工单靠账本去重（`working` 状态不会再捞），不会重复派；
-- **同时 2 张单在跑**（`pickup.maxRunning`，默认 2）：在跑 = 账本 `planned`/`working` 且没 `lastFailure`；
-  到顶回 `skipped: "slots-full"`，有空槽才补，每轮最多补 `maxPerRound`（默认 2）条——派活动作本身仍是一条一条来；
-- `pickup.pauseWhileRunning`（默认 `false`）：打开后只要侧边栏里有被监听会话在跑，本轮就不开新会话（旧行为，回落到豆包单实例一次一条）；
-- 和 CLI 的 `foreman run` 抢同一把 `run.lock`：两边同时捞会把同一条单派两次，所以谁先拿到锁谁跑；
-- 只派活、不等结果；跑完的结论仍由 `pollSeconds` 轮询后按 `deliver` 口径投递；
-- `foreman status` 里有 `pickup` 段（`auto/intervalSeconds/maxRunning/inflight/lastAt/count/lastResult`），`foreman pickup` 可手动催一轮。
+- `inspector.enabled` 默认 `true`；起服务 1 秒后投递首轮，之后每 `inspector.intervalSeconds`（默认 600 秒）steer 同一检查会话；
+- 连续 `inspector.recreateAfterHours`（默认 24）小时未成功投递才新建会话；失败本身不会刷新 `lastSentAt`；
+- 检查智能体先 `run --dry-run --once` 核对候选，再决定 `run --once`；优先级仍由 `pickup.priority` 等配置决定，容量为 `pickup.maxRunning`；
+- 显式 `foreman pickup` 会绕过旧 auto 开关与工作时间窗，但保留容量、`run.lock`、节点暂停和账本去重；
+- 执行会话收工由检查智能体或人工 `watch poll` 按需处理，不再有 20 秒代码轮询；
+- `foreman status` 的 `inspector` 段查看会话 id、最近成功/失败投递和下一次时间。
 
 ## 配置
 
@@ -448,12 +445,11 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
     "excludeLabels": ["needs-human", "ready-for-human", "needs-info", "wontfix", "agent-blocked"],
     "onlyUnassigned": true,
     "order": "oldest",
-    "auto": true,
-    "intervalSeconds": 1800,
     "maxRunning": 2,
     "maxPerRound": 2,
     "pauseWhileRunning": false
   },
+  "inspector": { "enabled": true, "intervalSeconds": 600, "recreateAfterHours": 24, "projectDir": "" },
   "workHours": { "enabled": true, "days": [1, 2, 3, 4, 5], "start": "08:30", "end": "17:30", "offUntil": "" },
   "merge": { "enabled": false, "style": "merge", "deleteBranch": true, "concurrency": 1, "intervalSeconds": 60 },
   "deliver": {

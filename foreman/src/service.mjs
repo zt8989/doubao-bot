@@ -35,6 +35,7 @@ import { prWatchOnce, prWatchTarget, mergeFailureReason } from "./prwatch.mjs"
 import { MailDriver, realRecipients } from "./mail.mjs"
 import { acceptanceGate, detectUiChange, mailPollOnce, requestAcceptance } from "./mailflow.mjs"
 import { inflightIssues } from "./planner.mjs"
+import { inspectorOnce } from "./inspector.mjs"
 import { listPulls, mergePr, closeIssue, createPr, commentIssue } from "./gitea.mjs"
 import { ConsoleStore } from "./console.mjs"
 import { listSchedules, applySchedules, persistSchedules, cronOf } from "./schedules.mjs"
@@ -490,49 +491,10 @@ export async function pickupOnce(ctx, { run = runRound, force = false } = {}) {
   }
 }
 
-// kickPickup：一张单收口就立刻补下一张，不等自动巡检的 cron 点。
-// 每张单跑完（合并关单 / 手动完成 / clean 收尾）都调这里；不是另开一条派单通道——
-// 只是把「等下一个 cron」换成「过几秒就跑同一轮 pickupOnce」，容量、工作时间窗、run 锁、
-// 节点暂停、maxPerRound 全部照旧把关，所以不会因为收口接连发生就把队列一次抽干。
-// 防抖：同一时刻只排一轮（合并 + 编排随后 clean 会连着调两次，排一次就够）。
-// 巡检正在跑（busy）或和 CLI 的 foreman run 撞锁时，隔几秒再试，最多 3 次。
-const PICKUP_KICK_RETRY_MS = 5000
-const PICKUP_KICK_MAX_RETRY = 3
-
-export function kickPickup(ctx, reason = "", { delayMs = 0 } = {}) {
-  const { cfg, log = () => {} } = ctx ?? {}
-  if (!ctx || cfg?.pickup?.auto !== true) return false
-  if (cfg?.pickup?.kickAfterDone === false) return false
-  if (ctx.pickupKickTimer) return true
-  const wait = Number(delayMs) || Number(cfg?.pickup?.kickDelayMs) || 3000
-  const retryMs = Number(cfg?.pickup?.kickRetryMs) || PICKUP_KICK_RETRY_MS
-  const fire = async (attempt = 0) => {
-    ctx.pickupKickTimer = null
-    let out
-    try {
-      out = typeof ctx.pickup === "function" ? await ctx.pickup() : await pickupOnce(ctx)
-    } catch (e) {
-      log(`收口续跑失败${reason ? `（${reason}）` : ""}：${e.message}`)
-      return
-    }
-    // 巡检正忙 / 抢不到 run 锁：等它收工再补一次，别把续跑丢了。
-    if ((out?.skipped === "busy" || out?.skipped === "locked") && attempt < PICKUP_KICK_MAX_RETRY) {
-      ctx.pickupKickTimer = setTimeout(() => fire(attempt + 1), retryMs)
-      ctx.pickupKickTimer.unref?.()
-      return
-    }
-    if (out?.skipped) {
-      log(`收口续跑：本轮跳过（${out.skipped}）${reason ? ` · ${reason}` : ""}`)
-      return
-    }
-    log(
-      `收口续跑：接着派了 ${out?.dispatched ?? 0} 条、交给编排 ${out?.handed ?? 0} 条${reason ? `（${reason}）` : ""}`,
-    )
-  }
-  ctx.pickupKickTimer = setTimeout(() => fire(0), wait)
-  ctx.pickupKickTimer.unref?.()
-  log(`收口续跑：${wait / 1000}s 后补一轮巡检${reason ? `（${reason}）` : ""}`)
-  return true
+// 自动接单已移除：收口后不再由代码补单，下一轮由检查智能体判断优先级和空余容量。
+// 保留同名函数是为了兼容旧调用点；它只返回 false，不再创建定时器或调用 pickupOnce。
+export function kickPickup() {
+  return false
 }
 
 // 「待分配任务」列表：配置仓库里的**全部 open 工单**，只做账本去重；接单标签过滤只留给自动巡检。// gitea 列一遍要打三条命令，页面刷新会太吵：这里带 45s 缓存，refresh=true 才强拉。
@@ -613,7 +575,8 @@ export async function candidatesOnce(ctx, { refresh = false } = {}) {
     total,
     errors,
     capacity: { inflight, maxRunning: Number(cfg.pickup?.maxRunning) || 2 },
-    pickup: { auto: cfg.pickup?.auto === true, inWorkHours: inWorkHours(cfg) },
+    // 候选处理只剩显式调用；auto 固定为 false，避免旧配置让状态页误以为仍在自动接单。
+    pickup: { auto: false, legacyAutoConfigured: cfg.pickup?.auto === true, inWorkHours: inWorkHours(cfg) },
   }
   candidateCache = { at: now, payload }
   return { ...payload, cached: false }
@@ -739,6 +702,9 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     // 自动接单巡检运行时
     pickup: { lastAt: null, count: 0, lastResult: null, running: false },
     pickupInterval: null,
+    // 检查智能体巡检运行时（持久会话与成功投递时间在 Book.inspector）
+    inspector: { lastAt: null, count: 0, lastResult: null, running: false, nextAt: "" },
+    inspectorInterval: null,
     // 验收邮件轮询运行时
     mail: { lastPollAt: null, pollCount: 0, polling: false, lastResult: null, nextAt: "" },
     mailInterval: null,
@@ -842,20 +808,15 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   )
   log(`服务已起：pid=${process.pid} http=${ctx.httpUrl} portFile=${paths.portFile}`)
 
-  // 轮询。
+  // 执行收工只保留手动/检查智能体按需触发入口，不再挂代码定时轮询。
   const doPoll = async () => pollOnce(ctx)
-  // 会话轮询**不受工作时间窗限制**：执行会话经常在夜里或清早跑完，
-  // 结论压到 08:30 才投递，对编排会话来说等于没回。
-  // 这条轮询平时只读侧边栏（不切窗口），只有真有新结论时才 goto 一次读 status 并 steer。
-  state.interval = setInterval(() => {
-    doPoll().catch((e) => log(`poll 异常：${e.message}`))
-  }, cfg.pollSeconds * 1000)
-  state.interval.unref?.()
 
   const doPrPoll = async () => prPollOnce(ctx)
   ctx.prPoll = doPrPoll
-  const doPickup = async () => pickupOnce(ctx)
+  const doPickup = async (opts = {}) => pickupOnce(ctx, opts)
   ctx.pickup = doPickup
+  const doInspector = async () => inspectorOnce(ctx)
+  ctx.inspector = async () => inspectorOnce(ctx, { force: true })
   // 验收邮件轮询：读收件箱，按主题里的 [FM-…] 把回复认回 PR 并注回会话。
   // 回复可能在半夜到，所以这条定时器**不受工作时间窗限制**（只读收件箱，不打扰谁）。
   const doMailPoll = async () => {
@@ -885,27 +846,28 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     if (id === "prWatch") return prPollOnce(ctx, { force: true })
     // 验收邮件：立即轮询一次收件箱（不受工作时间窗限制）。
     if (id === "mail") return doMailPoll()
-    // 续接调度跟着会话轮询走，立即执行就是立刻跑一轮轮询（收工的会话该催就催）。
-    if (id === "planner") return pollOnce(ctx)
+    // 立即执行检查智能体巡检：仍然由它决定接单与异常处理。
+    if (id === "inspector") return doInspector()
     throw Object.assign(new Error(`${id} 没有可以立即执行的动作`), { code: "schedule_not_runnable" })
   }
   // 合并不再有定时任务（合并通道已取消）：`foreman pr merge` 当场执行，合完直接返回。
 
-  // PR 扫描（现在是「他人 PR 扫描」）、自动接单都由 cron 驱动：页面上改表达式立刻重排，不用重启服务。
+  // 他人 PR 扫描、验收邮件与检查智能体由 cron 驱动；执行收工和自动接单不再挂代码定时器。
   // 老的 intervalSeconds 仍会读，但没配 cron 时折成分钟级 cron（见 cronOf）。合并通道已取消。
   const armSchedules = () => {
-    for (const k of ["prInterval", "prKick", "pickupInterval", "pickupKick", "mailInterval", "mailKick"]) {
+    for (const k of ["prInterval", "prKick", "pickupInterval", "pickupKick", "mailInterval", "mailKick", "inspectorInterval", "inspectorKick"]) {
       if (state[k]) clearTimeout(state[k])
       state[k] = null
     }
     state.pr.nextAt = ""
     state.pickup.nextAt = ""
     state.mail.nextAt = ""
+    state.inspector.nextAt = ""
 
     const TIMERS = {
       pr: ["prInterval", "他人 PR 扫描"],
-      pickup: ["pickupInterval", "自动巡检"],
       mail: ["mailInterval", "验收邮件轮询"],
+      inspector: ["inspectorInterval", "检查智能体巡检"],
     }
     const armOne = (kind, expr, run) => {
       const [timerKey, label] = TIMERS[kind]
@@ -940,15 +902,14 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
       state.prKick.unref?.()
     }
 
-    // 自动接单巡检：pickup.auto===true 才起，且只在 workHours 内跑。
-    if (cfg.pickup?.auto === true) {
-      armOne("pickup", cronOf(cfg, "pickup"), doPickup)
-      // 开启后 1s 先跑一轮：页面上点开就不用等到下一个 cron 点（同一条单靠账本去重，不会重复派）。
-      state.pickupKick = setTimeout(() => {
-        if (!inWorkHours(cfg)) return
-        doPickup().catch((e) => log(`自动巡检异常：${e.message}`))
+    // 自动接单已交由检查智能体决策：这里不再挂 pickup 定时器。
+    // 检查智能体：每 10 分钟 steer 同一条会话；24 小时未成功投递由 inspectorOnce 轮换。
+    if (cfg.inspector?.enabled === true) {
+      armOne("inspector", cronOf(cfg, "inspector"), doInspector)
+      state.inspectorKick = setTimeout(() => {
+        doInspector().catch((e) => log(`检查智能体巡检异常：${e.message}`))
       }, 1000)
-      state.pickupKick.unref?.()
+      state.inspectorKick.unref?.()
     }
 
     // 验收邮件轮询：mail.enabled===true 才起；起服务 1s 后先收一轮，不用等下一个 cron 点。
@@ -995,6 +956,8 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     if (state.pickupKick) clearTimeout(state.pickupKick)
     if (state.mailInterval) clearTimeout(state.mailInterval)
     if (state.mailKick) clearTimeout(state.mailKick)
+    if (state.inspectorInterval) clearTimeout(state.inspectorInterval)
+    if (state.inspectorKick) clearTimeout(state.inspectorKick)
     if (state.mergeInterval) clearTimeout(state.mergeInterval)
     if (state.mergeKick) clearTimeout(state.mergeKick)
     await new Promise((r) => consoleHttp.server.close(r))
@@ -1013,7 +976,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   ctx.close = close
   ctx.poll = doPoll
 
-  return { server: consoleHttp.server, close, poll: doPoll, prPoll: doPrPoll, pickup: doPickup, port, portFile: paths.portFile, http: ctx.httpUrl }
+  return { server: consoleHttp.server, close, poll: doPoll, prPoll: doPrPoll, pickup: doPickup, inspector: doInspector, port, portFile: paths.portFile, http: ctx.httpUrl }
 }
 
 // PR 扫描一轮：配置里每个仓库列 open PR → 过滤作者 → 去重 → 通知最早登记的调用方。
@@ -1511,7 +1474,7 @@ export async function runMergeTask(ctx, task = {}) {
   log(`合并通道：已合并 ${repo}#${pr}（${key}）${resolvedNo ? `，关单 #${resolvedNo}` : ""} · ${where}`)
   // 合并结果不主动推消息给编排会话：收尾（关单、clean）由编排智能体自己主动调用，
   // 结果只落账本 + 控制台（foreman tasks / merge 记录 / 控制台「操作日志」）。
-  // 这张单合完就空出一个槽：立刻补下一张，不等自动巡检的 cron（pickup.kickAfterDone，默认开）。
+  // 兼容旧调用点；kickPickup 现在固定返回 false，不再由代码补单。
   // 只认真的关单（resolvedNo）：别人的 PR / 只是合了 PR 没关联工单的，不占接单名额也不续跑。
   if (resolvedNo) kickPickup(ctx, `${resolvedKey} 合并关单`)
   return { ok: true, alreadyMerged, notes, repo, issueKey: resolvedKey, worktree, branch }
@@ -2060,7 +2023,12 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     }
     try {
       // 用户自主发起的会话调 hand：它自己就是这条单的编排，不再另起全局编排会话。
-      return ok(await handToOrchestrator(ctx, { repoCfg, issue, orchestrator: String(req.orchestrator ?? "").trim() }))
+      return ok(await handToOrchestrator(ctx, {
+        repoCfg,
+        issue,
+        orchestrator: String(req.orchestrator ?? "").trim(),
+        fresh: req.fresh === true,
+      }))
     } catch (e) {
       return fail(e.code === "app_unavailable" ? "app_unavailable" : "hand-failed", e.message)
     }
@@ -2350,6 +2318,27 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     return ok({ repo, number, commented: true })
   }
 
+  if (cmd === "issue settle") {
+    const repo = String(req.repo ?? "").trim()
+    const number = Number(req.number ?? 0)
+    const note = String(req.note ?? "").trim()
+    if (!repo || !number) return fail("bad-request", "issue settle 需要 repo / number")
+    if (!note) return fail("bad-request", "issue settle 必须用 --note 写明完成依据")
+    const key = `${repo}#${number}`
+    const book = new Book(ctx.cfg.stateFile)
+    if (!book.issue(key)) return fail("bad-request", `账本里没有这条单：${key}`)
+    book.setIssue(key, {
+      state: "done",
+      settledAt: nowIso(),
+      settledBy: "inspector",
+      settleNote: note.slice(0, 1000),
+    })
+    ctx.consoleStore?.event({ kind: "issue_settled", key, repo, number, detail: note.slice(0, 200) })
+    try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
+    ctx.log?.(`检查智能体本地完成 ${key}：${note}（不关远端、不清工作区）`)
+    return ok({ key, state: "done", remoteClosed: false, workspaceCleaned: false })
+  }
+
   if (cmd === "issue complete") {
     const repo = String(req.repo ?? "").trim()
     const number = Number(req.number ?? 0)
@@ -2439,14 +2428,15 @@ export async function handleRequest(ctx, req) {  const id = req?.id
         waitFirstReply: ctx.cfg.deliver?.waitFirstReply === true,
       },
       pickup: {
-        auto: ctx.cfg.pickup?.auto === true,
+        auto: false,
+        legacyAutoConfigured: ctx.cfg.pickup?.auto === true,
         intervalSeconds: ctx.cfg.pickup?.intervalSeconds,
         maxPerRound: ctx.cfg.pickup?.maxPerRound,
         maxRunning: ctx.cfg.pickup?.maxRunning,
         handToOrchestrator: ctx.cfg.pickup?.handToOrchestrator !== false,
-        // 收口即续跑：true 表示工单收口后自动补一轮，不等 pickup.cron。
-        kickAfterDone: ctx.cfg.pickup?.kickAfterDone !== false,
-        kickPending: Boolean(ctx.pickupKickTimer),
+        // 收口自动补单已移除；旧配置仅保留兼容读取，不产生影响。
+        kickAfterDone: false,
+        kickPending: false,
         inflight: inflightIssues(new Book(ctx.cfg.stateFile)).length,
         lastAt: ctx.state.pickup?.lastAt ?? null,
         count: ctx.state.pickup?.count ?? 0,
@@ -2489,6 +2479,11 @@ export async function handleRequest(ctx, req) {  const id = req?.id
         pollCount: ctx.state.pr?.pollCount ?? 0,
         notifiedCount: ctx.state.pr?.notifiedCount ?? 0,
         pending: ctx.state.pr?.pending ?? 0,
+      },
+      inspector: {
+        ...(new Book(ctx.cfg.stateFile).data.inspector ?? {}),
+        running: ctx.state.inspector?.running === true,
+        nextAt: ctx.state.inspector?.nextAt ?? "",
       },
       // 验收邮件：testers 还是占位符时 recipients=[]，此时不挡合并（沿用人工验收）。
       mail: {
@@ -2570,9 +2565,15 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     return ok(r)
   }
 
-  // 手动催一轮自动巡检（不用等下一个间隔）。
+  if (cmd === "inspect") {
+    const r = typeof ctx.inspector === "function" ? await ctx.inspector() : await inspectorOnce(ctx, { force: true })
+    if (!r.ok) return fail("inspector-failed", r.error || "检查智能体投递失败")
+    return ok(r)
+  }
+
+  // 手动催一轮候选处理；自动定时接单已移除，调用方通常是检查智能体。
   if (cmd === "pickup") {
-    const r = await ctx.pickup()
+    const r = await ctx.pickup({ force: true })
     return ok(r)
   }
 

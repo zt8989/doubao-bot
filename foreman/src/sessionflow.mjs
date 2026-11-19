@@ -119,14 +119,14 @@ export async function ensureOrchestrator(ctx, { name = "" } = {}) {
 
 // 一张自动巡检工单一条编排会话。hand 时把编排职责和工单合进首句，一次发出；
 // 已有绑定直接复用，不重复开会话，也不再 steer 工单。
-export async function ensureIssueOrchestrator(ctx, { issueKey, repoCfg = null, issue = null, withTicket = false } = {}) {
+export async function ensureIssueOrchestrator(ctx, { issueKey, repoCfg = null, issue = null, withTicket = false, fresh = false } = {}) {
   const { cfg, dws, log = () => {} } = ctx
   const key = String(issueKey ?? "").trim()
   if (!key) throw new Error("issueKey 不能为空，无法绑定工单编排会话")
   const book = new Book(cfg.stateFile)
   const prev = book.issue(key) ?? {}
   const existing = String(prev.orchestrator ?? "").trim()
-  if (existing) {
+  if (existing && !fresh) {
     const name = Object.entries(book.sessions ?? {}).find(([, s]) => String(s?.convId ?? "") === existing)?.[0]
       || issueOrchestratorName(cfg, key)
     return { ok: true, reused: true, created: false, convId: existing, name }
@@ -135,11 +135,13 @@ export async function ensureIssueOrchestrator(ctx, { issueKey, repoCfg = null, i
     throw Object.assign(new Error("会话适配器没有 openNew，起不了工单编排会话"), { code: "no-session-adapter" })
   }
 
-  const name = issueOrchestratorName(cfg, key)
+  const name = fresh
+    ? `${issueOrchestratorName(cfg, key)}-重派-${nowIso().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z")}`
+    : issueOrchestratorName(cfg, key)
   let prompt = orchestratorPrompt(ctx, { issueKey: key, issue })
   if (withTicket) {
     if (!repoCfg?.repo) throw new Error("合并编排与工单首句时缺 repoCfg.repo")
-    prompt = `${prompt}\n\n---\n\n${ticketText({ repo: repoCfg.repo, issue })}`
+    prompt = `${prompt}\n\n---\n\n${ticketText({ repo: repoCfg.repo, issue, fresh })}`
   }
   const noWait = cfg?.sessionFlow?.waitFirstReply !== true
   const out = await dws.openNew({ name, prompt, noWait })
@@ -266,11 +268,12 @@ export function bindWorker(book, { issueKey, name, convId, orchestrator = "", no
 }
 
 // 交给编排会话的工单正文：只给决策输入与四个下一步，不把实现塞进编排。
-export function ticketText({ repo, issue, orchestrator = "" } = {}) {
+export function ticketText({ repo, issue, orchestrator = "", fresh = false } = {}) {
   const key = `${repo}#${issue?.number}`
   const lines = [`【foreman · 编排会话 · 收到工单】${key} ${String(issue?.title ?? "")}`.trim()]
   lines.push(`工单键：${key}`)
   if (orchestrator) lines.push(`编排会话：${orchestrator}`)
+  if (fresh) lines.push("改派原因：检查智能体确认原编排无法继续。请接手工单，先核对现有执行会话与账本，再决定是否续跑或重新 dispatch；不要重复开执行会话。")
   lines.push("", "工单正文：", String(issue?.body ?? "").trim() || "（正文为空，按标题理解）")
   lines.push(
     "",
@@ -285,7 +288,7 @@ export function ticketText({ repo, issue, orchestrator = "" } = {}) {
 
 // 把一张工单交给它自己的编排：新建时首句同时包含编排职责与完整工单，不再单独 steer。
 // 已有绑定说明首句已经发过；调用方会话自己发起了 hand，也已经持有工单上下文。
-export async function handToOrchestrator(ctx, { repoCfg, issue, orchestrator = "" } = {}) {
+export async function handToOrchestrator(ctx, { repoCfg, issue, orchestrator = "", fresh = false } = {}) {
   const { cfg, log = () => {} } = ctx
   const gitea = ctx.gitea ?? realGitea
   const key = `${repoCfg.repo}#${Number(issue?.number)}`
@@ -298,8 +301,8 @@ export async function handToOrchestrator(ctx, { repoCfg, issue, orchestrator = "
       log(`${key}：读工单正文失败（只按标题交）：${e.message}`)
     }
   }
-  const caller = String(orchestrator ?? ctx.orchestrator ?? "").trim()
-  const convId = caller || (await ensureIssueOrchestrator(ctx, { issueKey: key, repoCfg, issue: detail, withTicket: true })).convId
+  const caller = fresh ? "" : String(orchestrator ?? ctx.orchestrator ?? "").trim()
+  const convId = caller || (await ensureIssueOrchestrator(ctx, { issueKey: key, repoCfg, issue: detail, withTicket: true, fresh })).convId
   const book = new Book(cfg.stateFile)
   const prev = book.issue(key) ?? {}
   book.setIssue(key, {
@@ -309,6 +312,7 @@ export async function handToOrchestrator(ctx, { repoCfg, issue, orchestrator = "
     title: String(issue.title ?? detail.title ?? ""),
     url: String(issue.url ?? detail.url ?? ""),
     orchestrator: convId,
+    ...(fresh && prev.orchestrator && prev.orchestrator !== convId ? { previousOrchestrator: prev.orchestrator } : {}),
     handedAt: nowIso(),
     attempts: Number(prev.attempts ?? 0) || 0,
   })

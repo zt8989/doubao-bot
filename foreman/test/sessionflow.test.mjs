@@ -161,6 +161,30 @@ test("自动巡检：每张工单各建独立编排并绑定，重复交同一�
   }
 })
 
+test("fresh hand：检查智能体显式要求时才重开独立编排，普通 hand 仍复用", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-fresh-hand-"))
+  try {
+    const cfg = mkCfg(dir)
+    const repo = mkRepo(dir, "demo")
+    cfg.repos = [repo]
+    const dws = mkDws()
+    const issue = { number: 7, title: "失联编排", body: "核对后重新分配" }
+    const ctx = { cfg, dws, log: () => {}, gitea: { viewIssue: async () => issue } }
+
+    const first = await handToOrchestrator(ctx, { repoCfg: repo, issue })
+    const reused = await handToOrchestrator(ctx, { repoCfg: repo, issue })
+    const fresh = await handToOrchestrator(ctx, { repoCfg: repo, issue, fresh: true })
+
+    assert.equal(reused.convId, first.convId)
+    assert.notEqual(fresh.convId, first.convId)
+    assert.equal(dws.calls.openNew.length, 2)
+    assert.equal(new Book(cfg.stateFile).issue("yyzl/demo#7").orchestrator, fresh.convId)
+    assert.match(dws.calls.openNew[1].prompt, /改派原因|重新分配|接手工单/)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("dispatch：工作会话 id 绑到编排会话（账本 + 会话记录都要对得上）", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-dispatch-"))
   try {

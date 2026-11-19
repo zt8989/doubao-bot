@@ -25,6 +25,9 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman watch list [-c] [--no-service]
   foreman watch rm <会话id|标题> [-c] [--no-service]
   foreman watch poll [-c] [--no-service]
+  foreman hand <owner/name>#<N> [--fresh]   --fresh 强制重派这条单的独立编排
+  foreman inspect                          立即 steer 检查智能体巡检一轮
+  foreman issue settle <N> --repo R --note <完成依据>   仅本地完成，不关远端、不清工作区
   foreman pr list [-c] [--no-service]
   foreman pr poll [-c] [--no-service]
   foreman pr open --repo R --base <基线> --head <分支> --title <标题> [--body <正文>] [--issue <单号>] [--issue-repo <工单所在仓库>] [--ui]
@@ -39,7 +42,7 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman ws list --issue <owner/name>#<单号>
   foreman issue comment <N> --repo R --body <正文>
   foreman issue close <N> --repo R
-  foreman run   [--once] [--dry-run] [--direct] [--repo <名字|owner/name>] [--every <秒>] [--notify <会话id|标题>] [--no-notify] [-c <配置>]
+  foreman run   [--once] [--dry-run] [--direct] [--repo <名字|owner/name>] [--notify <会话id|标题>] [--no-notify] [-c <配置>]
   foreman orch start [--name <会话名>]   起/复用全局编排会话（幂等；只有自动接单用这条）
   foreman orch show                    看每条编排会话绑了哪些工作会话、最近 steer 了什么
   foreman sessions [--orchestrator <id>]  查当前会话分配出去的所有会话（默认取当前豆包会话）
@@ -345,6 +348,13 @@ async function cmdIssue(pos, flags) {
     if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
     return out({ ok: true, ...r })
   }
+  if (sub === "settle") {
+    const note = strFlag(flags.note).trim()
+    if (!note) throw new Error("issue settle 需要 --note <完成依据>；它只改本地账本，不关远端、不清工作区")
+    const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "issue settle", repo, number, note }, 60000)
+    if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
+    return out({ ok: true, ...r })
+  }
   if (sub === "close") {
     const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "issue close", repo, number }, 300000)
     if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
@@ -362,6 +372,7 @@ async function cmdPickup(pos, flags) {
 }
 
 async function cmdRun(pos, flags) {
+  if (flags.every !== undefined) throw new Error("run --every 已移除：代码不再自动接单；请由检查智能体决策后调用 run --once")
   const cfg = loadConfig(flags.config)
   if (!cfg.repos.length) throw new Error("配置里没有 repos，先写一条：{\"repo\":\"owner/name\",\"dir\":\"~/Documents/workspace/<repo>\"}")
   // --notify <目标> / --no-notify 只管本轮派出去的会话要不要登记监听。
@@ -390,15 +401,8 @@ async function cmdRun(pos, flags) {
 
   try {
     const handled = []
-    do {
-      const round = await runRound(ctx)
-      handled.push(...round)
-      if (!flags.every || flags.every === true) break
-      const every = Number(flags.every)
-      if (!Number.isFinite(every) || every <= 0) break
-      ctx.log(`这一轮结束，${every}s 后跑下一轮`)
-      await sleep(every * 1000)
-    } while (!ctx.once)
+    const round = await runRound(ctx)
+    handled.push(...round)
 
     out({
       ok: true,
@@ -648,7 +652,15 @@ async function cmdHand(pos, flags) {
   if (!ref) throw new Error("用法：foreman hand <owner/name>#<单号>")
   const cfg = loadConfig(flags.config)
   const port = await resolvePort(cfg)
-  const r = await callRaw(port, { id: "cli", cmd: "hand", issue: ref, ...orchestratorArg(flags) }, 600000)
+  const r = await callRaw(port, { id: "cli", cmd: "hand", issue: ref, fresh: flags.fresh === true, ...orchestratorArg(flags) }, 600000)
+  if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
+  return out({ ok: true, ...r })
+}
+
+async function cmdInspect(pos, flags) {
+  const cfg = loadConfig(flags.config)
+  const port = await resolvePort(cfg)
+  const r = await callRaw(port, { id: "cli", cmd: "inspect" }, 300000)
   if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
   return out({ ok: true, ...r })
 }
@@ -751,6 +763,8 @@ async function main() {
       return cmdSessions(pos, flags)
     case "hand":
       return cmdHand(pos, flags)
+    case "inspect":
+      return cmdInspect(pos, flags)
     case "dispatch":
       return cmdDispatch(pos, flags)
     case "resume":
