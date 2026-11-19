@@ -1001,9 +1001,14 @@ footer {
   .session-cell, .session-name { min-width: 0; }
   .session-name { overflow-wrap: anywhere; }
 
+  /* 会话表在手机上只留「会话 / 真实状态 / 详情」，其余列会让表格横向拉长 */
+  table.tasks th.col-role, table.tasks td.col-role,
+  table.tasks th.col-pr, table.tasks td.col-pr,
+  table.session-table th:nth-child(4), table.session-table td.branch-cell { display: none; }
+
   /* 面板标题、表单：竖排，别把按钮挤出屏幕 */
-  .panel-head { flex-wrap: wrap; align-items: flex-start; gap: 8px; }
-  .panel-side { width: 100%; flex-wrap: wrap; }
+  .panel-head { flex-direction: column; align-items: stretch; gap: 8px; }
+  .panel-side { width: 100%; flex-wrap: wrap; justify-content: flex-start; }
   .schedule-title { flex-wrap: wrap; gap: 8px; }
   .schedule-definition > div { grid-template-columns: 1fr; gap: 4px; }
   .schedule-edit-form, .schedule-agent-input { width: 100%; }
