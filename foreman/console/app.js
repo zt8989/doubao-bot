@@ -854,7 +854,11 @@ class FmSchedules extends LitElement {
         args,
       }
     }
-    if (schedule.agent) patch.agent = { prompt: value("agent-prompt")?.value ?? "" }
+    if (schedule.agent) {
+      patch.agent = { prompt: value("agent-prompt")?.value ?? "" }
+      // 只有自定义 Agent 任务才有 cwd；内置（如 dreaming）不带这个字段，别顺手改掉。
+      if (schedule.agent.custom) patch.agent.cwd = value("agent-cwd")?.value.trim() ?? ""
+    }
     this.formError = ""
     emit(this, "schedule-save", { id: schedule.id, patch: { [schedule.id]: patch } })
   }
@@ -891,6 +895,7 @@ class FmSchedules extends LitElement {
               </div>
               <div class="sched-meta">
                 ${s.cron !== undefined ? html`<span class="pr-note">cron ${s.cron}</span>` : ""}
+                ${s.cwd ? html`<span class="pr-note" title=${s.cwd}>cwd ${s.cwd}</span>` : ""}
                 ${s.nextAt ? html`<span class="pr-note">下次 ${s.nextAt}</span>` : ""}
                 ${s.lastAt ? html`<span class="pr-note">上次 ${s.lastAt}</span>` : ""}
                 ${s.count ? html`<span class="pr-note">已跑 ${s.count} 轮</span>` : ""}
@@ -943,7 +948,20 @@ class FmSchedules extends LitElement {
         ${editing
           ? html`<textarea class="schedule-agent-input" data-schedule-field="agent-prompt" rows="20" spellcheck="false" .value=${agent.prompt}></textarea>`
           : html`<pre class="schedule-prompt">${agent.prompt}</pre>`}
-      </section>`
+      </section>
+      ${agent.custom ? html`<section class="schedule-config-section">
+        <h3>工作目录</h3>
+        ${editing
+          ? html`
+            <label class="schedule-field">
+              <span>cwd</span>
+              <input data-schedule-field="agent-cwd" spellcheck="false" .value=${agent.cwd || ""} placeholder="留空 = 脚本所在位置（foreman 包目录）" />
+              <small>到点投递的提示词会写明这个目录；记日志、写文件按它定位。留空即用默认。</small>
+            </label>`
+          : html`<dl class="schedule-definition">
+              <div><dt>工作目录</dt><dd><code>${agent.cwd || "脚本所在位置（默认）"}</code></dd></div>
+            </dl>`}
+      </section>` : ""}`
   }
   renderDetail(schedule) {
     const result = resultText(schedule.lastResult) || (schedule.lastResult && typeof schedule.lastResult === "object" ? JSON.stringify(schedule.lastResult) : "")

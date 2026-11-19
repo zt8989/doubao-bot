@@ -270,7 +270,7 @@ Inbox、Outbox 与 ConsoleStore 共用 `~/.foreman/console.db` 的同一连接�
   - `GET /api/schedules` 返回同一份状态，脚本/CLI 也可用。
   - **自定义 Agent 型定时任务**：旧 `config.json` 的 `agentSchedules` 会在首次初始化时迁入 SQLite，之后以 `agent_schedules` 中的定义为准；每条包含
     `{ "id", "label", "cron", "enabled": true, "prompt", "cwd", "detail" }`，列表独立成行，徽标是 **Agent**。
-    `cwd` 是这条任务的工作目录：省略就等于脚本所在位置（`foreman/` 包目录），`~` 会展开、相对路径按包目录解析；
+    `cwd` 是这条任务的工作目录：省略就等于脚本所在位置（当前运行的 foreman 包目录，发布后是 `dist/foreman`，从源码跑则是 `foreman/`），`~` 会展开、相对路径按包目录解析；
     到点投递的提示词里会写明这个目录，记日志、写文件都按它定位。改 `cwd` 也走 `agent.cwd` 补丁，传空串即回默认。
     到点由服务用 `dws open --no-wait` 新开一条 `foreman-<id>-<时间戳>` 会话，把提示词作为首句投递；
     不投给 router agent、不写 Inbox，跑完在会话里直接给最终回复。id 不能与内置任务重名。
