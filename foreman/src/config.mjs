@@ -62,8 +62,8 @@ export const DEFAULTS = {
     // 只确认首句送达、不等回复（等回复会把服务轮询拖死）。
     waitFirstReply: false,
   },
-  // 路由智能体：Foreman 只定时 queue 同一条会话，不自行收工或接单。
-  // 24 小时连续未成功投递才新建路由会话；巡检不限制工作时间窗。
+  // 执行会话代码轮询：每 intervalSeconds 运行一次 pollOnce，不定时调用 Agent。
+  // router agent 只处理按需通知；24 小时连续未成功投递才新建路由会话。
   router: {
     enabled: true,
     intervalSeconds: 600,

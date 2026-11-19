@@ -3,7 +3,7 @@
 import fs from "node:fs"
 import { inWorkHours } from "./util.mjs"
 import { validateCron } from "./cron.mjs"
-import { agentExecutor, normalizeAgentExecutor, normalizeScriptExecutor, scriptExecutor } from "./executors.mjs"
+import { normalizeScriptExecutor, scriptExecutor } from "./executors.mjs"
 
 const pad = (n) => String(n).padStart(2, "0")
 
@@ -49,7 +49,6 @@ export function listSchedules(cfg, state = {}) {
   const paused = offUntil ? new Date(offUntil).getTime() > Date.now() : false
   const prw = cfg?.prWatch ?? {}
   const r = cfg?.router ?? cfg?.inspector ?? {}
-  const routerState = state.router ?? state.inspector ?? {}
   return [
     {
       id: "prWatch",
@@ -89,20 +88,20 @@ export function listSchedules(cfg, state = {}) {
     },
     {
       id: "router",
-      label: "路由智能体巡检",
+      label: "执行会话轮询",
       enabled: r.enabled !== false,
       cron: cronOf(cfg, "router"),
-      executor: "agent",
-      agent: agentExecutor(cfg),
-      nextAt: routerState.nextAt || "",
+      executor: "script",
+      script: scriptExecutor(cfg, "router"),
+      nextAt: state.router?.nextAt || "",
       intervalSeconds: Number(r.intervalSeconds ?? 600),
-      detail: `每 ${Math.round(Number(r.intervalSeconds ?? 600) / 60)} 分钟直接调用同一路由 Agent；由智能体按优先级和上限接单，成功投递不写 Inbox，失败写结构化事件 · 连续 ${Number(r.recreateAfterHours ?? 24)} 小时投递失败才换会话 · 不受工作时间窗限制`,
-      lastAt: routerState.lastAt || "",
-      count: Number(routerState.count ?? 0),
-      lastResult: routerState.lastResult ?? null,
+      detail: `每 ${Math.round(Number(r.intervalSeconds ?? 600) / 60)} 分钟由代码轮询已登记执行会话；状态变化写 task.update，普通检查完成不写 Inbox · 不定时调用 Agent，不自动接单 · 不受工作时间窗限制`,
+      lastAt: state.lastPollAt || "",
+      count: Number(state.pollCount ?? 0),
+      lastResult: state.lastPollResult ?? null,
       runnable: true,
-      runLabel: "立即巡检",
-      running: routerState.running === true,
+      runLabel: "立即轮询",
+      running: state.polling === true,
     },
     {
       id: "workHours",
@@ -166,10 +165,9 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
       if (!v.ok) throw new Error(`${id} 的 cron 不合法：${v.error}`)
       next.cron = v.expression
     }
-    if ("script" in obj && !["prWatch", "mail"].includes(id)) throw new Error(`${id} 不是脚本执行器`)
-    if ("agent" in obj && id !== "router") throw new Error(`${id} 不是 Agent 执行器`)
+    if ("script" in obj && !["prWatch", "mail", "router"].includes(id)) throw new Error(`${id} 不是脚本执行器`)
+    if ("agent" in obj) throw new Error(`${id} 不是 Agent 执行器`)
     if ("script" in obj) next.script = normalizeScriptExecutor(obj.script, cfg, id)
-    if ("agent" in obj) next.agent = normalizeAgentExecutor(obj.agent)
     if (id === "prWatch") {
       cfg.prWatch = { ...(cfg.prWatch ?? {}) }
       if ("enabled" in next) cfg.prWatch.enabled = next.enabled
@@ -184,7 +182,7 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
       cfg.router = { ...(cfg.router ?? {}) }
       if ("enabled" in next) cfg.router.enabled = next.enabled
       if ("cron" in next) cfg.router.cron = next.cron
-      if ("agent" in next) cfg.router.agent = next.agent
+      if ("script" in next) cfg.router.script = next.script
     } else if (id === "workHours") {
       if ("days" in obj || "start" in obj || "end" in obj) cfg.workHours = { ...(cfg.workHours ?? {}), ...normalizeWorkHours(obj, cfg) }
       if ("enabled" in next) cfg.workHours = { ...(cfg.workHours ?? {}), offUntil: next.enabled ? "" : localIso(nextWorkdayStart(cfg, at)) }
@@ -217,7 +215,6 @@ export function persistSchedules(file, patch = {}, cfg = {}) {
       if ("enabled" in obj) section[FLAG_KEY[id]] = obj.enabled === true || obj.enabled === "true"
       if ("cron" in obj) section.cron = String(cfg?.[id]?.cron ?? obj.cron)
       if ("script" in obj) section.script = { ...cfg[id].script, args: { ...cfg[id].script.args } }
-      if ("agent" in obj) section.agent = { ...cfg.router.agent }
     }
     raw[id] = section
   }
