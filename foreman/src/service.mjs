@@ -693,6 +693,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     pollSeconds: cfg.pollSeconds,
     watchers: new Map(), // target -> watcher 运行时记录
     lastPollAt: null,
+    lastPollResult: null,
     pollCount: 0,
     notifiedCount: 0,
     dwsErrors: 0,
@@ -814,7 +815,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   )
   log(`服务已起：pid=${process.pid} http=${ctx.httpUrl} portFile=${paths.portFile}`)
 
-  // 执行收工只保留手动/router agent按需触发入口，不再挂代码定时轮询。
+  // 执行收工由 router Schedule 每 10 分钟直接运行这段代码，也保留手动轮询入口。
   const doPoll = async () => pollOnce(ctx)
 
   const doPrPoll = async () => prPollOnce(ctx)
@@ -838,8 +839,8 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
       type: envelope.type, convId,
     }
   }
-  // 定时与手动巡检都直接调用 Agent；成功 queued 不产生 Inbox 回执。
-  const doRouter = async () => scheduler.runNow("router")
+  // 手动 route 才调用 Agent；10 分钟 Schedule 走下面的 pollOnce 脚本。
+  const doRouter = async () => routerOnce(ctx, { force: true, scheduled: true })
   ctx.router = doRouter
   ctx.inspector = ctx.router // 旧 RPC 兼容；公开名称统一为 router agent。
   // PR 候选只持久化到 Inbox；Worker 负责合并、投递、失败重试，扫描器不直接调用 Agent。
@@ -905,7 +906,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     retryMs: Number(cfg.inbox?.retrySeconds ?? 30) * 1000,
     leaseMs: Number(cfg.inbox?.leaseSeconds ?? 900) * 1000,
     handlers: {
-      // 兼容旧的定时 router 事件；新巡检由 Schedule 的 agent 执行器直接调用。
+      // 兼容旧的定时 router 事件；新定时轮询由 Schedule 的 script 执行器运行 pollOnce。
       router: ({ scheduled, notices }) => routerOnce(ctx, { force: true, scheduled, notices }),
       "mail.reply": (event) => deliverMailReply(ctx, event),
       "task.update": async (batch) => {
@@ -928,7 +929,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     executors: {
       prWatch: { type: "script", run: (_, { manual }) => runConfiguredScript(ctx, "prWatch", { manual }) },
       mail: { type: "script", run: () => recordMailPoll(() => runConfiguredScript(ctx, "mail")) },
-      router: { type: "agent", run: () => routerOnce(ctx, { force: true, scheduled: true }) },
+      router: { type: "script", run: () => runConfiguredScript(ctx, "router") },
     },
     allow: (schedule) => schedule.id !== "prWatch" || inWorkHours(cfg),
     onChange: syncScheduleState,
@@ -939,7 +940,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     scheduler.sync([
       { id: "prWatch", kind: "prWatch", executor: "script", cron: cronOf(cfg, "prWatch"), enabled: cfg.prWatch?.enabled === true },
       { id: "mail", kind: "mail", executor: "script", cron: cronOf(cfg, "mail"), enabled: cfg.mail?.enabled === true },
-      { id: "router", kind: "router", executor: "agent", cron: cronOf(cfg, "router"), enabled: (cfg.router ?? cfg.inspector)?.enabled === true },
+      { id: "router", kind: "router", executor: "script", cron: cronOf(cfg, "router"), enabled: (cfg.router ?? cfg.inspector)?.enabled === true },
       // 停用旧持久 Schedule；旧 Inbox 事件仍由 router handler 兼容消费。
       { id: "inspector", kind: "inspector", executor: "agent", cron: cronOf(cfg, "router"), enabled: false },
     ])
@@ -1347,6 +1348,7 @@ export async function pollOnce(ctx) {
     }
     state.lastPollAt = nowIso()
     state.pollCount++
+    state.lastPollResult = `检查 ${out.checked} · 收工 ${out.settled} · 新入箱 ${out.enqueued ?? 0}`
   } finally {
     state.polling = false
   }

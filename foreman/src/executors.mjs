@@ -8,6 +8,7 @@ const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 const SCRIPT_DEFAULTS = {
   prWatch: { path: "src/service.mjs", exportName: "prPollOnce", args: {} },
   mail: { path: "src/mailflow.mjs", exportName: "mailPollOnce", args: {} },
+  router: { path: "src/service.mjs", exportName: "pollOnce", args: {} },
 }
 
 const object = (value) => value && typeof value === "object" && !Array.isArray(value)

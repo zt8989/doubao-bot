@@ -204,7 +204,7 @@ test("inspect RPC：直接调用 router agent 并返回执行结果", async () =
   }
 })
 
-test("服务 Schedule 直接唤醒路由 Agent，成功 queued 不写 Inbox 噪音", async () => {
+test("服务 Schedule 用代码轮询执行会话，手动 route 仍调用路由 Agent", async () => {
   const f = fixture()
   Object.assign(f.cfg, {
     router: { enabled: true, intervalSeconds: 600, recreateAfterHours: 24 },
@@ -223,13 +223,27 @@ test("服务 Schedule 直接唤醒路由 Agent，成功 queued 不写 Inbox 噪�
     repos: [],
   })
   let server
+  let pollCalls = 0
+  f.dws.runningMap = async () => {
+    pollCalls++
+    return {}
+  }
   try {
     server = await startServer({ cfg: f.cfg, dws: f.dws, log() {} })
     assert.equal(f.opened.length, 0, "Schedule 同步时不得直接调用 Agent")
     assert.equal(f.queued.length, 0)
-    await server.schedules.tick(new Date())
-    assert.equal(f.opened.length, 1, "Schedule 的 agent 执行器直接创建路由会话")
-    assert.equal(server.inbox.count(), 0, "queued 只是投递回执，不是有效 Inbox 信息")
+    const fired = await server.schedules.tick(new Date())
+    assert.equal(f.opened.length, 0, "十分钟 Schedule 不再创建或唤醒路由会话")
+    assert.equal(f.queued.length, 0)
+    assert.equal(pollCalls, 1, "Schedule 直接运行 pollOnce")
+    assert.equal(fired[0].executor, "script")
+    assert.equal(fired[0].kind, "schedule.noop")
+    assert.equal(server.inbox.count(), 0, "没有任务活动时只轮询，不写完成回执")
+    assert.equal(server.schedules.store.schedules().find((s) => s.id === "router").payload.executor, "script")
+
+    const manual = await server.router()
+    assert.equal(manual.ok, true)
+    assert.equal(f.opened.length, 1, "显式 route 仍保留 Agent 通道")
     await server.worker.idle()
     assert.equal(server.inbox.count(), 0)
   } finally {

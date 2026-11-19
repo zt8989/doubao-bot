@@ -106,7 +106,7 @@ export async function routerOnce(ctx, { now = new Date(), force = false, notice 
     const sections = []
     if (includeScheduled) {
       sections.push([
-        "【Foreman · router agent · 10分钟巡检】",
+        "【Foreman · router agent · 按需巡检】",
         await inspectionSnapshot(ctx),
       ].join("\n\n"))
     }

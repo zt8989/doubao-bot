@@ -16,21 +16,20 @@ const baseCfg = () => ({
   workHours: { enabled: true, days: [1, 2, 3, 4, 5], start: "08:30", end: "17:30", offUntil: "" },
 })
 
-test("listSchedules：保留 PR/邮件，router agent取代自动接单与执行收工轮询", () => {
+test("listSchedules：router 每十分钟运行代码轮询", () => {
   const cfg = baseCfg()
   const rows = listSchedules(cfg)
   assert.deepEqual(rows.map((r) => r.id), ["prWatch", "mail", "router", "workHours"])
   const router = rows.find((r) => r.id === "router")
   assert.equal(router.enabled, true)
   assert.equal(router.cron, "*/10 * * * *")
-  assert.equal(router.runLabel, "立即巡检")
-  assert.equal(router.executor, "agent")
-  assert.equal(router.agent.custom, false)
-  assert.ok(router.agent.prompt.length > 100)
-  assert.match(router.agent.prompt, /Foreman|router|路由/)
-  assert.match(router.detail, /直接调用同一路由 Agent/)
-  assert.match(router.detail, /成功投递不写 Inbox/)
-  assert.match(router.detail, /24/)
+  assert.equal(router.runLabel, "立即轮询")
+  assert.equal(router.executor, "script")
+  assert.deepEqual(router.script, { path: "src/service.mjs", exportName: "pollOnce", args: {} })
+  assert.equal(router.agent, undefined)
+  assert.match(router.detail, /代码轮询/)
+  assert.match(router.detail, /不定时调用 Agent/)
+  assert.match(router.detail, /不自动接单/)
   assert.equal(rows.find((r) => r.id === "prWatch").enabled, true)
   assert.equal(rows.find((r) => r.id === "prWatch").executor, "script")
   assert.deepEqual(rows.find((r) => r.id === "prWatch").script, { path: "src/service.mjs", exportName: "prPollOnce", args: {} })
@@ -61,7 +60,7 @@ test("cron：校验表达式、计算下一次，配置优先于 intervalSeconds
   assert.equal(cronOf({ router: { cron: "0 9 * * 1-5", intervalSeconds: 600 } }, "router"), "0 9 * * 1-5")
 })
 
-test("applySchedules：router agent可改 cron 与开关，非法 cron 不落内存", () => {
+test("applySchedules：router 代码轮询可改 cron 与开关，非法 cron 不落内存", () => {
   const cfg = baseCfg()
   const rows = applySchedules(cfg, { router: { cron: "*/15 8-17 * * 1-5" } })
   assert.equal(cfg.router.cron, "*/15 8-17 * * 1-5")
@@ -75,7 +74,7 @@ test("applySchedules：router agent可改 cron 与开关，非法 cron 不落内
   assert.throws(() => applySchedules(cfg, { workHours: { cron: "* * * * *" } }), /没有 cron/)
 })
 
-test("applySchedules：脚本路径、参数与 Agent 提示词可编辑并持久化", () => {
+test("applySchedules：PR 与代码轮询的脚本路径、参数可编辑并持久化", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-sched-executors-"))
   const file = path.join(dir, "config.json")
   fs.writeFileSync(file, JSON.stringify({ prWatch: { ignoreAuthors: ["233151"] }, router: { recreateAfterHours: 24 } }))
@@ -86,19 +85,22 @@ test("applySchedules：脚本路径、参数与 Agent 提示词可编辑并持�
       cron: "*/7 * * * *",
       script: { path: "scripts/pr-watch.mjs", exportName: "scan", args: { limit: 5, labels: ["ready"] } },
     },
-    router: { agent: { prompt: "自定义路由提示词\n保留缩进" } },
+    router: { script: { path: "scripts/watch.mjs", exportName: "poll", args: { batch: 10 } } },
   })
   assert.deepEqual(rows.find((row) => row.id === "prWatch").script, {
     path: "scripts/pr-watch.mjs",
     exportName: "scan",
     args: { limit: 5, labels: ["ready"] },
   })
-  assert.equal(rows.find((row) => row.id === "router").agent.prompt, "自定义路由提示词\n保留缩进")
-  assert.equal(rows.find((row) => row.id === "router").agent.custom, true)
+  assert.deepEqual(rows.find((row) => row.id === "router").script, {
+    path: "scripts/watch.mjs",
+    exportName: "poll",
+    args: { batch: 10 },
+  })
 
   persistSchedules(file, {
     prWatch: { enabled: true, cron: "*/7 * * * *", script: cfg.prWatch.script },
-    router: { agent: cfg.router.agent },
+    router: { script: cfg.router.script },
   }, cfg)
   const raw = JSON.parse(fs.readFileSync(file, "utf8"))
   assert.equal(raw.prWatch.script.path, "scripts/pr-watch.mjs")
@@ -106,16 +108,12 @@ test("applySchedules：脚本路径、参数与 Agent 提示词可编辑并持�
   assert.deepEqual(raw.prWatch.script.args, { limit: 5, labels: ["ready"] })
   assert.equal(raw.prWatch.cron, "*/7 * * * *")
   assert.deepEqual(raw.prWatch.ignoreAuthors, ["233151"])
-  assert.equal(raw.router.agent.prompt, "自定义路由提示词\n保留缩进")
+  assert.deepEqual(raw.router.script, { path: "scripts/watch.mjs", exportName: "poll", args: { batch: 10 } })
   assert.equal(raw.router.recreateAfterHours, 24)
 
-  applySchedules(cfg, { router: { agent: { prompt: "" } } })
-  const restored = listSchedules(cfg).find((row) => row.id === "router")
-  assert.equal(restored.agent.custom, false)
-  assert.ok(restored.agent.prompt.length > 100)
   assert.throws(() => applySchedules(cfg, { prWatch: { script: { args: [] } } }), /JSON 对象/)
   assert.throws(() => applySchedules(cfg, { mail: { script: { path: " " } } }), /脚本路径不能为空/)
-  assert.throws(() => applySchedules(cfg, { router: { agent: { prompt: 42 } } }), /提示词必须是字符串/)
+  assert.throws(() => applySchedules(cfg, { router: { agent: { prompt: "不应再配置定时 Agent" } } }), /不是 Agent 执行器/)
   assert.throws(() => applySchedules(cfg, { workHours: { script: { path: "x", exportName: "y", args: {} } } }), /不是脚本执行器/)
   assert.throws(() => applySchedules(cfg, { prWatch: { agent: { prompt: "x" } } }), /不是 Agent 执行器/)
 })
@@ -282,16 +280,15 @@ test("HTTP：/api/schedules 读写开关，/api/pickup 立刻跑一轮", async (
     assert.equal(configured.ok, true)
     assert.deepEqual(configured.schedules.find((s) => s.id === "prWatch").script, { path: "scripts/pr.mjs", exportName: "scan", args: { limit: 2 } })
 
-    const agent = await (
+    const polling = await (
       await fetch(`${base}/api/schedules`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ patch: { router: { agent: { prompt: "接口自定义提示词" } } } }),
+        body: JSON.stringify({ patch: { router: { script: { path: "scripts/poll.mjs", exportName: "run", args: { limit: 6 } } } } }),
       })
     ).json()
-    assert.equal(agent.ok, true)
-    assert.equal(agent.schedules.find((s) => s.id === "router").agent.prompt, "接口自定义提示词")
-    assert.equal(agent.schedules.find((s) => s.id === "router").agent.custom, true)
+    assert.equal(polling.ok, true)
+    assert.deepEqual(polling.schedules.find((s) => s.id === "router").script, { path: "scripts/poll.mjs", exportName: "run", args: { limit: 6 } })
 
     const invalid = await fetch(`${base}/api/schedules`, {
       method: "POST",

@@ -88,7 +88,7 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 
 | 流程 | 干什么 | 并发 | 谁在推进 |
 | --- | --- | --- | --- |
-| **自有工单（own）** | 接单 → 建工作区 → 派活 → 开发 → 出 PR → 合并 → 关单 → 清理 → 归档 → 通知 | **同时最多 2 条在跑**（按 workflow 实例数算） | router agent定时接收 queue，决策后调用 `foreman run` |
+| **自有工单（own）** | 接单 → 建工作区 → 派活 → 开发 → 出 PR → 合并 → 关单 → 清理 → 归档 → 通知 | **同时最多 2 条在跑**（按 workflow 实例数算） | router agent按需接收 queue，决策后调用 `foreman run` |
 | **他人 PR（review）** | 扫到 → 核对/判可合 → 解冲突 → **合并助手直接执行 `foreman pr merge`** → 关单 → 清理 → 归档 → 通知 | 不占接单名额 | 「他人 PR 扫描」定时器 + 合并助手 + `runMergeTask` |
 
 - **合并通道已取消**：没有独立 lane、没有合并定时任务、没有独立并发槽（`src/lanes.mjs` 已删除）。
@@ -118,15 +118,15 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 
 ## 常驻服务与router agent
 
-常驻服务在同一个 Node 进程里运行 **Schedule 执行 script/agent → 有效信息写 SQLite Inbox → 单 Worker**，保留三类持久 Schedule：router agent巡检、他人 PR 扫描、验收邮件；`watch poll` 另外把已登记执行会话的 `running/gone/finished/settled` 状态写成 `task.update`。执行会话收工轮询和自动接单定时器已删除，收口后的代码自动补单也已删除。
+常驻服务在同一个 Node 进程里运行 **Schedule 执行 script/agent → 有效信息写 SQLite Inbox → 单 Worker**，保留三类持久 Schedule：执行会话代码轮询、他人 PR 扫描、验收邮件；`watch poll` 把已登记执行会话的 `running/gone/finished/settled` 状态写成 `task.update`。代码每 10 分钟轮询执行收工，但不自动接单；router Agent 只处理手动路由、PR 候选、邮件异常及 Worker 无法识别的事件。
 
-- Schedule 到期先推进 `next_at`，再按类型直接执行 script（PR 扫描、邮件轮询）或调用 agent（路由巡检）。只有失败、实际业务活动或脚本显式声明的 `{type,text,json}` 才写成 `schedule.event`；普通“执行完成 / queued / checked”回执直接跳过。PR 候选另写带 `pr.candidates` 与 PR 列表 JSON 的 `router.notice`，不重复写扫描摘要。
+- Schedule 到期先推进 `next_at`，再按定义直接执行 script 或调用 agent。生产的三项任务都由代码脚本执行：执行会话轮询调用 `src/service.mjs#pollOnce`，PR 扫描和邮件轮询沿用原脚本。只有失败、实际业务活动或脚本显式声明的 `{type,text,json}` 才写成 `schedule.event`；普通“执行完成 / queued / checked”回执直接跳过。PR 候选另写带 `pr.candidates` 与 PR 列表 JSON 的 `router.notice`，不重复写扫描摘要。
 - `agent_inbox` 是投递事实源：相同来源的活跃事件去重；支持按 `coalesceKey` 合并尚未开始的 pending；同一任务的 pending 状态合并为最新状态；过期 pending 直接丢弃；处理失败 30 秒后重试，重启通过租约恢复 processing。
 - `task.update` 按工单绑定的 `orchestrator` 路由，补派任务其次取 `parent` / 显式通知目标，完全没有归属的旧任务才回退router agent。完成状态携带普通最终回复原文；Worker 成功 queue 后才写 `notified` 与 `idle`，只入箱不算已消费。不同任务的事件逐条完成，避免一条失败导致另一条已送达任务被重投。
 - Worker 收到普通消息写入后直接 `wake()`，1 秒轮询只负责漏唤醒与重启恢复。对 `schedule.event` 先按 `payload.type` 找直接处理器，找不到或无法识别的内容连同 text/JSON 交router agent判断；多条路由通知合并成一次运行。旧 `schedule.result` 只标记 `non-actionable` 丢弃，不再确认或转发。
 - 以最后一次成功投递为轮换基准；从未成功时从首次失败计时，连续 `router.recreateAfterHours`（默认 24 小时）未成功才新建路由会话。普通 Inbox 消息的 done 只表示 Worker 已成功交给处理器或 dws，不表示 Agent 已处理完。
 - Schedule 不读取工单状态自行派单，Worker 也不替router agent做业务决策。router agent负责健康检查、必要时 `hand --fresh` 重派独立编排、用 `issue settle` 修复本地完成状态。每轮先读 `foreman tasks --json`：主体是 `sessions` 父子树，节点 `state=running/idle/gone/unknown` 为会话状态，`issueKey/issueState` 仅作归属与容量元数据；在飞数取 `summary.unresolvedIssues`，PR 数取 `summary.prOpenIssues`，真实编码运行数只数编码节点 `state=running`。每轮执行 `foreman clean --all` 幂等清理 `done/cleaned` 残留。全部未收口合计最多 `pickup.maxRunning`（默认 2），`handed` 占槽，不是每轮新增 2 张；dry-run 只看候选优先级，满额禁止 `run/pickup/hand/orch start/dispatch`，每次接单后重新计数。每轮先读 `foreman tasks --json`：主体是 `sessions` 父子树，节点 `state=running/idle/gone/unknown` 为会话状态，`issueKey/issueState` 仅作归属与容量元数据；在飞数取 `summary.unresolvedIssues`，PR 数取 `summary.prOpenIssues`，真实编码运行数只数编码节点 `state=running`。每轮执行 `foreman clean --all` 幂等清理 `done/cleaned` 残留。全部未收口合计最多 `pickup.maxRunning`（默认 2），`handed` 占槽，不是每轮新增 2 张；dry-run 只看候选优先级，满额禁止 `run/pickup/hand/orch start/dispatch`，每次接单后重新计数。
-- `watch poll` 保留为router agent/人工按需入口：观察已登记执行会话，把状态变化与最终回复写入 `task.update`，由 Worker queue 给所属编排。它不解析 RESULT、不自动 push/开 PR、不推进工单业务状态。
+- `watch poll` 由 router Schedule 每 10 分钟执行，也保留人工/router agent按需补跑入口：观察已登记执行会话，把状态变化与最终回复写入 `task.update`，由 Worker queue 给所属编排。它不解析 RESULT、不自动 push/开 PR、不推进工单业务状态。
 - **notify 节点不再承担执行会话投递**：其暂停状态仍会阻止任务事件入箱；成功投递以 Inbox done、Worker 日志和账本 `steers/notified` 为准，业务结论由编排判断。
 
 ### Outbox：邮件与飞书统一外发
@@ -235,8 +235,8 @@ Inbox、Outbox 与 ConsoleStore 共用 `~/.foreman/console.db` 的同一连接�
   - 还没构建时 `/` 回 **503 + 构建提示页**，不会只给一个 404。
 - 页面右上角可切主题：亮 / 暗 / 自动（跟随系统）；选择存 `localStorage`，跟随系统时深浅色变化实时生效。
 - 左侧导航栏提供 **「工单」（可切日期回看某天）**、**「定时任务」** 和 **「操作日志」** 三个入口，图标加文字，可折叠成纯图标并记住折叠状态；窄屏自动只显示图标。
-  - 「定时任务」列出router agent巡检（`router.enabled`）、他人 PR 扫描（`prWatch.enabled`）、验收邮件（`mail.enabled`）、工作时间窗（`workHours.offUntil` 临时闭嘴）四项，带运行状态、上次时间、下次触发与已跑轮数；
-  - router agent、他人 PR 扫描、验收邮件的时间可编辑 **cron 表达式**；对应配置 `router.cron` / `prWatch.cron` / `mail.cron`。没配 cron 时兼容 `intervalSeconds`，折成分钟级表达式；
+  - 「定时任务」列出执行会话代码轮询（`router.enabled`）、他人 PR 扫描（`prWatch.enabled`）、验收邮件（`mail.enabled`）、工作时间窗（`workHours.offUntil` 临时闭嘴）四项，带运行状态、上次时间、下次触发与已跑轮数；
+  - 三项任务的时间都可编辑 **cron 表达式**，脚本路径、导出函数和参数可在编辑区修改；对应配置 `router.cron` / `prWatch.cron` / `mail.cron`。没配 cron 时兼容 `intervalSeconds`，折成分钟级表达式；
   - 点「开启/停止」或「保存时间」会 `POST /api/schedules`（如 `{"patch":{"router":{"enabled":true,"cron":"*/10 * * * *"}}}`）：先校验并改内存 cfg、再写回 `config.json`、然后立刻重排定时器，**不用重启服务**；非法 cron 返回 400，不会落盘；
   - router agent的「立即巡检」走 `POST /api/schedules/run`，等价于手动 `foreman route`；它只是提前写入 Inbox，由 Worker 投递，不代替智能体决策。
   - `GET /api/schedules` 返回同一份状态，脚本/CLI 也可用。
@@ -294,7 +294,7 @@ router agent决定执行 `run` / `pickup` 时也会先读侧边栏，但**默认
 
 ### 服务没在跑时，结论没人判
 
-服务没跑时，router agent定时投递不会发生；已收工会话也不会被自动读取。补法：
+服务没跑时，代码定时轮询不会发生，已收工会话也不会被自动读取。补法：
 
 1. `foreman watch list` —— 登记在账本里，不依赖服务活着，先看会话还在不在听。
 2. `foreman watch poll` —— 立刻重放一轮，已跑完且指纹没通知过的会补发。
@@ -302,7 +302,7 @@ router agent决定执行 `run` / `pickup` 时也会先读侧边栏，但**默认
 
 ## 工作时间窗
 
-他人 PR 扫描只在 `workHours` 窗口里跑；router agent巡检与验收邮件不受工作时间窗限制。执行收工不再有代码定时器：
+他人 PR 扫描只在 `workHours` 窗口里跑；执行会话代码轮询与验收邮件不受工作时间窗限制：
 
 ```json
 "workHours": { "enabled": true, "days": [1,2,3,4,5], "start": "08:30", "end": "18:30", "offUntil": "" }
@@ -452,17 +452,18 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 - 加新产品只改配置：加一段 `products[]`（提示词不写就用内置），重启服务即可，不用动代码；
 - PR 一轮可能跨多个仓库：全部来自同一仓库才按产品取提示词，混合时用全局 `deliver`。
 
-### router agent巡检（router）
+### 执行会话轮询与按需 router agent（router）
 
-`pickup.auto` / `pickup.kickAfterDone` 已成为不再生效的历史配置。代码不会按 pickup cron、执行收工轮询或工单收口自动接单，`run --every` 也已拒绝执行。
+`pickup.auto` / `pickup.kickAfterDone` 已成为不再生效的历史配置。代码不会按 pickup cron 或工单收口自动接单，`run --every` 也已拒绝执行。
 
-- `router.enabled` 默认 `true`；起服务 1 秒后投递首轮，之后每 `router.intervalSeconds`（默认 600 秒）steer 同一路由会话；
-- 连续 `router.recreateAfterHours`（默认 24）小时未成功投递才新建会话；失败本身不会刷新 `lastSentAt`；
-- router agent先 `run --dry-run --once` 核对候选，再决定 `run --once`；优先级仍由 `pickup.priority` 等配置决定，容量为 `pickup.maxRunning`；
-- 周期消息不附历史工单或会话快照；router agent每轮以 `foreman tasks --json` 的实时 `sessions` 树和 `summary` 为准，只对 `done/cleaned` 执行 `foreman clean --all`，不得清理 `working/pr-open` 等非终态；
+- `router.enabled` 默认 `true`；起服务 1 秒后执行首轮代码轮询，之后每 `router.intervalSeconds`（默认 600 秒）运行 `src/service.mjs#pollOnce`；
+- 脚本路径、导出函数和参数在设置页可查看与编辑，默认 `src/service.mjs` / `pollOnce` / `{}`；普通检查完成不写 Inbox，真实状态变化写 `task.update`；
+- 连续 `router.recreateAfterHours`（默认 24）小时未成功投递才新建路由会话；这只适用于按需 Agent 投递，不影响代码轮询；
+- 手动 `foreman route`、PR 候选、邮件异常和 Worker 未识别事件仍调用 router Agent。Agent 被调用时先 `run --dry-run --once` 核对候选，再决定是否 `run --once`；优先级仍由 `pickup.priority` 等配置决定，容量为 `pickup.maxRunning`；
+- Agent 每轮以 `foreman tasks --json` 的实时 `sessions` 树和 `summary` 为准，只对 `done/cleaned` 执行 `foreman clean --all`，不得清理 `working/pr-open` 等非终态；
 - 显式 `foreman pickup` 会绕过旧 auto 开关与工作时间窗，但保留容量、`run.lock`、节点暂停和账本去重；
-- 执行会话收工由router agent或人工 `watch poll` 按需处理，不再有 20 秒代码轮询；
-- `foreman status` 的 `router` 段查看会话 id、最近成功/失败投递和下一次时间。
+- 执行会话收工由代码定时轮询处理，人工或 Agent 需要补取证时也可 `watch poll`；
+- `foreman status` 的 `lastPollAt` / `pollCount` 查看代码轮询状态，`router` 段查看按需 Agent 会话与投递状态。
 
 ## 配置
 
