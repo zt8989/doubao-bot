@@ -280,7 +280,19 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
   let convId = ""
   try {
     if (useInspect) {
-      const out = await inspect(prInspectorText(fresh, cfg, uiToSend))
+      const candidates = [...fresh, ...uiToSend]
+      const out = await inspect({
+        type: "pr.candidates",
+        text: prInspectorText(fresh, cfg, uiToSend),
+        json: {
+          checked,
+          conflicting,
+          prs: candidates.map((pr) => ({
+            key: pr.key, repo: pr.repo, number: Number(pr.number), title: String(pr.title ?? ""),
+            url: String(pr.url ?? ""), author: String(pr.author ?? ""), ui: pr.ui === true,
+          })),
+        },
+      })
       if (out?.ok === false || out?.skipped) throw new Error(out.error || `router agent接收 PR 候选失败：${out.skipped}`)
       sentTo = String(out?.convId ?? out?.session ?? "").trim() || "router agent"
       convId = String(out?.convId ?? "").trim()

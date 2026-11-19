@@ -29,7 +29,7 @@ test("listSchedules：保留 PR/邮件，router agent取代自动接单与执行
   assert.ok(router.agent.prompt.length > 100)
   assert.match(router.agent.prompt, /Foreman|router|路由/)
   assert.match(router.detail, /直接调用同一路由 Agent/)
-  assert.match(router.detail, /结果写回 Inbox/)
+  assert.match(router.detail, /成功投递不写 Inbox/)
   assert.match(router.detail, /24/)
   assert.equal(rows.find((r) => r.id === "prWatch").enabled, true)
   assert.equal(rows.find((r) => r.id === "prWatch").executor, "script")

@@ -40,6 +40,7 @@ import { OutboxStore, OutboxDispatcher } from "./outbox.mjs"
 import { enqueueOutbound } from "./outbound.mjs"
 import { LarkDriver } from "./lark.mjs"
 import { listSchedules, applySchedules, persistSchedules, cronOf } from "./schedules.mjs"
+import { normalizeEventEnvelope } from "./schedule-events.mjs"
 import { runConfiguredScript } from "./executors.mjs"
 import { startOperation, finishOperation } from "./operations.mjs"
 import { startConsoleHttp } from "./consolehttp.mjs"
@@ -823,16 +824,21 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   let worker
   let scheduler
   const enqueueRouter = (notice = "") => {
-    const text = String(notice ?? "").trim()
-    const dedupeKey = `router:notice:${crypto.createHash("sha256").update(text).digest("hex")}`
-    const event = inbox.enqueue({ kind: "router.notice", text, dedupeKey })
+    const envelope = normalizeEventEnvelope(typeof notice === "object" && notice !== null
+      ? notice
+      : { type: "router.notice", text: String(notice ?? "") })
     const book = new Book(cfg.stateFile)
+    const convId = String(book.data.router?.convId ?? book.data.inspector?.convId ?? "")
+    if (!envelope) return { ok: true, skipped: "empty", action: "none", convId }
+    const text = envelope.text || JSON.stringify(envelope.json)
+    const dedupeKey = `router:notice:${crypto.createHash("sha256").update(JSON.stringify(envelope)).digest("hex")}`
+    const event = inbox.enqueue({ kind: "router.notice", text, payload: envelope, dedupeKey })
     return {
       ok: true, action: "inbox", eventId: event.id, status: event.status,
-      convId: String(book.data.router?.convId ?? book.data.inspector?.convId ?? ""),
+      type: envelope.type, convId,
     }
   }
-  // 定时与手动巡检都直接调用 Agent；Inbox 只接收执行结果和非定时通知。
+  // 定时与手动巡检都直接调用 Agent；成功 queued 不产生 Inbox 回执。
   const doRouter = async () => scheduler.runNow("router")
   ctx.router = doRouter
   ctx.inspector = ctx.router // 旧 RPC 兼容；公开名称统一为 router agent。
@@ -891,7 +897,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   ctx.outboxDispatcher = dispatcher
   outbox.onChange = () => dispatcher.wake()
 
-  // Worker 只投递普通消息；Schedule 到期直接执行下面的 script/agent，再把结果写回 Inbox。
+  // Worker 先按结构化事件的 type 直处理；无法识别时交 router agent 判断。
   worker = new AgentWorker({
     store: inbox,
     log,

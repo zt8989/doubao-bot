@@ -1,7 +1,8 @@
-// Always-on 原语：SQLite Schedule 执行 script/agent → 结果写 durable Inbox → 单 Worker。
-// Worker 只投递消息或确认执行结果；轮询仅作漏唤醒与重启恢复兜底。
+// Always-on 原语：Schedule 执行 script/agent，只有有效结果才写 durable Inbox。
+// Worker 先按事件 type 尝试直接处理；无法识别的信息交 router agent 判断。
 import { randomUUID } from "node:crypto"
 import { nextCronTime } from "./cron.mjs"
+import { eventText, normalizeEventEnvelope, scheduleEnvelope } from "./schedule-events.mjs"
 
 const iso = (value = new Date()) => value instanceof Date ? value.toISOString() : new Date(value).toISOString()
 const ACTIVE = "('pending', 'processing')"
@@ -192,6 +193,13 @@ export class InboxStore {
       .run(iso(now), ...ids)
   }
 
+  drop(ids, reason, now = new Date()) {
+    if (!ids.length) return
+    const placeholders = ids.map(() => "?").join(",")
+    this.db.prepare(`UPDATE agent_inbox SET status = 'dropped', reason = ?, lease_until = NULL, last_error = '', updated_at = ? WHERE id IN (${placeholders})`)
+      .run(String(reason || "non-actionable"), iso(now), ...ids)
+  }
+
   fail(ids, error, now = new Date(), retryMs = 30000) {
     if (!ids.length) return
     const at = new Date(iso(now))
@@ -252,19 +260,18 @@ export class ScheduleRunner {
     } catch (error) {
       result = { ok: false, error: error.message }
     }
-    const failed = result?.ok === false
-    const action = executorType === "agent" ? "Agent 调用" : "脚本执行"
+    const base = { scheduleId: schedule.id, executor: executorType, result }
+    const envelope = scheduleEnvelope(schedule, executorType, result)
+    if (!envelope) return { id: null, status: "skipped", reason: "no-effective-event", kind: "schedule.noop", ...base }
+    const payload = { scheduleId: schedule.id, executor: executorType, dueAt, ...envelope }
     const event = this.store.enqueue({
-      kind: "schedule.result",
-      text: failed
-        ? `${schedule.id} ${action}失败：${result?.error || "未知错误"}`
-        : `${schedule.id} ${action}完成`,
-      payload: { scheduleId: schedule.id, executor: executorType, dueAt, result: result ?? { ok: true } },
-      dedupeKey: `schedule-result:${schedule.id}:${dueAt}`,
-      coalesceKey: `schedule:${schedule.id}`,
+      kind: "schedule.event",
+      text: envelope.text || JSON.stringify(envelope.json),
+      payload,
+      dedupeKey: `schedule-event:${schedule.id}:${dueAt}:${envelope.type}`,
       expiresAt: manual ? "" : nextAt,
     }, now)
-    return { ...event, kind: "schedule.result", scheduleId: schedule.id, executor: executorType, result }
+    return { ...event, kind: "schedule.event", type: envelope.type, ...base }
   }
 
   async executeDue(now) {
@@ -273,7 +280,7 @@ export class ScheduleRunner {
       const rows = this.store.db.prepare("SELECT * FROM agent_schedules WHERE enabled = 1 AND next_at IS NOT NULL AND next_at <= ? ORDER BY next_at, id").all(at)
       for (const row of rows) {
         const next = nextCronTime(row.cron, new Date(at))
-        // 先推进 cron 再执行，避免脚本失败或结果入箱失败导致同一业务重复运行。
+        // 先推进 cron 再执行，避免脚本失败或有效事件入箱失败导致同一业务重复运行。
         this.store.db.prepare("UPDATE agent_schedules SET next_at = ?, updated_at = ? WHERE id = ?")
           .run(next ? next.toISOString() : null, at, row.id)
       }
@@ -390,11 +397,18 @@ export class AgentWorker {
         this.lastResult = out
         return out
       }
-      const routerEvents = events.filter((event) => ["router", "router.notice", "inspector", "inspector.notice"].includes(event.kind))
+      const directScheduleHandler = (event) => {
+        if (event.kind !== "schedule.event") return null
+        const type = normalizeEventEnvelope(event.payload)?.type
+        return type && typeof this.handlers[type] === "function" ? this.handlers[type] : null
+      }
+      const routerEvents = events.filter((event) =>
+        ["router", "router.notice", "inspector", "inspector.notice"].includes(event.kind)
+        || (event.kind === "schedule.event" && !directScheduleHandler(event)))
       const groups = new Map()
       for (const event of events.filter((event) => !routerEvents.includes(event))) {
-        // 任务与邮件按条独立完成：不同事件可能属于不同 Agent，一条失败不能把已送达的另一条重投。
-        const groupKey = ["task.update", "mail.reply"].includes(event.kind) ? `${event.kind}:${event.id}` : event.kind
+        // 任务、邮件与结构化事件按条独立完成：一条失败不能把已送达的另一条重投。
+        const groupKey = ["task.update", "mail.reply", "schedule.event"].includes(event.kind) ? `${event.kind}:${event.id}` : event.kind
         if (!groups.has(groupKey)) groups.set(groupKey, { kind: event.kind, batch: [] })
         groups.get(groupKey).batch.push(event)
       }
@@ -404,17 +418,32 @@ export class AgentWorker {
       for (const { kind, batch } of groups.values()) {
         const ids = batch.map((event) => event.id)
         try {
-          const handler = kind === "router" ? this.handlers.router ?? this.handlers.inspector : this.handlers[kind]
-          // 定时业务已在 Schedule 的 script/agent 执行器中完成，结果消息只确认，不再交给 Worker 执行。
-          if (kind !== "schedule.result" && typeof handler !== "function") throw new Error(`Worker 没有 ${kind} 处理器`)
+          // 旧版本留下的“执行完成”只丢弃，不再投递，也不再产生新的同类事件。
+          if (kind === "schedule.result") {
+            this.store.drop(ids, "non-actionable", now)
+            continue
+          }
+          const scheduleEvent = kind === "schedule.event" ? batch[0] : null
+          const envelope = scheduleEvent ? normalizeEventEnvelope(scheduleEvent.payload) : null
+          const handler = kind === "router"
+            ? this.handlers.router ?? this.handlers.inspector
+            : scheduleEvent ? this.handlers[envelope?.type] : this.handlers[kind]
+          if (typeof handler !== "function") throw new Error(`Worker 没有 ${envelope?.type || kind} 处理器`)
           const input = kind === "router"
             ? {
                 events: batch,
                 scheduled: batch.some((event) => ["router", "inspector"].includes(event.kind)),
-                notices: batch.filter((event) => ["router.notice", "inspector.notice"].includes(event.kind)).map((event) => event.text).filter(Boolean),
+                notices: batch.filter((event) => ["router.notice", "inspector.notice", "schedule.event"].includes(event.kind)).map(eventText).filter(Boolean),
               }
-            : kind === "mail.reply" ? batch[0] : batch
-          const result = kind === "schedule.result" ? { ok: true } : await handler(input)
+            : scheduleEvent
+              ? (() => {
+                  const adapted = { ...scheduleEvent, kind: envelope.type, text: envelope.text || JSON.stringify(envelope.json), payload: envelope.json }
+                  if (envelope.type === "task.update") return [adapted]
+                  if (envelope.type === "router") return { events: [adapted], scheduled: false, notices: [eventText(adapted)] }
+                  return adapted
+                })()
+              : kind === "mail.reply" ? batch[0] : batch
+          const result = await handler(input)
           if (result?.ok === false) throw new Error(result.error || `${kind} 处理失败`)
           this.store.complete(ids, now)
           completed += ids.length
