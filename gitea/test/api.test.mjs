@@ -86,6 +86,16 @@ test("listLabels：组织标签接口 404 时只回仓库标签", async () => {
   assert.deepEqual(labels.map((l) => l.name), ["enhancement"])
 })
 
+test("editIssue：ref 更新工单右侧分支字段并保留返回值", async () => {
+  const fetchImpl = fakeFetch(({ method, path }) => {
+    if (method === "PATCH" && path === "/api/v1/repos/o/r/issues/7") return json(issue({ ref: "fix/issue-7" }))
+    return json({ message: "unexpected" }, 500)
+  })
+  const out = await api.editIssue("o/r", 7, { ref: "fix/issue-7" }, { opts: { settings: SETTINGS, fetchImpl } })
+  assert.deepEqual(JSON.parse(fetchImpl.calls[0].body), { ref: "fix/issue-7" })
+  assert.equal(out.ref, "fix/issue-7")
+})
+
 test("editIssueLabels：--label-add needs-triage 用组织标签 id 发 POST", async () => {
   let wrote = false
   const fetchImpl = fakeFetch(({ method, path }) => {

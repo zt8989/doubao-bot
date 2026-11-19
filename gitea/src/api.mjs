@@ -52,6 +52,7 @@ export function mapIssue(issue, { repo = "" } = {}) {
       ? { id: Number(issue.milestone.id) || null, name: issue.milestone.title ?? null }
       : null,
     dueDate: issue.due_date ?? null,
+    ref: issue.ref ?? "",
     commentsCount: Number(issue.comments) || 0,
     createdAt: issue.created_at ?? "",
     updatedAt: issue.updated_at ?? "",

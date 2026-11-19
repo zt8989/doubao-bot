@@ -198,7 +198,7 @@ test("dispatch：工作会话 id 绑到编排会话（账本 + 会话记录都�
 
     const issue = { number: 7, title: "镜像页", body: "", labels: [], assignees: [], url: "" }
     const dws = mkDws()
-    const comments = []
+    const issuePatches = []
     const ctx = {
       cfg,
       book: new Book(cfg.stateFile),
@@ -210,9 +210,10 @@ test("dispatch：工作会话 id 绑到编排会话（账本 + 会话记录都�
       gitea: {
         listIssues: async () => [issue],
         viewIssue: async (r, n) => ({ ...issue, number: n }),
-        commentIssue: async (repo, number, body) => {
-          comments.push({ repo, number, body })
-          return { commentId: 88, url: "https://gitea.test/comment/88" }
+        editIssue: async (repo, number, patch) => {
+          issuePatches.push({ repo, number, patch })
+          issue.ref = patch.ref
+          return { ...issue, number }
         },
         editLabels: async () => ({}),
       },
@@ -237,14 +238,13 @@ test("dispatch：工作会话 id 绑到编排会话（账本 + 会话记录都�
     assert.equal(dws.calls.steer.length, 0, "首次派单的编排指令要随首句进入，不能再补 steer")
     assert.equal(orchestratorTarget(book), "", "直接派单也不该创建全局编排")
     assert.deepEqual(workerOf(book, key).convId, out[0].convId)
-    assert.equal(comments.length, 1, "创建分支后必须更新原工单")
-    assert.equal(comments[0].repo, "yyzl/demo")
-    assert.equal(comments[0].number, 7)
-    assert.match(comments[0].body, /yyzl\/demo/)
-    assert.match(comments[0].body, /fix\/issue-7/)
-    assert.match(comments[0].body, /sit-20261126/)
-    assert.equal(rec.branchComment.commentId, 88)
-    assert.equal(rec.branchComment.url, "https://gitea.test/comment/88")
+    assert.equal(issuePatches.length, 1, "创建分支后必须指定工单右侧的分支字段")
+    assert.deepEqual(issuePatches[0], {
+      repo: "yyzl/demo",
+      number: 7,
+      patch: { ref: "fix/issue-7" },
+    })
+    assert.equal(rec.branchRef.branch, "fix/issue-7")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -262,7 +262,7 @@ test("再派一次同一张单：steer 同一条工作会话，不新开第二�
 
     const issue = { number: 7, title: "镜像页", body: "", labels: [], assignees: [], url: "" }
     const dws = mkDws()
-    const comments = []
+    const issuePatches = []
     const ctx = {
       cfg,
       book: new Book(cfg.stateFile),
@@ -273,9 +273,10 @@ test("再派一次同一张单：steer 同一条工作会话，不新开第二�
       gitea: {
         listIssues: async () => [issue],
         viewIssue: async (r, n) => ({ ...issue, number: n }),
-        commentIssue: async (repo, number, body) => {
-          comments.push({ repo, number, body })
-          return { commentId: 89, url: "" }
+        editIssue: async (repo, number, patch) => {
+          issuePatches.push({ repo, number, patch })
+          issue.ref = patch.ref
+          return { ...issue, number }
         },
         editLabels: async () => ({}),
       },
@@ -294,7 +295,7 @@ test("再派一次同一张单：steer 同一条工作会话，不新开第二�
     assert.match(dws.calls.steer[0].text, /编排智能体补充指令/)
     assert.match(dws.calls.steer[0].text, /只修复失败单测暴露的问题，不要扩大改动范围。/)
     assert.equal(second[0].resumed, true)
-    assert.equal(comments.length, 1, "分支没变时重复派单不能重复刷工单评论")
+    assert.equal(issuePatches.length, 1, "右侧分支没变时重复派单不能重复 PATCH")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

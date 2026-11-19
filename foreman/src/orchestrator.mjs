@@ -202,18 +202,6 @@ function withDispatchPrompt(text, extra = "") {
   return `${String(text ?? "").trim()}\n\n---\n\n编排智能体补充指令（本次派单，仍需遵守上述工作区与交付边界）：\n${instruction}`
 }
 
-function issueBranchComment(workspaces) {
-  return [
-    "Foreman 已根据工单创建本地工作分支：",
-    ...workspaces.map((w) => `- 工程 \`${w.repo}\`：\`${w.branch}\`（基线 \`${w.base}\`）`),
-    "后续提交与 PR 将基于上述分支。",
-  ].join("\n")
-}
-
-function issueBranchSignature(workspaces) {
-  return workspaces.map((w) => `${w.repo}:${w.branch}:${w.base}`).join("\n")
-}
-
 // 派活：读工单 → 建/复用 worktree → 记账 working → dws.open/send 派出去 → 记账会话 → 登记监听。
 // 返回 { repo, number, state:"dispatched", branch, convId }。不 waitFinished、不 info、不验收、不 PR。
 export async function handleIssue(ctx, repoCfg, summary) {
@@ -295,26 +283,20 @@ export async function handleIssue(ctx, repoCfg, summary) {
     }
   }
 
-  // 分支建好后回写原工单；签名去重，重派/复用 worktree 不重复刷评论。
-  // 评论失败不阻断实现任务：账本不记新签名，下次显式重派仍会补写。
-  const branchSignature = issueBranchSignature(workspaces)
-  let branchComment = prev.branchComment ?? null
-  if (workspaces.length && branchComment?.signature !== branchSignature && typeof gitea.commentIssue === "function") {
+  // 分支建好后指定原工单右侧的分支 / Git 标签（Gitea Issue.ref），不发评论。
+  // 多工程工单只有一个 ref 字段，统一写主仓分支；值不变时不重复 PATCH。
+  const primary = workspaces[0]
+  let branchRef = prev.branchRef ?? null
+  if (primary && issue.ref !== primary.branch && typeof gitea.editIssue === "function") {
     try {
-      const comment = await gitea.commentIssue(repoCfg.repo, issue.number, issueBranchComment(workspaces))
-      branchComment = {
-        signature: branchSignature,
-        commentId: Number(comment?.commentId) || null,
-        url: String(comment?.url ?? ""),
-        at: nowIso(),
-      }
-      log(`${key}：已在原工单更新工作分支（${workspaces.map((w) => `${w.repo}=${w.branch}`).join("、")}）`)
+      await gitea.editIssue(repoCfg.repo, issue.number, { ref: primary.branch })
+      branchRef = { branch: primary.branch, at: nowIso() }
+      log(`${key}：已指定工单右侧分支 ${primary.branch}`)
     } catch (e) {
-      log(`${key}：工单分支评论失败，继续派单，下次重派可补写：${String(e?.message ?? e).slice(0, 200)}`)
+      log(`${key}：工单右侧分支更新失败，继续派单，下次重派可补写：${String(e?.message ?? e).slice(0, 200)}`)
     }
   }
 
-  const primary = workspaces[0]
   const attempt = (prev.attempts ?? 0) + 1
   // 决策单（needs-info 这类标签的手动接单）：提示词换成「先判断再决定动不动手」，不绑编排会话。
   // 注意会话仍走 openNew（只确认送达）：dws.open 会等第一轮跑完，会把 HTTP 请求拖到超时。
@@ -349,7 +331,7 @@ export async function handleIssue(ctx, repoCfg, summary) {
     workspaces,
     attempts: attempt,
     lastFailure: "",
-    ...(branchComment ? { branchComment } : {}),
+    ...(branchRef ? { branchRef } : {}),
     ...(decision ? { decision: true } : {}),
     ...(orchConvId ? { orchestrator: orchConvId } : {}),
   })
