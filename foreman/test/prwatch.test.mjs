@@ -4,7 +4,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { earliestCaller, prWatchTarget, shouldReport, prNotifyText, prWatchOnce, ownedPrKeys } from "../src/prwatch.mjs"
-import { startServer, prPollOnce } from "../src/service.mjs"
+import { startServer, prPollOnce, handleRequest } from "../src/service.mjs"
 import { Book } from "../src/book.mjs"
 
 function tmpDir() {
@@ -47,8 +47,8 @@ test("shouldReport：作者不是 233151 才报", () => {
   const pr = { repo: "demo/demo", number: 2, title: "t", author: "233151" }
   assert.equal(shouldReport(pr, cfg), false)
   assert.equal(shouldReport({ ...pr, author: "zhangsan" }, cfg), true)
-  // 作者没解析出来时按要报处理，宁可多报不漏
-  assert.equal(shouldReport({ ...pr, author: null }, cfg), true)
+  // 没有明确作者就不能证明是「他人 PR」，交给后续扫描补全，不分配。
+  assert.equal(shouldReport({ ...pr, author: null }, cfg), false)
   // 没有编号/仓库的不算
   assert.equal(shouldReport({ repo: "", number: 2, author: "zhangsan" }, cfg), false)
 })
@@ -211,14 +211,19 @@ test("服务里 prPoll：起服务后能手动跑一轮，状态里带 PR 计数
     const book = new Book(cfg.stateFile)
     book.record("caller-1", { convId: "conv-first" })
 
-    const sent = []
-    const dws = { notify: async (target, text) => sent.push({ target, text }) }
+    const opened = []
+    const dws = {
+      openNew: async (args) => { opened.push(args); return { convId: "inspector-1" } },
+      queue: async () => { throw new Error("首次通知应直接随检查会话首句进入") },
+    }
     const gitea = { listPulls: async () => [{ repo: "demo/demo", number: 4, title: "新单", author: "wangwu", url: "http://x/pulls/4" }] }
 
     server = await startServer({ cfg, book, dws, gitea, log: () => {} })
     const r = await server.prPoll()
     assert.equal(r.notified, 1)
-    assert.equal(sent[0].target, "conv-first")
+    assert.equal(opened.length, 1)
+    assert.match(opened[0].prompt, /demo\/demo#4/)
+    assert.match(opened[0].prompt, /foreman pr assign 4 --repo demo\/demo/)
 
     const again = await server.prPoll()
     assert.equal(again.notified, 0)
@@ -228,7 +233,7 @@ test("服务里 prPoll：起服务后能手动跑一轮，状态里带 PR 计数
   }
 })
 
-test("服务里 prPoll：sessionFlow 开启时 PR 仍新建合并会话，不 steer 全局编排", async () => {
+test("服务里 prPoll：sessionFlow 开启时 PR 仍只交检查智能体，不 steer 全局编排", async () => {
   const dir = tmpDir()
   try {
     const cfg = baseCfg(dir)
@@ -236,7 +241,7 @@ test("服务里 prPoll：sessionFlow 开启时 PR 仍新建合并会话，不 st
     cfg.deliver = { mode: "new" }
     new Book(cfg.stateFile).setOrchestrator({ convId: "conv-global", name: "foreman-编排" })
 
-    const delivered = []
+    const inspected = []
     const steered = []
     const ctx = {
       cfg,
@@ -248,21 +253,147 @@ test("服务里 prPoll：sessionFlow 开启时 PR 仍新建合并会话，不 st
       },
       dws: {
         steer: async (target) => { steered.push(target) },
-        notify: async () => { throw new Error("new 模式不该 notify 已有会话") },
       },
-      deliver: async ({ text, kind, lane }) => {
-        delivered.push({ text, kind, lane })
-        return { session: "foreman-合并-test", convId: "conv-merge" }
+      notifyInspector: async (text) => {
+        inspected.push(text)
+        return { ok: true, convId: "inspector-1" }
       },
     }
 
     const out = await prPollOnce(ctx)
     assert.equal(out.notified, 1)
-    assert.equal(out.via, "new-session")
-    assert.equal(delivered.length, 1)
-    assert.equal(delivered[0].lane, "merge")
-    assert.match(delivered[0].text, /http:\/\/x\/pulls\/5/)
+    assert.equal(out.via, "inspector")
+    assert.equal(inspected.length, 1)
+    assert.match(inspected[0], /http:\/\/x\/pulls\/5/)
+    assert.match(inspected[0], /foreman pr assign 5 --repo demo\/demo/)
     assert.deepEqual(steered, [], "PR 不能 steer 到全局编排")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("PR 扫描只把他人候选交给检查智能体，不直接创建合并助手", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = baseCfg(dir)
+    new Book(cfg.stateFile).data.inspector = { convId: "inspector-1", name: "检查" }
+    const gitea = {
+      listPulls: async () => [
+        { repo: "demo/demo", number: 70, title: "自己的", author: "233151", url: "http://x/pulls/70" },
+        { repo: "demo/demo", number: 71, title: "作者不明", author: "", url: "http://x/pulls/71" },
+        { repo: "demo/demo", number: 72, title: "他人的", author: "zhangsan", url: "http://x/pulls/72" },
+      ],
+      viewPr: async () => ({ mergeNote: "可以合并", state: "open" }),
+    }
+    const inspected = []
+    const delivered = []
+    const out = await prWatchOnce({
+      cfg, gitea, dws: {}, log: () => {},
+      inspect: async (text) => { inspected.push(text); return { ok: true, convId: "inspector-1" } },
+      deliver: async () => { delivered.push(true); return { convId: "merge-should-not-open" } },
+    })
+    assert.equal(out.notified, 1)
+    assert.equal(out.via, "inspector")
+    assert.equal(inspected.length, 1)
+    assert.match(inspected[0], /demo\/demo#72/)
+    assert.match(inspected[0], /foreman pr assign 72 --repo demo\/demo/)
+    assert.match(inspected[0], /233151.*不分配.*不合并/)
+    assert.doesNotMatch(inspected[0], /demo\/demo#70|demo\/demo#71/)
+    assert.doesNotMatch(inspected[0], /合并：foreman pr merge/)
+    assert.equal(delivered.length, 0, "扫描阶段不能新建合并助手")
+    const seen = new Book(cfg.stateFile).prSeen
+    assert.equal(seen["demo/demo#70"].skipped, "self")
+    assert.equal(seen["demo/demo#71"].skipped, "unknown-author")
+    assert.equal(seen["demo/demo#72"].notifiedTo, "inspector-1")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("服务 PR 扫描固定走检查智能体，即使配置了 deliver 也不直接建合并会话", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = baseCfg(dir)
+    cfg.deliver = { mode: "new" }
+    const inspected = []
+    const ctx = {
+      cfg,
+      state: { pr: { polling: false, pollCount: 0, notifiedCount: 0, pending: 0 } },
+      log: () => {},
+      gitea: {
+        listPulls: async () => [{ repo: "demo/demo", number: 73, title: "待分配", author: "zhangsan", url: "http://x/pulls/73" }],
+        viewPr: async () => ({ mergeNote: "可以合并", state: "open" }),
+      },
+      dws: {},
+      notifyInspector: async (text) => { inspected.push(text); return { ok: true, convId: "inspector-1" } },
+      deliver: async () => { throw new Error("扫描不能直接 deliver 合并会话") },
+    }
+    const out = await prPollOnce(ctx)
+    assert.equal(out.notified, 1)
+    assert.equal(out.via, "inspector")
+    assert.equal(inspected.length, 1)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("pr assign：只给他人 PR 分配合并助手，自己的和作者不明的拒绝，重复分配幂等", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = baseCfg(dir)
+    const delivered = []
+    const prs = {
+      80: { repo: "demo/demo", number: 80, title: "自己的", author: "233151", state: "open" },
+      81: { repo: "demo/demo", number: 81, title: "作者不明", author: "", state: "open" },
+      82: { repo: "demo/demo", number: 82, title: "他人的", author: "zhangsan", state: "open", url: "http://x/pulls/82" },
+    }
+    const ctx = {
+      cfg,
+      state: {},
+      gitea: { viewPr: async (_repo, number) => prs[number] },
+      deliver: async (args) => {
+        delivered.push(args)
+        return { session: "foreman-合并-82", convId: "merge-82" }
+      },
+    }
+    const own = await handleRequest(ctx, { id: "own", cmd: "pr assign", repo: "demo/demo", number: 80 })
+    assert.equal(own.ok, false)
+    assert.match(own.message, /233151|他人/)
+    const unknown = await handleRequest(ctx, { id: "unknown", cmd: "pr assign", repo: "demo/demo", number: 81 })
+    assert.equal(unknown.ok, false)
+    assert.equal(delivered.length, 0)
+
+    const first = await handleRequest(ctx, { id: "first", cmd: "pr assign", repo: "demo/demo", number: 82 })
+    assert.equal(first.ok, true)
+    assert.equal(first.convId, "merge-82")
+    const second = await handleRequest(ctx, { id: "second", cmd: "pr assign", repo: "demo/demo", number: 82 })
+    assert.equal(second.ok, true)
+    assert.equal(second.skipped, "already-assigned")
+    assert.equal(delivered.length, 1)
+    assert.match(delivered[0].text, /foreman pr merge 82 --repo demo\/demo/)
+    const seen = new Book(cfg.stateFile).prSeen["demo/demo#82"]
+    assert.equal(seen.assignedTo, "foreman-合并-82")
+    assert.equal(seen.assignedConvId, "merge-82")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("PR 候选遇到检查会话 busy 时不记已通知，下一轮继续补发", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = baseCfg(dir)
+    const gitea = {
+      listPulls: async () => [{ repo: "demo/demo", number: 74, title: "待分配", author: "zhangsan" }],
+      viewPr: async () => ({ mergeNote: "可以合并", state: "open" }),
+    }
+    const out = await prWatchOnce({
+      cfg, gitea, dws: {}, log: () => {},
+      inspect: async () => ({ ok: true, skipped: "busy" }),
+    })
+    assert.equal(out.notified, 0)
+    assert.equal(out.failedNotify, true)
+    assert.equal(new Book(cfg.stateFile).prSeen["demo/demo#74"]?.notifiedAt ?? "", "")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

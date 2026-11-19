@@ -94,7 +94,7 @@ async function deliver(ctx, rec, text, { now, action, reason = "" }) {
   return { ok: true, action, ...(reason ? { reason } : {}), convId, name, sentAt: at }
 }
 
-export async function inspectorOnce(ctx, { now = new Date(), force = false } = {}) {
+export async function inspectorOnce(ctx, { now = new Date(), force = false, notice = "" } = {}) {
   const runtime = ctx.state?.inspector ?? (ctx.state ? (ctx.state.inspector = {}) : {})
   if (runtime.running) return { ok: true, skipped: "busy" }
   runtime.running = true
@@ -112,8 +112,9 @@ export async function inspectorOnce(ctx, { now = new Date(), force = false } = {
     const idleSince = Number.isFinite(lastSent) ? lastSent : Number.isFinite(failingSince) ? failingSince : createdAt
     const stale = Boolean(rec.convId) && Number.isFinite(idleSince) && now.getTime() - idleSince >= staleMs
     const action = !rec.convId || stale ? "created" : "queued"
-    const snapshot = await inspectionSnapshot(ctx)
-    const text = [
+    const noticeText = String(notice ?? "").trim()
+    const snapshot = noticeText ? "" : await inspectionSnapshot(ctx)
+    const text = noticeText || [
       "【Foreman · 检查智能体 · 10分钟巡检】",
       "请检查任务是否正常运行；先按 tasks 核对全部在飞工单总数，达到上限时禁止接新，只有仍有容量才按优先级接单。状态处理由你决策，不要机械重派。",
       snapshot,

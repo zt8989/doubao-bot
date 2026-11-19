@@ -31,7 +31,7 @@ import { WorkflowEngine } from "./workflow/engine.mjs"
 import { NODE_TEARDOWN, runNodeCleanup, resolveIssueKey, issueKeyForPr } from "./workflow/cleaners.mjs"
 import { DoubaoSessionAdapter } from "./workflow/adapters/doubao.mjs"
 import { GiteaTrackerAdapter } from "./workflow/adapters/gitea.mjs"
-import { prWatchOnce, prWatchTarget, mergeFailureReason } from "./prwatch.mjs"
+import { prWatchOnce, prWatchTarget, mergeFailureReason, prNotifyText, shouldReport, ownedPrKeys, prKey } from "./prwatch.mjs"
 import { MailDriver, realRecipients } from "./mail.mjs"
 import { acceptanceGate, detectUiChange, mailPollOnce, requestAcceptance } from "./mailflow.mjs"
 import { inflightIssues } from "./planner.mjs"
@@ -817,6 +817,8 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   ctx.pickup = doPickup
   const doInspector = async () => inspectorOnce(ctx)
   ctx.inspector = async () => inspectorOnce(ctx, { force: true })
+  // PR 扫描只把候选 queue 给检查智能体；是否新建合并助手由它通过 pr assign 决策。
+  ctx.notifyInspector = async (text) => inspectorOnce(ctx, { force: true, notice: text })
   // 验收邮件轮询：读收件箱，按主题里的 [FM-…] 把回复认回 PR 并注回会话。
   // 回复可能在半夜到，所以这条定时器**不受工作时间窗限制**（只读收件箱，不打扰谁）。
   const doMailPoll = async () => {
@@ -979,7 +981,56 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   return { server: consoleHttp.server, close, poll: doPoll, prPoll: doPrPoll, pickup: doPickup, inspector: doInspector, port, portFile: paths.portFile, http: ctx.httpUrl }
 }
 
-// PR 扫描一轮：配置里每个仓库列 open PR → 过滤作者 → 去重 → 通知最早登记的调用方。
+// 检查智能体显式分配一条他人 PR：这里才创建合并助手；本人或作者不明一律拒绝。
+export async function prAssignOnce(ctx, { repo = "", number = 0 } = {}) {
+  const repoName = String(repo ?? "").trim()
+  const prNumber = Number(number)
+  if (!repoName || !prNumber) return { ok: false, error: "bad-request", message: "pr assign 需要 repo 与 number" }
+  try {
+    const raw = await ctx.gitea.viewPr(repoName, prNumber)
+    const view = Array.isArray(raw) ? raw[0] : raw
+    if (!view) return { ok: false, error: "not-found", message: `找不到 PR ${repoName}#${prNumber}` }
+    const pr = { ...view, repo: repoName, number: prNumber }
+    if (String(pr.state ?? "open") !== "open") {
+      return { ok: false, error: "not-open", message: `PR ${repoName}#${prNumber} 不是 open，不能分配合并助手` }
+    }
+    const key = prKey(repoName, prNumber)
+    const book = new Book(ctx.cfg.stateFile)
+    const seen = book.prSeen[key] ?? {}
+    const previousSession = String(seen.assignedTo ?? (seen.via === "new-session" ? seen.notifiedTo : "") ?? "").trim()
+    if (previousSession) {
+      return {
+        ok: true,
+        skipped: "already-assigned",
+        session: previousSession,
+        convId: String(seen.assignedConvId ?? seen.convId ?? ""),
+        repo: repoName,
+        number: prNumber,
+      }
+    }
+    if (ownedPrKeys(book).has(key) || !shouldReport(pr, ctx.cfg)) {
+      return {
+        ok: false,
+        error: "own-or-unknown-author",
+        message: `只允许分配明确由他人创建的 PR；${repoName}#${prNumber} 的作者为 ${pr.author || "未知"}，不分配、不合并`,
+      }
+    }
+    if (typeof ctx.deliver !== "function") throw new Error("服务缺少 deliver，无法创建合并助手")
+    const out = await ctx.deliver({ text: prNotifyText([pr]), kind: "PR待合并", repo: repoName, lane: "merge" })
+    const session = String(out?.session ?? "").trim()
+    const convId = String(out?.convId ?? "").trim()
+    if (!session) throw new Error("合并助手创建成功返回但没有会话名")
+    const assignedAt = nowIso()
+    const saved = new Book(ctx.cfg.stateFile)
+    saved.markPrSeen(key, { ...pr, notifiedTo: session, via: "merge-assistant", assignedTo: session, assignedConvId: convId, assignedAt })
+    saved.markNotice(session, { name: session, convId, kind: "PR待合并", prs: [key] })
+    return { ok: true, action: "assigned", repo: repoName, number: prNumber, session, convId, assignedAt }
+  } catch (e) {
+    return { ok: false, error: "pr-assign-failed", message: e.message }
+  }
+}
+
+// PR 扫描一轮：配置里每个仓库列 open PR → 过滤作者 → 去重 → 只通知检查智能体分配。
 // force 是页面上的「立即执行」：即使 prWatch.enabled 是 false（默认关）也扫这一轮。
 export async function prPollOnce(ctx, { force = false } = {}) {
   const { state, cfg, dws, gitea, log } = ctx
@@ -990,15 +1041,13 @@ export async function prPollOnce(ctx, { force = false } = {}) {
   state.pr.polling = true
   try {
     const book = new Book(cfg.stateFile)
-    // 账本里还没有调用方会话时，退回当前环境的会话 id（在豆包会话里跑服务时就是那条会话）。
-    const target = prWatchTarget(cfg, book) || String(process.env.MCP_VM_CONVERSATION_ID ?? "").trim()
+    const notifyInspector = ctx.notifyInspector ?? (async (text) => inspectorOnce(ctx, { force: true, notice: text }))
+    const target = String(book.data.inspector?.convId ?? "").trim()
     state.pr.target = target
     let out
     try {
-      // PR 合并线独立投递：deliver.mode=new 时每轮新建合并会话，消息里带 PR 链接。
-      // 即使工单侧启用了 sessionFlow，也不能把 PR steer 到全局或某张工单的编排会话。
-      const deliver = deliveryMode(cfg) === "new" ? ctx.deliver : null
-      out = await prWatchOnce({ cfg, gitea, dws, log, target, deliver, push: null })
+      // 扫描结果只交检查智能体；合并助手由它显式 pr assign，代码不直接新建。
+      out = await prWatchOnce({ cfg, gitea, dws, log, target, inspect: notifyInspector })
     } catch (e) {
       log(`PR 扫描失败：${e.message}`)
       return { ok: false, error: e.message }
@@ -2557,6 +2606,12 @@ export async function handleRequest(ctx, req) {  const id = req?.id
 
   if (cmd === "poll") {
     const r = await ctx.poll()
+    return ok(r)
+  }
+
+  if (cmd === "pr assign") {
+    const r = await prAssignOnce(ctx, req)
+    if (!r.ok) return fail(r.error || "pr-assign-failed", r.message || "PR 分配失败")
     return ok(r)
   }
 

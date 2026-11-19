@@ -50,8 +50,11 @@ export class Book {
       seenAt: prev.seenAt ?? nowIso(),
       notifiedTo: pr.notifiedTo ?? prev.notifiedTo ?? "",
       notifiedAt: pr.notifiedTo ? nowIso() : prev.notifiedAt ?? "",
-      // 投递通道：new-session（每次新建会话）或 existing（塞回已有会话），便于控制台复盘。
+      // 投递通道：inspector（候选交检查智能体）或 merge-assistant（已分配合并助手）等。
       via: pr.via ?? prev.via ?? "",
+      assignedTo: pr.assignedTo ?? prev.assignedTo ?? "",
+      assignedConvId: pr.assignedConvId ?? prev.assignedConvId ?? "",
+      assignedAt: pr.assignedAt ?? prev.assignedAt ?? "",
       merged: pr.merged ?? prev.merged ?? false,
       mergeError: pr.mergeError ?? prev.mergeError ?? "",
     }

@@ -33,7 +33,7 @@ Gitea 侧一律走 REST（`gitea` 包/CLI）。
 ```
 
 - **按单独立**：检查智能体或人工接单时 `ensureIssueOrchestrator` 按工单幂等——这张单已有 `convId` 就复用，不重复开；不同工单绝不共用。确认原编排失联时才用 `foreman hand <键> --fresh` 重派独立编排。
-  用户自己发起的会话不需要另起：发起方就是编排（见下）。PR 监听独立走 `deliver.mode=new`，新建「合并会话」。
+  用户自己发起的会话不需要另起：发起方就是编排（见下）。PR 扫描只通知检查智能体，由它 `pr assign` 后才新建「合并会话」。
 - **编排会话从哪来（两种都绑同一种字段 `issues[键].orchestrator`）**：
   1. **检查智能体接单**：它先 `foreman run --dry-run --once` 核对优先级与空余容量，确认后 `foreman run --once`，由 `hand` 新建/复用这张单自己的编排会话；
   2. **用户自主发起**：用户在某个豆包会话里调 `foreman dispatch`（或 hand/resume），
@@ -45,7 +45,7 @@ Gitea 侧一律走 REST（`gitea` 包/CLI）。
 - **收尾两步**：`pr merge` 合并关单 → `foreman clean <键>` 清残留 worktree / 分支 / 工作会话，并归档**这张单自己的编排会话**（worktree 有未提交改动就保留，不删别人正在写的东西）。
   clean 只认 `book.sessions` 里 `kind: "orchestrator"` 且带这张单 `issueKey` 的会话：全局编排和「用户发起方就是编排」的会话不归档。
   编排会话万一没被 clean 收掉（比如它没跑完、或 clean 时正是命令发起方），检查智能体或人工执行 `watch poll` 时会把**已收口（done/cleaned）**工单的编排会话补归档一次（还在跑的不动，后续再收）。
-- **降级**：`sessionFlow.enabled: false`（或 `foreman run --direct`）退回老的多会话模型：run 自己建工作区派活、收工只落痕、PR 监听按 `deliver.mode` 投递。
+- **降级**：`sessionFlow.enabled: false`（或 `foreman run --direct`）只退回老的工单多会话模型；PR 仍由检查智能体显式 `pr assign`，不恢复扫描器自动建合并会话。
 
 配置（默认已开，不用写也能用）：
 
@@ -279,19 +279,16 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 服务里还有一条独立定时器，每 `prWatch.intervalSeconds`（默认 300s）扫一遍 `repos[]` 下各仓库的 open PR：
 
 - 列表走 `gitea pull-list --repo <owner/name> --state open`（REST 列表，带回 `author`/`base`/`head`）。
-- 作者在 `prWatch.ignoreAuthors`（自己的账号，由 `pickup.me` 补齐）里的 PR 跳过，只记一笔 `skipped: "self"`。
-- 其余 PR 合成一条消息投递出去：`deliver.mode: "new"`（默认）**新建一条合并会话**（读合并提示词 + 监控项目；
-  会话名形如 `foreman-合并-<YYYYMMDD-HHmm>`）；`deliver.mode: "existing"` 才用 `dws notify` 发给 `prWatch.notifyTarget`：
-  - `earliest`（默认）= 账本 `sessions` 里**最早登记**、有 `convId` 的那个会话，即第一个调用方；
-  - 也可以直接写死会话 id 或侧边栏标题。
+- 作者在 `prWatch.ignoreAuthors`（自己的账号，由 `pickup.me` 补齐；当前 `233151`）里的 PR 跳过，只记 `skipped: "self"`，不分配、不合并。作者不明记 `skipped: "unknown-author"`，同样不进入候选。
+- 其余 PR 合成候选消息，通过 `dws msg --mode queue` 复用同一检查会话投递。检查智能体不主动读取 PR 列表，只处理代码送来的候选；决定处理时执行 `foreman pr assign <N> --repo R`，Foreman 再校验作者，确认为他人 PR 后才新建合并会话。
 - 有冲突的 PR 默认过滤（`prWatch.filterConflicts`，查 `pr-view` 的 `mergeNote`），不合也不报。
-- 作者不是自己的 PR **只通知、监听里不合**（看不到关联工单）；通知先交给合并助手核对归属/基线、解冲突，可合就由合并助手直接执行通知里的 `foreman pr merge`，不可合或需要拍板就用普通文字说明原因，不交 RESULT。
-- 去重记在 `state.json` 的 `prWatch` 键（`<repo>#<number>`），**发成功才盖 `notifiedAt`**；发送失败下一轮重试，重启不重发。
-- 账本里还没有调用方会话时：`existing` 模式这轮不发、也不记账；`new` 模式不受影响（每次都新建会话）。
+- **扫描器不直接建合并助手、不合 PR**：分配入口会拒绝本人或作者不明的 PR，重复分配幂等。合并助手核对归属/基线、解冲突，可合就执行通知里的 `foreman pr merge`，不可合或需要拍板就用普通文字说明原因，不交 RESULT。
+- 去重记在 `state.json` 的 `prWatch` 键（`<repo>#<number>`）：候选发给检查智能体成功才盖 `notifiedAt`；分配后另记 `assignedTo` / `assignedConvId` / `assignedAt`。
 - 起服务 1s 后先扫一遍，之后按间隔跑。
 
 ```bash
-foreman pr poll                  # 立刻扫一轮（返回 checked / notified / target）
+foreman pr poll                  # 立刻扫一轮，只把候选发给检查智能体
+foreman pr assign <N> --repo R   # 检查智能体显式分配一条他人 PR 给合并助手（幂等）
 foreman pr list                  # 看账本里见过/已通知的 PR
 foreman status                   # 带 prWatch.lastPollAt / pollCount / notifiedCount / pending
 ```
@@ -350,7 +347,8 @@ foreman clean <owner/name>#N     # 合并关单后清 worktree / 分支 / 工作
 foreman clean --all              # 清所有终端态工单的残留（worktree / 分支 / 会话）
 foreman pickup                   # 手动/检查智能体处理一轮候选；没有代码定时器会自动调用它
 foreman tasks                    # 每条工单到哪一步、卡在哪
-foreman pr poll                  # 立刻扫一轮 PR（别人的单报给最早登记的调用方）
+foreman pr poll                  # 立刻扫一轮 PR，只把候选交给检查智能体
+foreman pr assign <N> --repo R   # 检查智能体显式分配合并助手；本人/作者不明拒绝，重复分配幂等
 foreman pr list                  # 看 PR 监听账本
 foreman pr open --repo R --head <分支> --title "…" --body "…" --issue N   # 建 PR（唯一入口；--base 省略取配置 repos[].base）
                                  # 加了 --ui（或 diff 认出前端文件）就自动发验收邮件

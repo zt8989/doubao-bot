@@ -101,6 +101,25 @@ test("检查智能体首轮新建，后续巡检复用同一条会话", async ()
   }
 })
 
+test("PR 候选通知复用同一检查会话并 queue，不夹带主动巡检", async () => {
+  const f = fixture()
+  try {
+    await inspectorOnce(f, { now: new Date("2026-11-19T00:00:00Z") })
+    const out = await inspectorOnce(f, {
+      now: new Date("2026-11-19T00:05:00Z"),
+      force: true,
+      notice: "【Foreman · 他人 PR 待分配】\nforeman pr assign 72 --repo demo/demo",
+    })
+    assert.equal(out.action, "queued")
+    assert.equal(out.convId, "inspector-1")
+    assert.equal(f.queued.length, 1)
+    assert.match(f.queued[0].text, /pr assign 72/)
+    assert.doesNotMatch(f.queued[0].text, /10分钟巡检|每轮先执行/)
+  } finally {
+    fs.rmSync(f.dir, { recursive: true, force: true })
+  }
+})
+
 test("从未成功投递的会话也从首次失败计满24小时才轮换", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-inspector-never-ok-"))
   const stateFile = path.join(dir, "state.json")

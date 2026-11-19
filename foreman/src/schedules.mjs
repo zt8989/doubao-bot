@@ -55,7 +55,7 @@ export function listSchedules(cfg, state = {}) {
       cron: cronOf(cfg, "prWatch"),
       nextAt: state.pr?.nextAt || "",
       intervalSeconds: Number(prw.intervalSeconds ?? 300),
-      detail: "扫各仓库里别人开的 open PR（作者不是自己），通知编排核对后合并",
+      detail: "扫各仓库里明确由别人创建的 open PR，queue 给检查智能体决定是否分配合并助手",
       lastAt: state.pr?.lastPollAt || "",
       count: Number(state.pr?.pollCount ?? 0),
       lastResult: Number(state.pr?.notifiedCount ?? 0) ? `累计通知 ${Number(state.pr.notifiedCount)} 次` : "",

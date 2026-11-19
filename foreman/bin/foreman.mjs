@@ -30,6 +30,7 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman issue settle <N> --repo R --note <完成依据>   仅本地完成，不关远端、不清工作区
   foreman pr list [-c] [--no-service]
   foreman pr poll [-c] [--no-service]
+  foreman pr assign <N> --repo R           检查智能体分配一条他人 PR 给合并助手
   foreman pr open --repo R --base <基线> --head <分支> --title <标题> [--body <正文>] [--issue <单号>] [--issue-repo <工单所在仓库>] [--ui]
   foreman pr merge <N> --repo R [--issue <单号>] [--style merge|rebase|squash] [--approved-by <人>] [--ui]
   foreman mail send --to <邮箱>[,...] --subject <主题> [--body <正文>]
@@ -65,7 +66,8 @@ const HELP = `foreman — 接单编排 + 常驻服务
   watch add   登记一条监听（target 是会话 id 或侧边栏标题）
   watch list/rm/poll   看登记 / 删一条 / 立刻跑一轮（取证排障用）
   pr list     看 PR 监听账本（哪些 PR 见过/已通知）
-  pr poll     立刻扫一轮 PR（作者不是自己的（pickup.me）交编排处理）
+  pr poll     立刻扫一轮 PR，只把非本人候选交给检查智能体分配
+  pr assign <N> --repo R   检查智能体核对候选后，显式创建这条 PR 的合并助手
   deliver     通知投递（老模型）：deliver.mode=new 每次新建一条会话；existing 才塞回已有会话。
               会话中心（默认 sessionFlow.enabled）不走这条：更新一律 steer 进唯一编排会话。
   pr open     建 PR（唯一入口：agent 也走它，账本/控制台才记得到）
@@ -251,13 +253,21 @@ async function cmdWatch(pos, flags) {
 async function cmdPr(pos, flags) {
   const cfg = loadConfig(flags.config)
   const sub = pos.shift()
-  if (!sub) throw new Error("用法：foreman pr list|poll")
+  if (!sub) throw new Error("用法：foreman pr list|poll|assign")
   if (sub === "list") {
     const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "pr list" }, 3000)
     return out({ ok: true, ...r })
   }
   if (sub === "poll") {
     const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "pr poll" }, 300000)
+    return out({ ok: true, ...r })
+  }
+  if (sub === "assign") {
+    const number = Number(pos.shift())
+    const repo = strFlag(flags.repo)
+    if (!number || !repo) throw new Error("用法：foreman pr assign <N> --repo R")
+    const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "pr assign", repo, number }, 300000)
+    if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
     return out({ ok: true, ...r })
   }
   if (sub === "open") {
@@ -299,7 +309,7 @@ async function cmdPr(pos, flags) {
     if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
     return out({ ok: true, ...r })
   }
-  throw new Error(`未知 pr 子命令：${sub}（list|poll|open|merge）`)
+  throw new Error(`未知 pr 子命令：${sub}（list|poll|assign|open|merge）`)
 }
 
 // ws：一工程一工作区。执行会话跑到一半发现还要改别的工程，用它现开一个工作区（幂等）。

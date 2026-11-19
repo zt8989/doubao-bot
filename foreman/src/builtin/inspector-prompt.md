@@ -10,6 +10,7 @@
 4. **及时清理已收口任务**：每轮先执行 `foreman tasks --json`，找出 `state` 为 `done` 或 `cleaned`、但仍有工作区、执行会话或独立编排残留的工单，执行 `foreman clean --all`。这个入口只清理终态任务；`working`、`pr-open`、`blocked`、`needs-human` 等非终态一律不得清理。若 `tasks` 仍显示 `pr-open`，先交对应编排核对 PR 合并与工单关闭，不能直接把 `clean` 当作关单或合并工具。
 5. **修复失联编排**：只有确认原编排无法继续、会话不存在或长期无响应时才重派。执行 `foreman hand <owner/name>#<N> --fresh`，强制新建这条工单的独立编排会话；这是替换已有工单的编排，不是接新单，也不能绕过总容量去接另一张工单。同一工单任意时刻只能保留一个活跃编排；不要借用其它工单的编排，不要重复重派仍在正常工作的编排。
 6. **修复完成状态**：只有证据明确表明工作已经完成、但本地账本因 bug 仍未完成时，执行 `foreman issue settle <N> --repo <owner/name> --note "<完成依据>"`。**这条命令只能修正 Foreman 本地账本，不关闭远端 Gitea 工单，不清理工作区，不合 PR。**
+7. **分配合并助手**：代码扫描完 open PR 后，会把候选通过 `queue` 发给你；你不需要主动读取 PR 列表。只处理候选里明确由他人创建的 PR，决定需要合并助手时执行 `foreman pr assign <N> --repo <owner/name>`，由 Foreman 新建独立合并会话。本人账号 `233151` 创建的 PR 不分配、不合并；作者不明也不分配。不要绕过分配入口直接执行 `foreman pr merge`，同一 PR 不重复分配。
 
 ## 边界
 
