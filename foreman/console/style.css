@@ -286,6 +286,11 @@ main {
   background: color-mix(in srgb, var(--ok) 7%, transparent);
 }
 
+.panel-note.is-error {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 7%, transparent);
+}
+
 .hint { font-size: 12px; color: var(--dim); }
 
 /* ---------- 表格 ---------- */
@@ -770,6 +775,37 @@ html[data-theme="dark"] .date-pick { color-scheme: dark; }
 
 .dot.off { background: color-mix(in srgb, var(--red, #ef4444) 65%, transparent); }
 
+/* ---------- Inbox / Outbox 队列 ---------- */
+.queue-head { flex-wrap: wrap; align-items: flex-start; }
+.queue-head .panel-side { flex-wrap: wrap; justify-content: flex-end; }
+.queue-tabs { flex-wrap: wrap; }
+.queue-table .col-id { width: 72px; }
+.queue-table .col-kind { width: 168px; }
+.queue-table .col-state { width: 104px; }
+.queue-table .col-try { width: 82px; }
+.queue-table .col-time { width: 132px; }
+.queue-table .col-detail { width: 72px; }
+.queue-detail {
+  padding: 14px 18px 16px;
+  border-left: 3px solid var(--accent);
+  background: var(--panel-2);
+}
+.queue-times { display: flex; gap: 14px; flex-wrap: wrap; margin: 8px 0; color: var(--dimmer); font: 11.5px var(--mono); }
+.queue-error { margin-bottom: 8px; color: var(--danger); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.queue-payload {
+  max-height: 320px;
+  margin: 8px 0 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--dim);
+  font: 11.5px/1.6 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* ---------- 操作日志 ---------- */
 .operation-list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line-soft); }
 
@@ -847,6 +883,7 @@ footer {
   .topbar { padding: 14px 18px; }
   main { padding: 18px; }
   table.tasks th.col-branch, table.tasks td:nth-child(4) { display: none; }
+  table.queue-table td:nth-child(4) { display: table-cell; }
 }
 
 @media (max-width: 620px) {

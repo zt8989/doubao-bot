@@ -69,8 +69,14 @@ class FmThemeSwitch extends LitElement {
 
 /* ---------------- 左侧导航 ---------------- */
 function navIcon(id) {
-  if (id === "overview") {
-    return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h8l4 4v14H7z"/><path d="M15 3v5h4M10 12h6M10 16h6M10 8h2"/></svg>`
+  if (id === "inbox") {
+    return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v14H4zM4 14h4l2 3h4l2-3h4M12 4v7M9 8l3 3 3-3"/></svg>`
+  }
+  if (id === "outbox") {
+    return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v14H4zM4 14h4l2 3h4l2-3h4M12 11V4M9 7l3-3 3 3"/></svg>`
+  }
+  if (id === "tasks") {
+    return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/></svg>`
   }
   if (id === "schedules") {
     return html`<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2M8 2l-2 2M16 2l2 2"/></svg>`
@@ -85,7 +91,9 @@ class FmSidebar extends LitElement {
   }
   render() {
     const views = [
-      { id: "overview", label: "工单" },
+      { id: "inbox", label: "Inbox" },
+      { id: "outbox", label: "Outbox" },
+      { id: "tasks", label: "Tasks" },
       { id: "schedules", label: "设置" },
       { id: "operations", label: "操作日志" },
     ]
@@ -126,6 +134,7 @@ class FmHead extends LitElement {
     error: { type: String },
     day: { type: String },
     today: { type: String },
+    view: { type: String },
   }
   createRenderRoot() {
     return this
@@ -153,7 +162,7 @@ class FmHead extends LitElement {
           <span class="brand-text">FOREMAN<span class="thin">/CONSOLE</span></span>
         </div>
         <div class="meta">
-          <span class="meta-item day-wrap">
+          ${this.view === "tasks" ? html`<span class="meta-item day-wrap">
             <span class="day-label">看哪天</span>
             <input
               class="date-pick"
@@ -165,7 +174,7 @@ class FmHead extends LitElement {
             ${this.day && this.day !== this.today
               ? html`<button class="ghost day-today" @click=${() => emit(this, "day-set", { day: "" })}>回到今天</button>`
               : ""}
-          </span>
+          </span>` : ""}
           <span class="meta-item mono">${this._clock}</span>
           <span class=${"pill " + (svc.alive ? "on" : "off")}>
             ${this.error ? this.error : svc.alive ? `服务 · 运行中 pid ${svc.pid}` : "服务 · 未运行"}
@@ -393,7 +402,7 @@ class FmTasks extends LitElement {
     return html`
       <section class="panel">
         <div class="panel-head">
-          <h2>分配任务</h2>
+          <h2>Tasks</h2>
           <div class="tabs" role="tablist">
             <button
               class=${"tab" + (tab === "today" ? " is-active" : "")}
@@ -472,6 +481,133 @@ class FmTasks extends LitElement {
                 <div class="empty-title">今天还没有分配到任务</div>
                 <div class="empty-sub">foreman run 派活后会出现在这里</div>
               </div>`}
+      </section>`
+  }
+}
+
+/* ---------------- Inbox / Outbox 持久队列 ---------------- */
+const QUEUE_STATUS_LABEL = {
+  pending: "待处理",
+  processing: "处理中",
+  done: "已完成",
+  dropped: "已丢弃",
+  sent: "已发送",
+  failed: "失败",
+}
+const compactJson = (value) => {
+  try { return JSON.stringify(value ?? {}) } catch { return String(value ?? "") }
+}
+const prettyJson = (value) => {
+  try { return JSON.stringify(value ?? {}, null, 2) } catch { return String(value ?? "") }
+}
+const queueSummary = (kind, row) => {
+  const payload = row.payload || {}
+  if (kind === "inbox") return row.text || payload.title || payload.text || payload.message || payload.subject || compactJson(payload)
+  return payload.subject || payload.text || payload.markdown || payload.body || compactJson(payload)
+}
+
+class FmQueue extends LitElement {
+  static properties = {
+    kind: { type: String },
+    rows: { attribute: false },
+    counts: { attribute: false },
+    filter: { type: String },
+    busy: { type: String },
+    error: { type: String },
+  }
+  createRenderRoot() {
+    return this
+  }
+  toggle(id) {
+    this.openKey = this.openKey === id ? null : id
+    this.requestUpdate()
+  }
+  detail(row) {
+    return html`<tr class="detail-row">
+      <td colspan="7">
+        <div class="queue-detail">
+          ${row.lastError ? html`<div class="queue-error">最近错误：${row.lastError}</div>` : ""}
+          ${row.reason ? html`<div class="hint">原因：${row.reason}</div>` : ""}
+          <div class="queue-times">
+            <span>创建 ${stampText(row.createdAt) || "—"}</span>
+            <span>可执行 ${stampText(row.availableAt) || "—"}</span>
+            ${row.sentAt ? html`<span>发送 ${stampText(row.sentAt)}</span>` : ""}
+          </div>
+          <pre class="queue-payload">${prettyJson(row.payload)}</pre>
+          ${this.kind === "outbox" && Object.keys(row.result || {}).length
+            ? html`<div class="hint">发送结果</div><pre class="queue-payload">${prettyJson(row.result)}</pre>`
+            : ""}
+        </div>
+      </td>
+    </tr>`
+  }
+  render() {
+    const kind = this.kind === "outbox" ? "outbox" : "inbox"
+    const title = kind === "outbox" ? "Outbox" : "Inbox"
+    const all = this.rows || []
+    const current = this.filter || "all"
+    const rows = current === "all" ? all : all.filter((row) => row.status === current)
+    const filters = kind === "outbox"
+      ? ["all", "pending", "processing", "sent", "failed"]
+      : ["all", "pending", "processing", "done", "dropped"]
+    const labels = { all: "全部", ...QUEUE_STATUS_LABEL }
+    const counts = this.counts || {}
+    const total = Object.values(counts).reduce((sum, value) => sum + Number(value || 0), 0)
+    return html`
+      <section class="panel">
+        <div class="panel-head queue-head">
+          <div>
+            <h2>${title}</h2>
+            <div class="hint">${kind === "outbox" ? "外部通知与邮件的持久外发队列" : "调度、巡检与任务更新的持久事件队列"}</div>
+          </div>
+          <div class="panel-side">
+            <div class="tabs queue-tabs" role="tablist" aria-label="${title} 状态筛选">
+              ${filters.map((status) => html`
+                <button
+                  class=${"tab" + (current === status ? " is-active" : "")}
+                  role="tab"
+                  aria-selected=${current === status ? "true" : "false"}
+                  @click=${() => emit(this, "queue-filter", { queue: kind, status })}
+                >${labels[status]} ${status === "all" ? total : Number(counts[status] || 0)}</button>`)}
+            </div>
+            <button class="ghost" ?disabled=${this.busy === "loading"} @click=${() => emit(this, "queue-refresh", { queue: kind })}>
+              ${this.busy === "loading" ? "刷新中…" : "刷新"}
+            </button>
+          </div>
+        </div>
+        ${this.error ? html`<div class="panel-note is-error" role="alert">${this.error}</div>` : ""}
+        ${rows.length ? html`
+          <div class="table-wrap">
+            <table class="tasks queue-table">
+              <thead><tr>
+                <th class="col-id">ID</th>
+                <th class="col-kind">${kind === "outbox" ? "通道" : "类型"}</th>
+                <th>内容</th>
+                <th class="col-state">状态</th>
+                <th class="col-try">尝试</th>
+                <th class="col-time">更新</th>
+                <th class="col-detail">详情</th>
+              </tr></thead>
+              <tbody>
+                ${rows.map((row) => html`
+                  <tr>
+                    <td class="id-cell">#${row.id}</td>
+                    <td class="branch-cell" title=${kind === "outbox" ? row.channel : row.kind}>${kind === "outbox" ? row.channel : row.kind}</td>
+                    <td class="title-cell" title=${queueSummary(kind, row)}>${queueSummary(kind, row) || "—"}</td>
+                    <td><span class=${"badge " + (row.status === "processing" ? "working" : row.status === "sent" ? "done" : row.status)}>${QUEUE_STATUS_LABEL[row.status] || row.status}</span></td>
+                    <td class="try-cell">${row.attempts || 0}${kind === "outbox" ? `/${row.maxAttempts || "—"}` : ""}</td>
+                    <td class="time-cell">${stampText(row.updatedAt) || "—"}</td>
+                    <td class="detail-cell"><button class="ghost" @click=${() => this.toggle(row.id)}>${this.openKey === row.id ? "收起" : "详情"}</button></td>
+                  </tr>
+                  ${this.openKey === row.id ? this.detail(row) : ""}`)}
+              </tbody>
+            </table>
+          </div>
+          <div class="panel-foot">当前显示 ${rows.length} 条 · 每 15 秒自动刷新 · 点击「详情」查看完整 payload</div>`
+          : html`<div class="empty">
+              <div class="empty-title">${this.busy === "loading" ? `正在读取 ${title}…` : "当前分类没有记录"}</div>
+              <div class="empty-sub">${kind === "outbox" ? "外发意图入队后会出现在这里" : "持久事件写入后会出现在这里"}</div>
+            </div>`}
       </section>`
   }
 }
@@ -701,6 +837,14 @@ class FmConsole extends LitElement {
     schedules: { attribute: false },
     workHours: { attribute: false },
     operations: { attribute: false },
+    inboxData: { attribute: false },
+    outboxData: { attribute: false },
+    inboxFilter: { type: String },
+    outboxFilter: { type: String },
+    inboxBusy: { type: String },
+    outboxBusy: { type: String },
+    inboxError: { type: String },
+    outboxError: { type: String },
     workflow: { attribute: false },
     nodeBusy: { type: String },
     taskTab: { type: String },
@@ -724,8 +868,8 @@ class FmConsole extends LitElement {
     super()
     this.data = null
     this.mode = "system"
-    // view：overview（工单）/ schedules（定时任务）/ operations（操作日志）
-    this.view = "overview"
+    // 首页主导航：Inbox / Outbox / Tasks；默认保留任务总览。
+    this.view = "tasks"
     try {
       this.sidebarCollapsed = localStorage.getItem(SIDEBAR_KEY) === "1"
     } catch {
@@ -734,6 +878,14 @@ class FmConsole extends LitElement {
     this.schedules = []
     this.workHours = { start: "08:30", end: "18:30" }
     this.operations = []
+    this.inboxData = { events: [], counts: {} }
+    this.outboxData = { messages: [], counts: {} }
+    this.inboxFilter = "all"
+    this.outboxFilter = "all"
+    this.inboxBusy = ""
+    this.outboxBusy = ""
+    this.inboxError = ""
+    this.outboxError = ""
     this.workflow = null
     this.nodeBusy = ""
     // 分配任务卡片的两页：today（已分配）/ pending（待分配，可点接单）
@@ -798,6 +950,7 @@ class FmConsole extends LitElement {
     this._onRefresh = () => this.syncNow()
     this._onView = (e) => {
       this.view = e.detail.view
+      if (this.view === "inbox" || this.view === "outbox") this.loadQueue(this.view)
       if (this.view === "schedules") this.loadSchedules()
       if (this.view === "operations") this.loadOperations()
     }
@@ -814,6 +967,11 @@ class FmConsole extends LitElement {
     this._onOpFilter = (e) => {
       this.opFilter = e.detail.filter
     }
+    this._onQueueFilter = (e) => {
+      const kind = e.detail.queue === "outbox" ? "outbox" : "inbox"
+      this[`${kind}Filter`] = e.detail.status || "all"
+    }
+    this._onQueueRefresh = (e) => this.loadQueue(e.detail.queue)
     this.addEventListener("theme-set", this._onTheme)
     this.addEventListener("day-set", this._onDay)
     this.addEventListener("refresh", this._onRefresh)
@@ -826,6 +984,8 @@ class FmConsole extends LitElement {
     this._onNodeToggle = (e) => this.toggleNode(e.detail)
     this.addEventListener("node-toggle", this._onNodeToggle)
     this.addEventListener("operation-filter", this._onOpFilter)
+    this.addEventListener("queue-filter", this._onQueueFilter)
+    this.addEventListener("queue-refresh", this._onQueueRefresh)
     this._onTaskTab = (e) => {
       const tab = e.detail.tab === "pending" ? "pending" : "today"
       if (this.taskTab === tab) return
@@ -844,6 +1004,7 @@ class FmConsole extends LitElement {
       this.load()
       this.loadWorkflow()
       if (this.taskTab === "pending") this.loadCandidates()
+      if (this.view === "inbox" || this.view === "outbox") this.loadQueue(this.view)
       if (this.view === "schedules") this.loadSchedules()
       if (this.view === "operations") this.loadOperations()
     }
@@ -856,9 +1017,12 @@ class FmConsole extends LitElement {
     this.loadWorkflow()
     this.loadSchedules()
     this.loadOperations()
+    this.loadQueue("inbox")
+    this.loadQueue("outbox")
     this._loadTimer = setInterval(() => {
       this.load()
       this.loadWorkflow()
+      if (this.view === "inbox" || this.view === "outbox") this.loadQueue(this.view)
       if (this.view === "schedules") this.loadSchedules()
       if (this.view === "operations") this.loadOperations()
     }, 15000)
@@ -880,6 +1044,8 @@ class FmConsole extends LitElement {
     this.removeEventListener("schedule-run", this._onScheduleRun)
     this.removeEventListener("node-toggle", this._onNodeToggle)
     this.removeEventListener("operation-filter", this._onOpFilter)
+    this.removeEventListener("queue-filter", this._onQueueFilter)
+    this.removeEventListener("queue-refresh", this._onQueueRefresh)
     this.removeEventListener("task-tab", this._onTaskTab)
     this.removeEventListener("candidates-refresh", this._onCandRefresh)
     this.removeEventListener("candidate-pick", this._onCandidatePick)
@@ -1041,6 +1207,23 @@ class FmConsole extends LitElement {
     }
   }
 
+  async loadQueue(kind) {
+    const queue = kind === "outbox" ? "outbox" : "inbox"
+    if (this[`${queue}Busy`] === "loading") return
+    this[`${queue}Busy`] = "loading"
+    try {
+      const res = await fetch(`/api/${queue}?limit=200`, { cache: "no-store" })
+      const body = await res.json()
+      if (!res.ok || body.ok === false) throw new Error(body.message || body.error || `HTTP ${res.status}`)
+      this[`${queue}Data`] = body
+      this[`${queue}Error`] = ""
+    } catch (e) {
+      this[`${queue}Error`] = `拿不到 ${queue === "outbox" ? "Outbox" : "Inbox"}：${e.message}`
+    } finally {
+      this[`${queue}Busy`] = ""
+    }
+  }
+
   async loadSchedules() {
     try {
       const res = await fetch("/api/schedules", { cache: "no-store" })
@@ -1159,7 +1342,7 @@ class FmConsole extends LitElement {
 
   render() {
     return html`
-      <fm-head .data=${this.data} .mode=${this.mode} .error=${this.error} .day=${this.day} .today=${this.data?.today || ""}></fm-head>
+      <fm-head .data=${this.data} .mode=${this.mode} .error=${this.error} .day=${this.day} .today=${this.data?.today || ""} .view=${this.view}></fm-head>
       <div class="app-shell">
         <fm-sidebar .view=${this.view} .collapsed=${this.sidebarCollapsed}></fm-sidebar>
         <main>
@@ -1167,6 +1350,24 @@ class FmConsole extends LitElement {
           ? html`<fm-schedules .schedules=${this.schedules} .workHours=${this.workHours} .busy=${this.schedBusy} .error=${this.schedError} .note=${this.schedNote}></fm-schedules>`
           : this.view === "operations"
           ? html`<fm-operations .operations=${this.operations} .filter=${this.opFilter}></fm-operations>`
+          : this.view === "inbox"
+          ? html`<fm-queue
+              kind="inbox"
+              .rows=${this.inboxData.events || []}
+              .counts=${this.inboxData.counts || {}}
+              .filter=${this.inboxFilter}
+              .busy=${this.inboxBusy}
+              .error=${this.inboxError}
+            ></fm-queue>`
+          : this.view === "outbox"
+          ? html`<fm-queue
+              kind="outbox"
+              .rows=${this.outboxData.messages || []}
+              .counts=${this.outboxData.counts || {}}
+              .filter=${this.outboxFilter}
+              .busy=${this.outboxBusy}
+              .error=${this.outboxError}
+            ></fm-queue>`
           : this.data
           ? html`
               <fm-stats .stats=${this.data.stats} .scope=${this.data.isToday === false ? this.data.day : "今日"}></fm-stats>
@@ -1204,6 +1405,7 @@ customElements.define("fm-sidebar", FmSidebar)
 customElements.define("fm-head", FmHead)
 customElements.define("fm-stats", FmStats)
 customElements.define("fm-tasks", FmTasks)
+customElements.define("fm-queue", FmQueue)
 customElements.define("fm-schedules", FmSchedules)
 customElements.define("fm-operations", FmOperations)
 customElements.define("fm-foot", FmFoot)

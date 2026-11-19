@@ -133,3 +133,34 @@ test("HTTP：/api/operations 返回进行中与历史操作", async () => {
     store.close()
   }
 })
+
+test("HTTP：/api/inbox 与 /api/outbox 返回首页队列并透传筛选条件", async () => {
+  const dir = tmpdir()
+  const calls = []
+  const h = await startConsoleHttp({
+    store: {}, ctx: {}, dir, host: "127.0.0.1", port: 0, log: () => {},
+    onRpc: async (req) => {
+      calls.push(req)
+      if (req.cmd === "inbox list") {
+        return { ok: true, events: [{ id: 1, kind: "task.update", status: "pending", payload: {} }], schedules: [], counts: { pending: 1 } }
+      }
+      return { ok: true, messages: [{ id: 2, channel: "mail", status: "sent", payload: { subject: "验收" } }], counts: { sent: 1 } }
+    },
+  })
+  try {
+    const inbox = await (await fetch(`${h.url}/api/inbox?limit=25&status=pending`)).json()
+    assert.equal(inbox.events[0].kind, "task.update")
+    assert.equal(inbox.counts.pending, 1)
+    const outbox = await (await fetch(`${h.url}/api/outbox?limit=50&status=sent&channel=mail`)).json()
+    assert.equal(outbox.messages[0].channel, "mail")
+    assert.equal(outbox.counts.sent, 1)
+    assert.deepEqual(calls.map(({ cmd, limit, status, channel }) => ({ cmd, limit, status, channel })), [
+      { cmd: "inbox list", limit: 25, status: "pending", channel: undefined },
+      { cmd: "outbox list", limit: 50, status: "sent", channel: "mail" },
+    ])
+    const rejected = await fetch(`${h.url}/api/inbox`, { method: "POST" })
+    assert.equal(rejected.status, 405)
+  } finally {
+    await new Promise((r) => h.server.close(r))
+  }
+})
