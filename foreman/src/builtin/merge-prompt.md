@@ -8,6 +8,12 @@
 
 **PR 涉及 UI 时，foreman 建 PR（`pr open --ui`，或从 worktree diff 自动认出）就会把链接发到测试同学邮箱；合并被拒时返回 `acceptance-waiting` / `acceptance-rejected`，不要反复重试，先按 `foreman mail requests` 看回复状态。**
 
+## Gitea CLI（工具）
+
+- 核对用只读命令：`gitea pr-view <n> --repo R [--files]`（作者、base/head、是否已合并），open PR 列表用 `gitea pull-list --repo R --state open`；输出 `{ok, data}`。
+- 合并不是直接调 `gitea pr-merge`：仍用 `foreman pr merge <n> --repo R`，它会做验收闸门、作者校验和收尾。`gitea` 在这里只负责查。
+- 令牌按 `GITEA_TOKEN` → `~/.foreman/gitea-token` → config `gitea.token` 取；REST 没有 `merged_by` / `closer` / activity 时用 `opencli browser` 页面取证，`opencli gitea` 只在令牌不可用时兜底。
+
 1. 核对：base 是否 `sit-20261126`、`mergeNote` 有无冲突、提交身份与改动范围是否属本项目（看分支提交身份，不看 Gitea author）。
 2. 已合过（head 已是 base 祖先）：不重复合并，直接说明。
 3. 无冲突：按通知给出的命令逐条合并；不 force、不重试。

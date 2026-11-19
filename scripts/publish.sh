@@ -73,6 +73,9 @@ pkg.scripts = {}
 fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + "\n")
 ' "$dst/package.json"
 
+  # bin 入口要可执行，否则 npm link 出来的命令会 Permission denied
+  chmod +x "$dst/bin/"*.mjs 2>/dev/null || true
+
   printf '{\n  "commit": "%s",\n  "at": "%s",\n  "source": "%s"\n}\n' \
     "$COMMIT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$src" > "$dst/PUBLISHED.json"
 
@@ -90,7 +93,10 @@ publish_skills() {
     dst="$DIST/skills/$name"
     rm -rf "$dst"
     cp -R "$dir" "$dst"
-    printf '{\n  "commit": "%s",\n  "at": "%s",\n  "source": "%s"\n}\n' \
+    # bin 入口要可执行，否则 npm link 出来的命令会 Permission denied
+  chmod +x "$dst/bin/"*.mjs 2>/dev/null || true
+
+  printf '{\n  "commit": "%s",\n  "at": "%s",\n  "source": "%s"\n}\n' \
       "$COMMIT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${dir%/}" > "$dst/PUBLISHED.json"
     ln -sfn "$dst" "$SKILLS_LINK/$name"
     echo "已发布 skill：${name} → ${dst}（链接 ${SKILLS_LINK}/${name}）"
@@ -122,6 +128,9 @@ publish_adapters() {
   rm -rf "$dst"
   mkdir -p "$dst"
   cp "$src"/*.js "$dst/"
+
+  # bin 入口要可执行，否则 npm link 出来的命令会 Permission denied
+  chmod +x "$dst/bin/"*.mjs 2>/dev/null || true
 
   printf '{\n  "commit": "%s",\n  "at": "%s",\n  "source": "%s"\n}\n' \
     "$COMMIT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$src" > "$dst/PUBLISHED.json"

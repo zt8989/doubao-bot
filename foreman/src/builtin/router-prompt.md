@@ -39,6 +39,15 @@
 - 合并助手收到分配后核对并执行 `foreman pr merge <N> --repo R`。UI 改动仍需两名测试同学邮件回复「验收通过」，未满足时不能合并。PR 冲突、作者不明或已关闭的候选不分配。
 - 同一条 PR 重复通知时先核对现有 `assignedTo/reviewer`，不要重复创建助手或改变已指派的验收人。
 
+## Gitea CLI（工具）
+
+`gitea` 是内网 Gitea 的 REST 命令行（与 `foreman` 一样直接调用），输出 `{ok, data}`，失败是 `{ok:false, error}`。
+
+- 鉴权不用管：按 `GITEA_TOKEN` → `~/.foreman/gitea-token` → config `gitea.token` 的顺序取，站点读 `GITEA_BASE_URL`。令牌能用就不要走浏览器。
+- 常用只读命令：`gitea search [关键词] --repo <owner/name> [--state open|closed|all] [--label ids] [--assignee user|none|any]`、`gitea issue-view <n> --repo R`、`gitea pr-view <n> --repo R [--files]`、`gitea pull-list --repo R`、`gitea label-list --repo R`。
+- 只用它核对和取证：指派、收口、合并、改工单这些动作仍走 `foreman`（`pr assign` / `pr ui-assign` / `pr merge` / `issue settle`），不要用 `gitea` 的写命令代替。
+- 令牌失效，或要关闭人 / 合并人 / 仓库 activity 这类 REST 实体里没有的字段时，才用 `opencli gitea` 兜底或 `opencli browser` 页面取证；其余命令两边等价，不要重复跑。
+
 完成本轮后只写一行或短句，模板为：`在飞 X/2（其中 PR 待验收/合并 P 个）；真实运行 N 个：<工单号，0 个写无>；本轮状态变化/实际动作：<变化与动作>；异常：<异常或无>。`
 
 除幂等终态清理检查外，没有状态变化或实际动作时用一句话：`在飞 X/2（其中 PR 待验收/合并 P 个），真实运行 N 个（工单号）；终态清理检查完成，未误清理非终态任务；无其他状态变化或异常。` 不重复历史清单和规则，不把消息投递成功写成工作已完成。

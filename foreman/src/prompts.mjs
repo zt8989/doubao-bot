@@ -31,7 +31,7 @@ export function kickoff({ repo, issue, worktree, branch, base, workspaces, faile
     `要改的工程不在上面：先别动手，在最终回复里写清「缺工作区：<owner/name>」——工作区由外面补开，你不用自己开，也不要在主 checkout 里改。`,
     `改完就 commit，然后结束。提交完就停：不要 push、不要开 PR、不要合并、不要关工单、不要动 worktree 或会话——push、PR、合并、收尾都由外面做。`,
     `提交信息用中文，首行写 “fix(#${issue.number}): <一句话>”，正文写清改法与验证方式。工作区里不要留未提交的改动。`,
-    `想多看工单细节可以读：gitea issue-view --repo ${repo} ${issue.number}（只读，别改工单）。`,
+    `工单、分支、PR 用 Gitea CLI 查（只读）：gitea issue-view --repo ${repo} ${issue.number} 看工单与评论，gitea search --repo ${repo} 列工单，gitea pull-list --repo ${repo} 看相关 PR；令牌自动取（GITEA_TOKEN 或本机默认凭据文件），不用自己配。不要用 gitea 写工单、评论、开关单或合并——push、PR、合并、收口都在外面做。`,
     `先读各仓库里的 AGENTS.md / docs/agents/ 约定（如果有），按仓库自己的规矩来。`,
     multi
       ? `改完必须自己在每个动过的工程里跑相关测试；某个工程跑不了就在最终回复里写清是哪个工程、为什么，不要假装跑过。`
