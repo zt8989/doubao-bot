@@ -290,6 +290,8 @@ export class Book {
       repo: entry.repo ?? "",
       number: entry.number ?? null,
       notifyTo: entry.notifyTo ?? "",
+      // 补派会话是谁登记监听的，谁就是父会话；sessions 查询靠它过滤当前会话。
+      parent: String(entry.parent ?? list[i]?.parent ?? ""),
       addedAt: nowIso(),
     }
     if (i >= 0) {

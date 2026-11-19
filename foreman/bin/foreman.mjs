@@ -42,6 +42,7 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman run   [--once] [--dry-run] [--direct] [--repo <名字|owner/name>] [--every <秒>] [--notify <会话id|标题>] [--no-notify] [-c <配置>]
   foreman orch start [--name <会话名>]   起/复用全局编排会话（幂等；只有自动接单用这条）
   foreman orch show                    看每条编排会话绑了哪些工作会话、最近 steer 了什么
+  foreman sessions [--orchestrator <id>]  查当前会话分配出去的所有会话（默认取当前豆包会话）
   foreman hand <owner/name>#<单号> [--orchestrator <id>]      把工单交给编排会话（它再自己调 dispatch）
   foreman dispatch <owner/name>#<单号> (--prompt <编排指令> | --file <指令文件>) [--orchestrator <id>]
                                       提示词必填：编排分析、任务范围与验收要求随首句注入，头部带工单 ID 和 URL
@@ -229,6 +230,7 @@ async function cmdWatch(pos, flags) {
       notifyTo: flags.notify && flags.notify !== true ? String(flags.notify) : "",
       repo: flags.repo && flags.repo !== true ? String(flags.repo) : "",
       number: flags.number && flags.number !== true ? Number(flags.number) : null,
+      ...callerOrchestratorArg(flags),
     }
     const r = await callRaw(resolvePort(cfg), req, 3000)
     return out({ ok: true, ...r })
@@ -612,6 +614,15 @@ async function cmdOrch(pos, flags) {
   return out({ ok: true, ...r })
 }
 
+async function cmdSessions(pos, flags) {
+  const cfg = loadConfig(flags.config)
+  const orchestrator = callerOrchestrator(flags)
+  if (!orchestrator) throw new Error("用法：foreman sessions [--orchestrator <会话id>]（豆包会话里会自动识别当前会话）")
+  const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "sessions", orchestrator }, 60000)
+  if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
+  return out({ ok: true, ...r })
+}
+
 // 调用方会话 = 谁发起的这张单。两种来源：
 //   1) 定时任务自动接单：发起的进程是服务本身，没有会话 → 返回空，由 foreman 用全局编排会话；
 //   2) 用户在自己的豆包会话里发起：显式 --orchestrator <id|名称>，或自动取 MCP_VM_CONVERSATION_ID
@@ -730,6 +741,8 @@ async function main() {
       return cmdRun(pos, flags)
     case "orch":
       return cmdOrch(pos, flags)
+    case "sessions":
+      return cmdSessions(pos, flags)
     case "hand":
       return cmdHand(pos, flags)
     case "dispatch":

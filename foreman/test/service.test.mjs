@@ -318,6 +318,47 @@ test("notifyDecision：无 RESULT 按 session-done 通知并带最后回复；�
   assert.ok(!done.text.includes("原文不该出现"))
 })
 
+test("sessions RPC：只列当前编排会话派出的工作/补派会话并去重", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = mkCfg(dir)
+    const book = new Book(cfg.stateFile)
+    book.setIssue("demo/demo#1", {
+      state: "working", agent: "worker-1", agentConvId: "conv-worker-1", orchestrator: "conv-current",
+    })
+    book.record("worker-1", { convId: "conv-worker-1", kind: "worker", parent: "conv-current" })
+    book.setIssue("demo/demo#2", {
+      state: "working", agent: "worker-2", agentConvId: "conv-worker-2", orchestrator: "conv-other",
+    })
+    book.setIssue("demo/demo#3", { state: "working", orchestrator: "conv-current" })
+    book.setWatch({ target: "conv-legacy-helper", name: "legacy-helper", issueKey: "demo/demo#3" })
+    book.setWatch({ target: "conv-worker-1", name: "worker-1", issueKey: "demo/demo#1", parent: "conv-current" })
+    book.setWatch({ target: "conv-other-helper", name: "other-helper", parent: "conv-other" })
+    const ctx = mkCtx(cfg)
+
+    const added = await handleRequest(ctx, {
+      id: "s0", cmd: "watch add", target: "conv-helper", name: "helper", orchestrator: "conv-current",
+    })
+    assert.equal(added.ok, true)
+    assert.equal(added.watcher.parent, "conv-current")
+
+    const r = await handleRequest(ctx, { id: "s1", cmd: "sessions", orchestrator: "conv-current" })
+    assert.equal(r.ok, true)
+    assert.equal(r.count, 3)
+    assert.deepEqual(r.sessions.map((s) => s.convId).sort(), ["conv-helper", "conv-legacy-helper", "conv-worker-1"])
+    assert.deepEqual(r.sessions.find((s) => s.convId === "conv-worker-1").sources, ["dispatch", "watch"])
+    assert.equal(r.sessions.find((s) => s.convId === "conv-legacy-helper").issueKey, "demo/demo#3")
+
+    const other = await handleRequest(ctx, { id: "s2", cmd: "sessions", orchestrator: "conv-other" })
+    assert.deepEqual(other.sessions.map((s) => s.convId).sort(), ["conv-other-helper", "conv-worker-2"])
+    const missing = await handleRequest(ctx, { id: "s3", cmd: "sessions" })
+    assert.equal(missing.ok, false)
+    assert.match(missing.message, /当前会话 id/)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("resume RPC：只收会话 id，并 steer 这条会话而不是按工单续跑", async () => {
   const dir = tmpDir()
   try {

@@ -197,6 +197,54 @@ export function workerOf(book, issueKey) {
   return { name, convId, orchestrator: String(rec?.orchestrator ?? "").trim() }
 }
 
+// 当前编排会话派出去的全部会话：dispatch 的主工作会话 + watch add 登记的补派会话。
+// 老 watch 记录没有 parent，按它关联工单的 orchestrator 兜底；同一会话派多次只返回一条。
+export function delegatedSessions(book, orchestrator) {
+  const parent = String(orchestrator ?? "").trim()
+  if (!parent) return []
+  const rows = new Map()
+  const add = ({ name = "", convId = "", issueKey = "", state = "", source = "" } = {}) => {
+    name = String(name ?? "").trim()
+    convId = String(convId ?? "").trim()
+    const key = convId || name
+    if (!key || key === parent) return
+    const prev = rows.get(key) ?? { name: "", convId: "", issueKey: "", state: "", issueKeys: [], sources: [] }
+    const issue = String(issueKey ?? "").trim()
+    rows.set(key, {
+      name: name || prev.name,
+      convId: convId || prev.convId,
+      issueKey: issue || prev.issueKey,
+      state: String(state ?? "") || prev.state,
+      issueKeys: [...new Set([...prev.issueKeys, ...(issue ? [issue] : [])])],
+      sources: [...new Set([...prev.sources, ...(source ? [source] : [])])],
+    })
+  }
+
+  for (const [key, rec] of Object.entries(book?.issues ?? {})) {
+    if (String(rec?.orchestrator ?? "").trim() !== parent) continue
+    const worker = workerOf(book, key)
+    add({ name: worker.name, convId: worker.convId, issueKey: key, state: rec?.state, source: "dispatch" })
+  }
+  for (const [name, rec] of Object.entries(book?.sessions ?? {})) {
+    if (String(rec?.parent ?? "").trim() !== parent) continue
+    const issueKey = String(rec?.issueKey ?? "") || Object.entries(book?.issues ?? {}).find(([, it]) => String(it?.agent ?? "") === name)?.[0] || ""
+    add({ name, convId: rec?.convId, issueKey, state: book?.issue?.(issueKey)?.state, source: "dispatch" })
+  }
+  for (const watch of book?.watch ?? []) {
+    const issueKey = String(watch?.issueKey ?? "")
+    const owner = String(watch?.parent ?? "").trim() || String(book?.issue?.(issueKey)?.orchestrator ?? "").trim()
+    if (owner !== parent) continue
+    add({
+      name: watch?.name,
+      convId: watch?.target,
+      issueKey,
+      state: book?.issue?.(issueKey)?.state,
+      source: "watch",
+    })
+  }
+  return [...rows.values()].sort((a, b) => a.issueKey.localeCompare(b.issueKey) || a.name.localeCompare(b.name) || a.convId.localeCompare(b.convId))
+}
+
 // 工作会话建好后绑到编排会话：一处写工单、一处写会话，后续更新认这两个字段。
 export function bindWorker(book, { issueKey, name, convId, orchestrator = "", notify = true } = {}) {
   const key = String(issueKey ?? "")

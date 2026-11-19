@@ -333,6 +333,8 @@ foreman run --notify <会话id|标题>  # 这一轮派出的会话，登记监�
 foreman run --no-notify          # 这一轮不登记监听，因此不会有通知（连同其它参数一起用）
 foreman orch start               # 手工兼容入口：起/复用顶层全局编排（自动巡检不用它）
 foreman orch show                 # 每条编排会话绑了哪些工作会话、最近 steer 了什么
+foreman sessions                  # 只列当前会话派出的工作/补派会话（默认取 MCP_VM_CONVERSATION_ID）
+foreman sessions --orchestrator <会话id>  # 终端里查询指定会话派出的全部会话
 foreman hand <owner/name>#N      # 把工单交给编排会话（不建工作区、不开工作会话）
 foreman dispatch <owner/name>#N (--prompt <编排指令> | --file <指令文件>)
                                  # 提示词必填：编排分析、任务范围与验收随首句注入，头部带完整工单 ID 和 URL；重派随 steer 发送

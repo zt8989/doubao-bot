@@ -12,6 +12,7 @@ import { notifyTarget, shouldNotify, notifyText, runRound, acquireLock, releaseL
 import {
   cleanIssue,
   cleanableIssues,
+  delegatedSessions,
   ensureOrchestrator,
   handToOrchestrator,
   nextStepLine,
@@ -2009,6 +2010,14 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     return ok({ ...out, orchestrator: orchestratorInfo(new Book(ctx.cfg.stateFile)) })
   }
 
+  // sessions：只列指定编排会话派出去的会话，不把其他用户/工单的会话混进来。
+  if (cmd === "sessions") {
+    const orchestrator = String(req.orchestrator ?? "").trim()
+    if (!orchestrator) return fail("bad-request", "sessions 需要当前会话 id；在豆包会话里会自动识别，终端里请传 --orchestrator <会话id>")
+    const sessions = delegatedSessions(new Book(ctx.cfg.stateFile), orchestrator)
+    return ok({ orchestrator, count: sessions.length, sessions })
+  }
+
   // orch show：整条链路现在绑在哪条会话上、最近 steer 了什么。
   if (cmd === "orch show") {
     const book = new Book(ctx.cfg.stateFile)
@@ -2527,6 +2536,7 @@ export async function handleRequest(ctx, req) {  const id = req?.id
       repo,
       number,
       notifyTo: String(req?.notifyTo ?? ""),
+      parent: String(req?.orchestrator ?? ""),
     }
     const book = new Book(ctx.cfg.stateFile)
     const saved = book.setWatch(entry)
