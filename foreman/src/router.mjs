@@ -1,44 +1,18 @@
 // router agent：接收未定向消息、巡检、接单与异常分派；Foreman 只负责持久投递和会话轮换。
 import { Book } from "./book.mjs"
 import { builtinPrompt } from "./builtin-prompts.mjs"
-import { cleanableIssues } from "./sessionflow.mjs"
-
-const ACTIVE_STATES = new Set(["planned", "handed", "working", "pr-open", "needs-human", "blocked", "failed", "escalated"])
 
 function stamp(date) {
   return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z").replace("T", "-")
 }
 
-function issueLine(key, rec, running) {
-  const worker = String(rec?.agentConvId ?? rec?.agent ?? "") || "未派"
-  const live = worker !== "未派" && running?.[worker] ? `，执行会话${running[worker].running ? "运行中" : "未运行"}` : ""
-  const failure = String(rec?.lastFailure ?? "").trim()
-  const prs = Array.isArray(rec?.prs) && rec.prs.length
-    ? `，PR=${rec.prs.map((p) => `${p.repo}#${p.pr}`).join("、")}`
-    : rec?.pr ? `，PR=${rec.pr}` : ""
-  return `- ${key}｜本地状态=${rec?.state ?? "未知"}｜编排=${rec?.orchestrator || "无"}｜执行=${worker}${live}${prs}${failure ? `｜最近失败=${failure}` : ""}`
-}
-
-export async function inspectionSnapshot(ctx) {
-  const book = new Book(ctx.cfg.stateFile)
-  let running = null
-  if (typeof ctx.dws?.runningMap === "function") {
-    try { running = await ctx.dws.runningMap() } catch { running = null }
-  }
-  const active = Object.entries(book.issues ?? {})
-    .filter(([, rec]) => ACTIVE_STATES.has(String(rec?.state ?? "")))
-    .sort(([a], [b]) => a.localeCompare(b))
-  const issues = active.slice(0, 60).map(([key, rec]) => issueLine(key, rec, running))
-  const maxRunning = Number(ctx.cfg.pickup?.maxRunning ?? 2)
-  const remaining = Math.max(0, maxRunning - active.length)
-  const cleanup = cleanableIssues(book)
+// 保留旧导出名作内部兼容；周期消息只含巡检指令，不再读取账本或注入历史清单。
+export async function inspectionSnapshot() {
   return [
-    "每轮先执行 `foreman tasks --json`；只对 state=done/cleaned 的残留任务执行 `foreman clean --all`，及时清理已合并、已关闭工单的工作区与会话。working/pr-open 等非终态不得清理。",
-    `已收口待清理快照：${cleanup.length ? cleanup.join("、") : "空。"}`,
-    `在飞容量：${active.length}/${maxRunning}；还可新接：${remaining}。这是全部未收口工单的合计上限，不是本轮新增额度。`,
-    "dry-run 只用于确认候选优先级，不得采用它的空余槽位；达到上限时禁止 run/pickup/hand/orch start/dispatch 接新单。handed 也占槽，每次接单后重新计算。",
-    issues.length ? "未收口工单快照：" : "未收口工单快照：空。",
-    ...issues,
+    "本轮先执行 `foreman tasks --json`，只使用这次实时结果，不沿用此前轮次的数据或清单。状态处理由你决策，不机械重派。",
+    "分别统计：未收口 X=planned/handed/working/pr-open/needs-human/blocked/failed/escalated（handed 占槽，合计上限 2）；真实运行 N=working 且执行会话有当前运行证据；PR 待验收/合并 P=pr-open。8/2 不是 8 个正在运行。满额禁止 run/pickup/hand/orch start/dispatch；dry-run 仅看候选优先级。",
+    "已收口仅指 done/cleaned，不代表工作区或会话已清理。clean --all 只对终态做幂等检查，working/pr-open/failed 等非终态不得清理；cleaned/keys 是候选数，不是实际清理数。无 notes 删除或归档证据时只报“终态清理检查完成，未误清理非终态任务”。",
+    "汇报仅写：在飞 X/2（其中 PR 待验收/合并 P 个）、真实运行 N 个及工单号、本轮状态变化/实际动作、异常；无变化用一句话，不复述历史清单和规则。",
   ].join("\n")
 }
 
@@ -133,7 +107,6 @@ export async function routerOnce(ctx, { now = new Date(), force = false, notice 
     if (includeScheduled) {
       sections.push([
         "【Foreman · router agent · 10分钟巡检】",
-        "请检查任务是否正常运行；先按 tasks 核对全部在飞工单总数，达到上限时禁止接新，只有仍有容量才按优先级接单。状态处理由你决策，不要机械重派。",
         await inspectionSnapshot(ctx),
       ].join("\n\n"))
     }
