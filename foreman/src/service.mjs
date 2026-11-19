@@ -1348,7 +1348,7 @@ export async function pollOnce(ctx) {
     }
     state.lastPollAt = nowIso()
     state.pollCount++
-    state.lastPollResult = `检查 ${out.checked} · 收工 ${out.settled} · 新入箱 ${out.enqueued ?? 0}`
+    state.lastPollResult = `检查 ${out.checked} · 收工 ${out.settled} · 通知 ${out.notified} · 续跑 ${out.steered}`
   } finally {
     state.polling = false
   }

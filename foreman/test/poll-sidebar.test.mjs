@@ -51,6 +51,7 @@ test("侧边栏显示还在跑：不调用 dws.status，也就不切窗口", asy
     const r = await pollOnce(ctx)
     assert.equal(r.checked, 1)
     assert.equal(r.notified, 0)
+    assert.equal(ctx.state.lastPollResult, "检查 1 · 收工 0 · 通知 0 · 续跑 0")
     assert.equal(calls.status, 0)
     assert.equal(calls.info, 0)
     assert.equal(calls.notified.length, 0)
