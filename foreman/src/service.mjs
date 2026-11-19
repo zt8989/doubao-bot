@@ -33,6 +33,7 @@ import { MailDriver, realRecipients } from "./mail.mjs"
 import { acceptanceGate, detectUiChange, mailPollOnce, requestAcceptance, mailAcceptanceSent, mailAcceptanceFailed, deliverMailReply } from "./mailflow.mjs"
 import { inflightIssues } from "./planner.mjs"
 import { routerOnce } from "./router.mjs"
+import { dreamOnce } from "./dreaming.mjs"
 import { listPulls, mergePr, closeIssue, createPr, commentIssue } from "./gitea.mjs"
 import { ConsoleStore } from "./console.mjs"
 import { InboxStore, AgentWorker, ScheduleRunner } from "./inbox.mjs"
@@ -710,6 +711,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     // router agent 巡检运行时（持久会话与成功投递时间在 Book.router）
     router: { lastAt: null, count: 0, lastResult: null, running: false, nextAt: "" },
     routerInterval: null,
+    dreaming: { lastAt: null, count: 0, lastResult: null, running: false, nextAt: "" },
     // 验收邮件轮询运行时
     mail: { lastPollAt: null, pollCount: 0, polling: false, lastResult: null, nextAt: "" },
     mailInterval: null,
@@ -873,7 +875,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   // 只 bypass「没开 / 不在工作时间」；容量、busy、锁、节点暂停这些保护仍然生效。
   ctx.runSchedule = async (id) => {
     if (id === "pickup") return pickupOnce(ctx, { force: true })
-    if (["prWatch", "mail", "router", "inspector"].includes(id)) return scheduler.runNow(id === "inspector" ? "router" : id)
+    if (["prWatch", "mail", "router", "inspector", "dreaming"].includes(id)) return scheduler.runNow(id === "inspector" ? "router" : id)
     throw Object.assign(new Error(`${id} 没有可以立即执行的动作`), { code: "schedule_not_runnable" })
   }
   // 合并不再有定时任务（合并通道已取消）：`foreman pr merge` 当场执行，合完直接返回。
@@ -918,8 +920,23 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   })
   ctx.inboxWorker = worker
   inbox.onChange = () => worker.wake()
+  const recordDream = async () => {
+    if (state.dreaming.running) return { ok: true, skipped: "busy" }
+    state.dreaming.running = true
+    try {
+      const result = await dreamOnce(ctx)
+      if (result?.ok !== false) {
+        state.dreaming.lastAt = nowIso()
+        state.dreaming.count++
+        state.dreaming.lastResult = result.skipped ? `跳过：${result.skipped}` : `已派发 ${result.day} · ${result.session}`
+      }
+      return result
+    } finally {
+      state.dreaming.running = false
+    }
+  }
   const syncScheduleState = (items) => {
-    const ids = { prWatch: "pr", mail: "mail", router: "router" }
+    const ids = { prWatch: "pr", mail: "mail", router: "router", dreaming: "dreaming" }
     for (const [id, key] of Object.entries(ids)) {
       state[key].nextAt = items.find((item) => item.id === id)?.nextAt || ""
     }
@@ -930,6 +947,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
       prWatch: { type: "script", run: (_, { manual }) => runConfiguredScript(ctx, "prWatch", { manual }) },
       mail: { type: "script", run: () => recordMailPoll(() => runConfiguredScript(ctx, "mail")) },
       router: { type: "script", run: () => runConfiguredScript(ctx, "router") },
+      dreaming: { type: "agent", run: recordDream },
     },
     allow: (schedule) => schedule.id !== "prWatch" || inWorkHours(cfg),
     onChange: syncScheduleState,
@@ -941,6 +959,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
       { id: "prWatch", kind: "prWatch", executor: "script", cron: cronOf(cfg, "prWatch"), enabled: cfg.prWatch?.enabled === true },
       { id: "mail", kind: "mail", executor: "script", cron: cronOf(cfg, "mail"), enabled: cfg.mail?.enabled === true },
       { id: "router", kind: "router", executor: "script", cron: cronOf(cfg, "router"), enabled: (cfg.router ?? cfg.inspector)?.enabled === true },
+      { id: "dreaming", kind: "dreaming", executor: "agent", cron: cronOf(cfg, "dreaming"), enabled: cfg.memory?.dreaming?.enabled !== false },
       // 停用旧持久 Schedule；旧 Inbox 事件仍由 router handler 兼容消费。
       { id: "inspector", kind: "inspector", executor: "agent", cron: cronOf(cfg, "router"), enabled: false },
     ])
