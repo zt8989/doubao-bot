@@ -478,7 +478,7 @@ export class ConsoleStore {
   }
 
   /** 当天视图（给 HTTP /api/snapshot）。 */
-  snapshot({ book, cfg, pr = {}, service = {}, day = "" } = {}) {
+  snapshot({ book, cfg, pr = {}, service = {}, day = "", runningSessions = null } = {}) {
     const now = new Date()
     const today = localDay(now)
     const target = /^\d{4}-\d{2}-\d{2}$/.test(String(day || "")) ? String(day) : today
@@ -524,6 +524,8 @@ export class ConsoleStore {
       const past = pastOf(r)
       const state = past ? past.state : r.state
       const updatedAt = past ? past.at : (r.last_change_at || r.last_update_at)
+      const convId = String(book?.issues?.[r.key]?.agentConvId ?? "").trim()
+      const running = isToday && runningSessions !== null && Boolean(convId && runningSessions?.[convId]?.running === true)
       return {
         key: r.key,
         repo: r.repo,
@@ -536,6 +538,7 @@ export class ConsoleStore {
         attempts: r.attempts,
         note: r.note,
         agent: r.agent || "",
+        running,
         updatedAt,
         updatedAtClock: clockOf(updatedAt),
         firstSeenClock: clockOf(r.first_seen_at),
@@ -606,7 +609,7 @@ export class ConsoleStore {
       prs,
       stats: {
         tasks: tasks.length,
-        working: tasks.filter((t) => t.state === "working").length,
+        working: runningSessions === null ? tasks.filter((t) => t.state === "working").length : tasks.filter((t) => t.running).length,
         prOpen: tasks.filter((t) => t.state === "pr-open").length,
         prs: prs.length,
         pending: prs.filter((p) => p.pending).length,

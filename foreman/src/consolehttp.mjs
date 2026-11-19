@@ -87,8 +87,18 @@ export function startConsoleHttp({ store, ctx, dir, host = "127.0.0.1", port = 7
       req.on("error", reject)
     })
 
-  const snapshotNow = (day = "") => {
+  const snapshotNow = async (day = "") => {
     const book = new Book(ctx.cfg.stateFile)
+    // 首页「进行中」按执行会话的真实 running 状态算，不把待收口的 working 账本行算进去。
+    // 历史某天仍展示当日状态；读不到侧边栏时退回原账本口径，避免把暂时不可用误报成 0。
+    let runningSessions = null
+    if (!day && typeof ctx.dws?.runningMap === "function") {
+      try {
+        runningSessions = await ctx.dws.runningMap()
+      } catch (e) {
+        log(`控制台读实时会话状态失败，进行中暂按账本统计：${e.message}`)
+      }
+    }
     // 回看历史某天不用再扫一遍账本写库；看今天才同步，保持实时。
     const sync = day ? null : store.sync(book)
     return store.snapshot({
@@ -102,6 +112,7 @@ export function startConsoleHttp({ store, ctx, dir, host = "127.0.0.1", port = 7
         http: ctx.httpUrl ?? "",
       },
       day,
+      runningSessions,
     })
   }
 
@@ -129,7 +140,7 @@ export function startConsoleHttp({ store, ctx, dir, host = "127.0.0.1", port = 7
       }
 
       if (pathname === "/api/snapshot") {
-        return sendJson(res, 200, snapshotNow((url.searchParams.get("day") || "").trim()))
+        return sendJson(res, 200, await snapshotNow((url.searchParams.get("day") || "").trim()))
       }
 
       if (pathname === "/api/polls") {
@@ -273,7 +284,7 @@ export function startConsoleHttp({ store, ctx, dir, host = "127.0.0.1", port = 7
       if (pathname === "/api/sync") {
         if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
         const r = await ctx.prPoll()
-        return sendJson(res, r?.ok === false ? 500 : 200, { ok: r?.ok !== false, sync: r, snapshot: snapshotNow() })
+        return sendJson(res, r?.ok === false ? 500 : 200, { ok: r?.ok !== false, sync: r, snapshot: await snapshotNow() })
       }
 
       // 控制台前端：Vite 产物（console/dist，`npm run build:console`）。

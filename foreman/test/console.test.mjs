@@ -105,6 +105,33 @@ test("今日任务先按状态排序，进行中优先，同状态按最后更�
   store.close()
 })
 
+test("进行中统计只算执行会话仍在跑的工单，不把待收口账本行算进去", () => {
+  const store = tmpStore()
+  const now = new Date().toISOString()
+  const book = {
+    issues: {
+      "a/b#1": { title: "实际在跑", state: "working", agentConvId: "conv-live", updatedAt: now },
+      "a/b#2": { title: "会话已停", state: "working", agentConvId: "conv-idle", updatedAt: now },
+      "a/b#3": { title: "仅编排未派执行", state: "working", agentConvId: "", updatedAt: now },
+    },
+    prSeen: {},
+  }
+
+  store.sync(book)
+  const snap = store.snapshot({
+    book,
+    cfg: {},
+    pr: {},
+    runningSessions: {
+      "conv-live": { running: true },
+      "conv-idle": { running: false },
+    },
+  })
+  assert.equal(snap.stats.working, 1)
+  assert.deepEqual(snap.tasks.filter((t) => t.running).map((t) => t.key), ["a/b#1"])
+  store.close()
+})
+
 test("今日口径按真实变化时间：账本没变的老单不会因为同步被算进今天", () => {
   const store = tmpStore()
   const old = new Date(Date.now() - 3 * 86400000).toISOString()
