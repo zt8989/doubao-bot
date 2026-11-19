@@ -197,11 +197,12 @@ export function readFixedPrompt(cfg, repo = "", { lane = "dispatch" } = {}) {
 // 记账留痕但 notify:false——它们是编排者，不是被监听的执行会话，纳入监听会自己通知自己。
 export async function deliverNewSession(ctx, { text = "", kind = "", repo = "", watcher = null, lane = "dispatch" } = {}) {
   const { cfg, dws, log = () => {} } = ctx
+  const book = new Book(cfg.stateFile)
   const laneName = lane === "merge" ? "merge" : "dispatch"
   const dc = deliverContextFor(cfg, repo || watcher?.repo || "")
   const fixed = readFixedPrompt(cfg, repo || watcher?.repo || "", { lane: laneName })
   // 只报当前在跑数；pickup.maxRunning 是定时巡检上限，不约束 agent 主动派单。
-  const running = inflightIssues(new Book(cfg.stateFile)).length
+  const running = inflightIssues(book).length
   const maxRunning = Number(cfg?.pickup?.maxRunning) || 2
   const prompt = deliverPrompt({
     fixed, projectDir: dc.projectDir, product: dc.product, kind, text,
@@ -216,8 +217,9 @@ export async function deliverNewSession(ctx, { text = "", kind = "", repo = "", 
     const convId = String(out?.convId ?? "").trim()
     // notice 记触发类型：「PR待合并」会话核对后直接执行 foreman pr merge，不交 RESULT。
     // 「合并完成」那类会话只做汇报，不再触发一次合并。
-    new Book(cfg.stateFile).record(name, {
+    book.record(name, {
       convId, kind: `deliver:${laneName}`, notify: false, product: dc.product,
+      parent: laneName === "merge" ? String(book.data.router?.convId ?? book.data.inspector?.convId ?? "") : "",
       notice: String(kind ?? ""), repo: String(repo || watcher?.repo || ""),
       createdAt: nowIso(),
     })

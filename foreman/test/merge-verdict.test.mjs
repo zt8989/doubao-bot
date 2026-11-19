@@ -29,6 +29,9 @@ test("deliverNewSession：合并会话记下触发类型与仓库", async () => 
       deliver: { mode: "new", promptFile: path.join(dir, "merge.md"), waitFirstReply: false },
     }
     fs.writeFileSync(path.join(dir, "merge.md"), "# 合并助手\n")
+    const book = new Book(cfg.stateFile)
+    book.data.router = { convId: "conv-router" }
+    book.record("foreman-router", { convId: "conv-router", kind: "router", role: "router" })
     const ctx = {
       cfg,
       log: () => {},
@@ -40,6 +43,7 @@ test("deliverNewSession：合并会话记下触发类型与仓库", async () => 
     assert.equal(rec.notice, "PR待合并")
     assert.equal(rec.repo, "demo/demo")
     assert.equal(rec.kind, "deliver:merge")
+    assert.equal(rec.parent, "conv-router", "合并智能体挂在分配它的路由智能体下")
     assert.equal(rec.notify, false)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
