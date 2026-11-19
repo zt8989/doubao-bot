@@ -997,7 +997,7 @@ footer {
   table.tasks th { letter-spacing: 0; }
   table.tasks td { font-size: 12.5px; }
   table.tasks th.col-state, table.tasks td.col-state { width: 92px; }
-  table.tasks th.col-detail, table.tasks td.col-detail { width: 74px; }
+  table.tasks th.col-detail, table.tasks td.col-detail { width: 86px; }
   table.tasks td, table.tasks th { white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
   table.tasks th.col-try, table.tasks td:nth-child(5) { display: none; }
   table.tasks th.col-issue-state, table.tasks td.col-issue-state { display: none; }
@@ -1036,7 +1036,11 @@ footer {
 }
 
 /* ---------------- workflow 节点 / 任务详情 ---------------- */
-.col-detail { width: 64px; }
+.col-detail { width: 92px; }
+/* 详情列常有两个按钮（详情 / 手动完成）：各自占一行，别竖着断字 */
+.detail-cell { white-space: nowrap; }
+.detail-cell .ghost { display: block; width: 100%; margin: 0 0 4px; padding-left: 8px; padding-right: 8px; }
+.detail-cell .ghost:last-child { margin-bottom: 0; }
 .detail-cell { text-align: right; }
 .detail-row > td { padding: 0; background: var(--panel-2, rgba(255,255,255,.03)); }
 .task-detail { padding: 12px 14px; border-left: 3px solid var(--accent, #38bdf8); }

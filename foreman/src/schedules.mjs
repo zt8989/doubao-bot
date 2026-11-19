@@ -26,15 +26,16 @@ const RESERVED_SCHEDULE_IDS = [...BUILTIN_SCHEDULE_IDS, "inspector", "workHours"
 export function createAgentSchedule(cfg, input = {}) {
   const raw = input && typeof input === "object" ? input : {}
   const id = String(raw.id ?? "").trim()
-  if (!/^[a-z][a-z0-9_-]{1,31}$/.test(id)) throw new Error(`定时任务 id 只能用小写字母、数字、_ 或 -：${id || "(空)"}`)
-  if (RESERVED_SCHEDULE_IDS.includes(id)) throw new Error(`${id} 与内置定时任务重名`)
+  if (!id) throw new Error("定时任务缺少 id")
+  cfg.agentSchedules = [...customAgentSchedules(cfg)]
+  const existing = cfg.agentSchedules.find((item) => item.id === id)
+  // 新建才校验命名与保留字；覆盖已有任务按原 id 走，避免历史 id 被卡住。
+  if (!existing && !/^[a-z][a-z0-9_-]{1,31}$/.test(id)) throw new Error(`定时任务 id 只能用小写字母、数字、_ 或 -：${id}`)
+  if (!existing && RESERVED_SCHEDULE_IDS.includes(id)) throw new Error(`${id} 与内置定时任务重名`)
   const cron = validateCron(raw.cron)
   if (!cron.ok) throw new Error(`cron 不合法：${cron.error}`)
   const prompt = String(raw.prompt ?? "")
   if (!prompt.trim()) throw new Error("Agent 定时任务必须提供提示词 prompt")
-
-  cfg.agentSchedules = [...customAgentSchedules(cfg)]
-  const existing = cfg.agentSchedules.find((item) => item.id === id)
   if (!existing && cfg.agentSchedules.length >= 10) throw new Error("Agent 定时任务最多 10 条")
 
   const item = {
