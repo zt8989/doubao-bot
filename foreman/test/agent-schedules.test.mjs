@@ -7,7 +7,7 @@ import path from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { listSchedules, applySchedules, hydrateSchedules, scheduleDefinitions, saveScheduleSettings } from "../src/schedules.mjs"
 import { InboxStore, ScheduleRunner } from "../src/inbox.mjs"
-import { loadConfig } from "../src/config.mjs"
+import { loadConfig, DEFAULT_AGENT_CWD } from "../src/config.mjs"
 
 const entry = () => ({
   id: "daily-stats",
@@ -42,7 +42,7 @@ test("listSchedules：自定义 Agent 任务独立成行，状态取运行时", 
   assert.equal(row.executor, "agent")
   assert.equal(row.label, "下班前统计")
   assert.equal(row.cron, "25 17 * * 1-5")
-  assert.deepEqual(row.agent, { prompt: entry().prompt, custom: true })
+  assert.deepEqual(row.agent, { prompt: entry().prompt, cwd: DEFAULT_AGENT_CWD, custom: true })
   assert.equal(row.enabled, true)
   assert.equal(row.count, 2)
   assert.equal(row.lastAt, "2026-11-19T09:25:00.000Z")
@@ -108,6 +108,7 @@ test("loadConfig：自定义 Agent 任务做 id/cron/提示词校验", () => {
     cron: "25 17 * * 1-5",
     enabled: true,
     prompt: "统计一下。",
+    cwd: DEFAULT_AGENT_CWD,
     detail: "",
   })
 
@@ -117,4 +118,33 @@ test("loadConfig：自定义 Agent 任务做 id/cron/提示词校验", () => {
   assert.throws(() => loadConfig(badPrompt), /缺少 prompt/)
   const dupId = tmpConfig({ agentSchedules: [{ id: "router", cron: "0 9 * * *", prompt: "p" }] })
   assert.throws(() => loadConfig(dupId), /与内置定时任务重名/)
+})
+
+test("cwd：省略就落在脚本所在位置，写了就按 ~ / 相对路径解析", () => {
+  const cfg = loadConfig(tmpConfig({ agentSchedules: [{ id: "a-1", cron: "0 9 * * *", prompt: "p" }] }))
+  assert.equal(cfg.agentSchedules[0].cwd, DEFAULT_AGENT_CWD)
+
+  const abs = loadConfig(tmpConfig({ agentSchedules: [{ id: "a-1", cron: "0 9 * * *", prompt: "p", cwd: "/tmp/vault" }] }))
+  assert.equal(abs.agentSchedules[0].cwd, "/tmp/vault")
+
+  const home = loadConfig(tmpConfig({ agentSchedules: [{ id: "a-1", cron: "0 9 * * *", prompt: "p", cwd: "~/Doubao" }] }))
+  assert.equal(home.agentSchedules[0].cwd, path.join(os.homedir(), "Doubao"))
+
+  const rel = loadConfig(tmpConfig({ agentSchedules: [{ id: "a-1", cron: "0 9 * * *", prompt: "p", cwd: "notes" }] }))
+  assert.equal(rel.agentSchedules[0].cwd, path.join(DEFAULT_AGENT_CWD, "notes"))
+})
+
+test("cwd：页面改成空串就回到默认，非空则落到 SQLite payload", () => {
+  const store = new InboxStore(new DatabaseSync(":memory:"))
+  const cfg = baseCfg()
+  applySchedules(cfg, { "daily-stats": { agent: { cwd: "/tmp/vault" } } })
+  assert.equal(cfg.agentSchedules[0].cwd, "/tmp/vault")
+  new ScheduleRunner({ store }).sync(scheduleDefinitions(cfg))
+  assert.equal(store.schedules().find((row) => row.id === "daily-stats").payload.cwd, "/tmp/vault")
+
+  applySchedules(cfg, { "daily-stats": { agent: { cwd: "" } } })
+  assert.equal(cfg.agentSchedules[0].cwd, DEFAULT_AGENT_CWD)
+  new ScheduleRunner({ store }).sync(scheduleDefinitions(cfg))
+  assert.equal(store.schedules().find((row) => row.id === "daily-stats").payload.cwd, DEFAULT_AGENT_CWD)
+  assert.equal(listSchedules(cfg).find((r) => r.id === "daily-stats").cwd, DEFAULT_AGENT_CWD)
 })

@@ -1,10 +1,22 @@
 // 配置：./foreman.json → ~/.foreman/config.json；未知键忽略不报错（升级友好）。
 import fs from "node:fs"
 import path from "node:path"
+import { fileURLToPath } from "node:url"
 import { expandHome } from "./util.mjs"
 import { validateCron } from "./cron.mjs"
 
 export const DEFAULT_EXCLUDE = ["needs-human", "ready-for-human", "needs-info", "wontfix", "agent-blocked"]
+
+// Agent 型定时任务的工作目录默认值：foreman 这个包本身（即脚本所在位置）。
+export const DEFAULT_AGENT_CWD = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
+
+/** 归一化 Agent 定时任务的 cwd：留空就落到脚本所在位置；~ 展开，相对路径按默认目录解析。 */
+export function agentScheduleCwd(value) {
+  const raw = String(value ?? "").trim()
+  if (!raw) return DEFAULT_AGENT_CWD
+  const expanded = expandHome(raw)
+  return path.isAbsolute(expanded) ? expanded : path.resolve(DEFAULT_AGENT_CWD, expanded)
+}
 
 export const DEFAULTS = {
   stateFile: "state.json",
@@ -318,12 +330,14 @@ export function loadConfig(explicit) {
     if (!cron.ok) throw new Error(`配置项 agentSchedules[${index}].cron 不合法：${cron.error}`)
     const prompt = String(raw.prompt ?? "")
     if (!prompt.trim()) throw new Error(`配置项 agentSchedules[${index}] 缺少 prompt`)
+    const cwd = agentScheduleCwd(raw.cwd)
     return {
       id,
       label: String(raw.label ?? "").trim() || id,
       cron: cron.expression,
       enabled: raw.enabled !== false,
       prompt,
+      cwd,
       detail: String(raw.detail ?? "").trim(),
     }
   })

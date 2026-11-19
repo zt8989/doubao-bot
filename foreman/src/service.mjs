@@ -42,6 +42,7 @@ import { OutboxStore, OutboxDispatcher } from "./outbox.mjs"
 import { enqueueOutbound } from "./outbound.mjs"
 import { LarkDriver } from "./lark.mjs"
 import { listSchedules, applySchedules, customAgentSchedules, hydrateSchedules, scheduleDefinitions, saveScheduleSettings } from "./schedules.mjs"
+import { agentScheduleCwd } from "./config.mjs"
 import { normalizeEventEnvelope } from "./schedule-events.mjs"
 import { runConfiguredScript } from "./executors.mjs"
 import { startOperation, finishOperation } from "./operations.mjs"
@@ -946,9 +947,11 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   const agentSchedulePrompt = (item, session, at) => {
     const pad = (n) => String(n).padStart(2, "0")
     const when = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}`
+    const cwd = agentScheduleCwd(item.cwd)
     return `# 定时任务：${item.label || item.id}
 
 本会话由 Foreman 的 Agent 型定时任务「${item.label || item.id}」在 ${when} 按时开起，任务 ID：${item.id}，会话：${session}。
+工作目录：${cwd}（记日志、写文件、发邮件附件的相对路径都按它解析；取不到相对路径时直接用这个前缀拼绝对路径）。
 把下面这段任务当作本轮唯一目标；需要时直接调用工具取数，跑完在本会话给最终回复，不要转交给别的编排会话。
 
 ---

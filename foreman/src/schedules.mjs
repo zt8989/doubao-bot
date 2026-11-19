@@ -3,6 +3,7 @@
 import { inWorkHours } from "./util.mjs"
 import { validateCron } from "./cron.mjs"
 import { normalizeScriptExecutor, scriptExecutor } from "./executors.mjs"
+import { agentScheduleCwd } from "./config.mjs"
 
 const pad = (n) => String(n).padStart(2, "0")
 
@@ -53,6 +54,7 @@ export function hydrateSchedules(cfg, store) {
         cron: row.cron,
         enabled: row.enabled,
         prompt: String(row.payload?.prompt ?? old.prompt ?? ""),
+        cwd: agentScheduleCwd(row.payload?.cwd ?? old.cwd),
         detail: String(row.payload?.detail ?? old.detail ?? ""),
       }
     })
@@ -86,7 +88,7 @@ export function scheduleDefinitions(cfg) {
       executor: "agent",
       cron: item.cron,
       enabled: item.enabled !== false,
-      payload: { custom: true, label: item.label || item.id, prompt: String(item.prompt ?? ""), detail: String(item.detail ?? "") },
+      payload: { custom: true, label: item.label || item.id, prompt: String(item.prompt ?? ""), cwd: agentScheduleCwd(item.cwd), detail: String(item.detail ?? "") },
     })),
     // 停用旧持久 Schedule；旧 Inbox 事件仍由 router handler 兼容消费。
     { id: "inspector", kind: "inspector", executor: "agent", cron: cronOf(cfg, "router"), enabled: false },
@@ -117,7 +119,8 @@ function customScheduleRows(cfg, state = {}) {
       enabled: item.enabled !== false,
       cron: item.cron,
       executor: "agent",
-      agent: { prompt: String(item.prompt ?? ""), custom: true },
+      cwd: agentScheduleCwd(item.cwd),
+      agent: { prompt: String(item.prompt ?? ""), cwd: agentScheduleCwd(item.cwd), custom: true },
       nextAt: runtime.nextAt || "",
       intervalSeconds: 0,
       detail: String(item.detail ?? "").trim() || "到点新开一条豆包会话，把提示词作为首句投递；跑完在本会话直接给最终回复",
@@ -332,11 +335,14 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
       // 自定义 Agent 任务只改开关、cron 与提示词；提示词不能改成空串。
       if ("enabled" in next) custom.enabled = next.enabled
       if ("cron" in next) custom.cron = next.cron
-      if ("agent" in obj) {
-        const prompt = obj.agent && typeof obj.agent.prompt === "string" ? obj.agent.prompt : null
+      if (obj.agent && "prompt" in obj.agent) {
+        const prompt = typeof obj.agent.prompt === "string" ? obj.agent.prompt : null
         if (prompt === null || !prompt.trim()) throw new Error(`${id} 的 Agent 提示词不能为空`)
         custom.prompt = prompt
       }
+      // cwd 可写在 agent.cwd 或顶层 cwd；空串 = 回到默认（脚本所在位置）。
+      if (obj.agent && "cwd" in obj.agent) custom.cwd = agentScheduleCwd(obj.agent.cwd)
+      else if ("cwd" in obj) custom.cwd = agentScheduleCwd(obj.cwd)
       continue
     }
     if (id === "pickup") {
