@@ -1016,9 +1016,12 @@ footer {
   .panel-side { width: 100%; flex-wrap: wrap; justify-content: flex-start; }
   .schedule-title { flex-wrap: wrap; gap: 8px; }
   .schedule-definition > div { grid-template-columns: 1fr; gap: 4px; }
+  .schedule-detail-body, .schedule-edit-form { padding: 12px; }
   .schedule-edit-form, .schedule-agent-input { width: 100%; }
   .wf-grid { grid-template-columns: minmax(0, 1fr); }
-  .sched-acts { flex-wrap: wrap; }
+  /* 定时任务行：窄屏改成上下四段，按钮不再挤在右侧 */
+  .sched { grid-template-columns: minmax(0, 1fr); grid-template-areas: "main" "meta" "cron" "acts"; gap: 8px; padding: 12px 14px; align-items: start; }
+  .sched-acts { flex-wrap: wrap; justify-content: flex-start; }
 }
 
 /* ---------------- workflow 节点 / 任务详情 ---------------- */
