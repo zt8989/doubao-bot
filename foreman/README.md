@@ -61,6 +61,8 @@ gitea 读 ready-for-agent 工单
       ↓
 herdr 从 origin/<base> 开 worktree（分支 fix/issue-N）
       ↓
+在原工单评论每个工程的分支与基线（branchComment 签名去重，重派不重复评论）
+      ↓
 dws 开会话，把工单 + 边界 + RESULT 协议一次发进去
       ↓
 记账 + 登记监听 → 返回 dispatched（会话随后自己改、自测、commit）
