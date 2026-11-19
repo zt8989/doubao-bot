@@ -343,6 +343,25 @@ export function startConsoleHttp({ store, ctx, dir, host, port, token = "", log 
         }
       }
 
+      if (pathname === "/api/schedules/create") {
+        // 新建 / 按 id 覆盖自定义 Agent 定时任务：写 SQLite 并重排定时器，不需要重启。
+        if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
+        if (typeof ctx.createSchedule !== "function") return sendJson(res, 501, { ok: false, error: "schedule_create_not_supported" })
+        let body
+        try {
+          body = await readBody(req)
+        } catch (e) {
+          return sendJson(res, 400, { ok: false, error: e.code || "bad_request", message: e.message })
+        }
+        const input = body?.schedule ?? body ?? {}
+        try {
+          const schedules = ctx.createSchedule(input)
+          return sendJson(res, 200, { ok: true, schedules })
+        } catch (e) {
+          return sendJson(res, 400, { ok: false, error: "bad_schedule", message: e.message })
+        }
+      }
+
       if (pathname === "/api/schedules/run") {
         // 页面上点「立即执行」：不等 cron、不看开关，立刻跑一轮这类任务。
         if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })

@@ -1,7 +1,7 @@
 // 定时任务只以 SQLite 为准；config.json 仅在首次初始化时提供旧配置迁移值。
 // 页面上一键启停，写入 agent_schedules / agent_schedule_settings 并立刻重排定时器。
 import { inWorkHours } from "./util.mjs"
-import { validateCron } from "./cron.mjs"
+import { validateCron, nextCronTime } from "./cron.mjs"
 import { normalizeScriptExecutor, scriptExecutor } from "./executors.mjs"
 import { agentScheduleCwd } from "./config.mjs"
 
@@ -15,6 +15,50 @@ export function customAgentSchedules(cfg) {
 }
 
 const BUILTIN_SCHEDULE_IDS = ["pickup", "prWatch", "mail", "router", "dreaming"]
+
+/** 创建自定义 Agent 任务时占用的保留 id：内置任务 + 没有独立 cron 的两项。 */
+const RESERVED_SCHEDULE_IDS = [...BUILTIN_SCHEDULE_IDS, "inspector", "workHours"]
+
+/**
+ * 新建或按 id 覆盖一条自定义 Agent 定时任务（HTTP 创建入口用，不必改配置文件、不必重启）。
+ * 只校验并把定义写回 cfg；落 SQLite 与重排定时器仍由 service 的 armSchedules 完成。
+ */
+export function createAgentSchedule(cfg, input = {}) {
+  const raw = input && typeof input === "object" ? input : {}
+  const id = String(raw.id ?? "").trim()
+  if (!/^[a-z][a-z0-9_-]{1,31}$/.test(id)) throw new Error(`定时任务 id 只能用小写字母、数字、_ 或 -：${id || "(空)"}`)
+  if (RESERVED_SCHEDULE_IDS.includes(id)) throw new Error(`${id} 与内置定时任务重名`)
+  const cron = validateCron(raw.cron)
+  if (!cron.ok) throw new Error(`cron 不合法：${cron.error}`)
+  const prompt = String(raw.prompt ?? "")
+  if (!prompt.trim()) throw new Error("Agent 定时任务必须提供提示词 prompt")
+
+  cfg.agentSchedules = [...customAgentSchedules(cfg)]
+  const existing = cfg.agentSchedules.find((item) => item.id === id)
+  if (!existing && cfg.agentSchedules.length >= 10) throw new Error("Agent 定时任务最多 10 条")
+
+  const item = {
+    id,
+    label: String(raw.label ?? "").trim() || existing?.label || id,
+    cron: cron.expression,
+    enabled: raw.enabled !== false,
+    prompt,
+    cwd: agentScheduleCwd(raw.cwd ?? existing?.cwd),
+    detail: String(raw.detail ?? "").trim() || existing?.detail || "",
+  }
+  if (existing) Object.assign(existing, item)
+  else cfg.agentSchedules.push(item)
+  return { item, created: !existing }
+}
+
+/**
+ * 新建任务的首次触发时间：排到下一个 cron 点，不在创建当场立刻跑。
+ * 想马上跑用 /api/schedules/run（或控制台「立即执行」）。
+ */
+export function firstRunAt(cron, at = new Date()) {
+  return nextCronTime(cron, at)
+}
+
 
 /**
  * 启动时把 SQLite 中的任务定义灌回运行时配置。

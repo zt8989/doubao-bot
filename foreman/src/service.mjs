@@ -41,7 +41,7 @@ import { InboxStore, AgentWorker, ScheduleRunner } from "./inbox.mjs"
 import { OutboxStore, OutboxDispatcher } from "./outbox.mjs"
 import { enqueueOutbound } from "./outbound.mjs"
 import { LarkDriver } from "./lark.mjs"
-import { listSchedules, applySchedules, customAgentSchedules, hydrateSchedules, scheduleDefinitions, saveScheduleSettings } from "./schedules.mjs"
+import { listSchedules, applySchedules, createAgentSchedule, firstRunAt, customAgentSchedules, hydrateSchedules, scheduleDefinitions, saveScheduleSettings } from "./schedules.mjs"
 import { DEFAULTS, agentScheduleCwd } from "./config.mjs"
 import { normalizeEventEnvelope } from "./schedule-events.mjs"
 import { runConfiguredScript } from "./executors.mjs"
@@ -1072,6 +1072,20 @@ ${String(item.prompt ?? "").trim()}
     log(`定时任务已写入 SQLite：${Object.keys(patch).join(",")}`)
     log(`定时任务开关：${view.map((s) => `${s.id}=${s.enabled ? "on" : "off"}`).join(" ")}`)
     return view
+  }
+  // 新建 Agent 定时任务：写 cfg → 重排定时器（落 SQLite）→ 首次触发排到下一个 cron 点。
+  // 不重启、不改配置文件；要立刻跑一次走 /api/schedules/run。
+  ctx.createSchedule = (input = {}) => {
+    const { item, created } = createAgentSchedule(cfg, input)
+    armSchedules()
+    if (created) {
+      const next = firstRunAt(item.cron, new Date())
+      inbox.db.prepare("UPDATE agent_schedules SET next_at = ?, updated_at = ? WHERE id = ?")
+        .run(next ? next.toISOString() : null, nowIso(), item.id)
+      agentScheduleRuntime(item.id).nextAt = next ? next.toISOString() : ""
+    }
+    log(`Agent 定时任务已${created ? "新建" : "覆盖"}：${item.id} · ${item.cron} · ${item.enabled ? "启用" : "停用"}`)
+    return schedulesView()
   }
 
   const close = async () => {

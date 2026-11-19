@@ -1011,6 +1011,15 @@ footer {
   table.session-table th:nth-child(4), table.session-table td.branch-cell { display: none; }
   table.session-table th.col-session { width: auto; }
 
+  /* 队列表（Inbox/Outbox）：只留 ID / 内容 / 状态 / 详情 */
+  table.queue-table th:nth-child(2), table.queue-table td:nth-child(2),
+  table.queue-table th:nth-child(5), table.queue-table td:nth-child(5),
+  table.queue-table th:nth-child(6), table.queue-table td:nth-child(6) { display: none; }
+  table.queue-table .col-id { width: 46px; }
+  table.queue-table .col-state { width: 76px; }
+  table.queue-table .col-detail { width: 48px; }
+  table.queue-table td { white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+
   /* 面板标题、表单：竖排，别把按钮挤出屏幕 */
   .panel-head { flex-direction: column; align-items: stretch; gap: 8px; }
   .panel-side { width: 100%; flex-wrap: wrap; justify-content: flex-start; }
