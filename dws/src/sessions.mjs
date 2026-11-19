@@ -7,6 +7,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { nowIso, readJson, writeJson, isFreshTask } from "./util.mjs"
+import { acquireOpenLock } from "./open-lock.mjs"
 import { Doubao, DoubaoError, STATE, NEW_TASK, NEW_TASK_IN_PROJECT, MODE, COUNTS } from "./doubao.mjs"
 
 const EMPTY = { version: 1, sessions: {}, issues: {}, active: "" }
@@ -105,9 +106,21 @@ export class SessionManager {
     return { attached: false, reason: "other_task", convId: state.convId, state }
   }
 
+  // 新建任务必须跨进程串行：并发 CDP 操作会把同一条新会话认成两个逻辑会话。
+  // 等锁期间其它进程可能已写入 state.json，拿锁后先刷新账本，再进入窗口操作与记账。
+  async open(name, options = {}) {
+    const lock = await acquireOpenLock(`${this.book.file}.open.lock`)
+    try {
+      this.book.data = new SessionBook(this.book.file).data
+      return await this.openUnlocked(name, options)
+    } finally {
+      lock.release()
+    }
+  }
+
   // open 新建一条工作任务；给 prompt 就顺带把第一句发出去并等回复。
   // project 给了就开在豆包的那个项目下。noWait 只确认首句送达，不等第一轮回复。
-  async open(name, { prompt = "", repo = "", mode, model, project = "", noWait = false, signal, onUpdate } = {}) {
+  async openUnlocked(name, { prompt = "", repo = "", mode, model, project = "", noWait = false, signal, onUpdate } = {}) {
     mode = mode ?? this.mode
     model = model ?? this.model
     // 记账前先记下当前窗口所在的会话 id：新建任务后必须确认窗口已经离开它，
