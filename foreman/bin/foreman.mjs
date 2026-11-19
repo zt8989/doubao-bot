@@ -44,7 +44,8 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman orch show                    看每条编排会话绑了哪些工作会话、最近 steer 了什么
   foreman sessions [--orchestrator <id>]  查当前会话分配出去的所有会话（默认取当前豆包会话）
   foreman hand <owner/name>#<单号> [--orchestrator <id>]      把工单交给编排会话（它再自己调 dispatch）
-  foreman dispatch <owner/name>#<单号> (--prompt <编排指令> | --file <指令文件>) [--orchestrator <id>]
+  foreman dispatch <owner/name>#<单号> (--prompt <编排指令> | --file <指令文件>) [--orchestrator <id>] [--repo <工程名|owner/name>]...
+                                      默认只建工单所在仓；额外工程必须重复传 --repo，正文提到不会自动建
                                       提示词必填：编排分析、任务范围与验收要求随首句注入，头部带工单 ID 和 URL
   foreman resume <执行会话id> [--orchestrator <id>]          失败/卡住：在指定工作会话里 steer 续跑（不新开）
   foreman clean <owner/name>#<单号>     合并关单后清 worktree、本地分支、工作会话与这张单的编排会话（幂等）
@@ -660,11 +661,16 @@ async function cmdDispatch(pos, flags) {
   const filePrompt = promptFile ? fs.readFileSync(expandHome(promptFile), "utf8").trim() : ""
   const prompt = [inlinePrompt, filePrompt].filter(Boolean).join("\n\n")
   if (!prompt) throw new Error("dispatch 必须提供非空编排指令：--prompt <工单分析、任务范围与验收要求>，或 --file <指令文件>")
+  const repoFlags = Array.isArray(flags.repo) ? flags.repo : flags.repo === undefined ? [] : [flags.repo]
+  if (repoFlags.some((repo) => typeof repo !== "string" || !repo.trim())) {
+    throw new Error("dispatch 的 --repo 需要工程名或 owner/name；可重复传入多个额外工程")
+  }
+  const extraRepos = repoFlags.map((repo) => repo.trim())
   const cfg = loadConfig(flags.config)
   const port = await resolvePort(cfg)
   // 派活要建 worktree、开工作会话（no-wait）；窗口忙时可能等一会儿，给足时间。
   const r = await callRaw(port, {
-    id: "cli", cmd: "dispatch", issue: ref, prompt, ...orchestratorArg(flags),
+    id: "cli", cmd: "dispatch", issue: ref, prompt, repos: extraRepos, ...orchestratorArg(flags),
   }, 900000)
   if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
   return out({ ok: true, ...r })

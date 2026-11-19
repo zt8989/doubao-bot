@@ -336,7 +336,8 @@ foreman orch show                 # 每条编排会话绑了哪些工作会话�
 foreman sessions                  # 只列当前会话派出的工作/补派会话（默认取 MCP_VM_CONVERSATION_ID）
 foreman sessions --orchestrator <会话id>  # 终端里查询指定会话派出的全部会话
 foreman hand <owner/name>#N      # 把工单交给编排会话（不建工作区、不开工作会话）
-foreman dispatch <owner/name>#N (--prompt <编排指令> | --file <指令文件>)
+foreman dispatch <owner/name>#N (--prompt <编排指令> | --file <指令文件>) [--repo <工程名|owner/name>]...
+                                 # 默认只建工单所在仓；额外工程重复传 --repo，正文提到不会自动建
                                  # 提示词必填：编排分析、任务范围与验收随首句注入，头部带完整工单 ID 和 URL；重派随 steer 发送
 foreman resume <执行会话id>   # 原会话可修正时：按会话 id steer 续跑（不新开、不传工单号）
                                  # 上面三条都支持 --orchestrator <会话id>：绑到发起方会话（不传取 MCP_VM_CONVERSATION_ID）

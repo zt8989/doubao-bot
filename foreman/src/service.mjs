@@ -2091,7 +2091,10 @@ export async function handleRequest(ctx, req) {  const id = req?.id
       return fail("gitea-error", `读不到工单 ${repoCfg.repo}#${number}：${e.message}`)
     }
     try {
-      const out = await handleIssue({ ...ctx, orchestrator, dispatchPrompt }, repoCfg, issue)
+      const extraRepos = (Array.isArray(req.repos) ? req.repos : req.repos ? [req.repos] : [])
+        .map((repo) => String(repo).trim())
+        .filter(Boolean)
+      const out = await handleIssue({ ...ctx, orchestrator, dispatchPrompt, extraRepos }, repoCfg, issue)
       // 派活这一步补推 session.dispatched：hand 时只推了 issue.picked。
       await ctx.engine?.emit("session.dispatched", {
         issueKey: `${repoCfg.repo}#${number}`,

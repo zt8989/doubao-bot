@@ -223,10 +223,9 @@ export async function handleIssue(ctx, repoCfg, summary) {
 
   const branch = prev.branch || issueBranch(issue, issue.title)
 
-  // 一工程一工作区：工单提到几个工程（本产品内），就各建一个工作区。
-  // 主仓库是工单所在仓库，永远排第一；别的工程从标题/正文里的 owner/name、<仓库名>/<子路径>
-  // 或仓库名认出来。认漏了不要紧：执行会话会用 `foreman ws add` 现开。
-  const targets = reposForIssue(issue, cfg.repos, repoCfg)
+  // 默认只建主仓工作区；额外工程由编排通过 dispatch --repo 显式指定。
+  // 正文里的工程名只作上下文，不再自动等同于改动范围；漏建由编排用 `foreman ws add` 补开。
+  const targets = reposForIssue(issue, cfg.repos, repoCfg, { extraRepos: ctx.extraRepos ?? [] })
 
   // dry-run：只打印会建在哪、会发什么，零副作用。
   if (ctx.dryRun) {

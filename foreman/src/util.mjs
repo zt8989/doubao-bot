@@ -120,21 +120,30 @@ export function extractJson(text) {
 export function parseArgs(argv, shortMap = { c: "config" }) {
   const pos = []
   const flags = {}
+  const putFlag = (key, value) => {
+    if (!Object.hasOwn(flags, key) || flags[key] === true || value === true) {
+      flags[key] = value
+    } else if (Array.isArray(flags[key])) {
+      flags[key].push(value)
+    } else {
+      flags[key] = [flags[key], value]
+    }
+  }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a.startsWith("--")) {
       const body = a.slice(2)
       const eq = body.indexOf("=")
       if (eq >= 0) {
-        flags[body.slice(0, eq)] = body.slice(eq + 1)
+        putFlag(body.slice(0, eq), body.slice(eq + 1))
         continue
       }
       const next = argv[i + 1]
       if (next !== undefined && !next.startsWith("-")) {
-        flags[body] = next
+        putFlag(body, next)
         i++
       } else {
-        flags[body] = true
+        putFlag(body, true)
       }
       continue
     }
@@ -143,11 +152,11 @@ export function parseArgs(argv, shortMap = { c: "config" }) {
       if (key) {
         const next = argv[i + 1]
         if (next !== undefined && !next.startsWith("-")) {
-          flags[key] = next
+          putFlag(key, next)
           i++
-        } else flags[key] = true
+        } else putFlag(key, true)
       } else {
-        flags[a.slice(1)] = true
+        putFlag(a.slice(1), true)
       }
       continue
     }

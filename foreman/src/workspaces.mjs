@@ -8,17 +8,16 @@ import path from "node:path"
 
 const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 
-// 工单里提到哪些工程：先认工单所在仓库，再扫标题+正文里出现的其它工程标识。
-// 只在本产品内扫（产品 = 一套自己的项目群），避免把别的产品的仓库拉进来。
-export function reposForIssue(issue = {}, repos = [], primary = null, { maxExtra = 3 } = {}) {
-  const text = `${issue.title ?? ""}\n${issue.body ?? ""}`
-  const out = []
-  if (primary) out.push(primary)
+// 默认只建工单所在仓库；标题和正文里的工程名只是上下文，不代表实际改动范围。
+// 额外工程必须由编排通过 extraRepos 显式声明，并且只能选主仓所属产品内的已配置工程。
+export function reposForIssue(issue = {}, repos = [], primary = null, { maxExtra = 3, extraRepos = [] } = {}) {
+  const out = primary ? [primary] : []
   const sameProduct = (repos ?? []).filter((r) => !primary?.product || r.product === primary.product)
-  for (const r of sameProduct) {
-    if (primary && r.repo === primary.repo) continue
+  for (const ref of extraRepos) {
+    const r = sameProduct.find((candidate) => candidate.repo === ref || candidate.name === ref)
+    if (!r) throw new Error(`显式工作区工程 ${ref} 不在本产品配置内`)
+    if (out.some((candidate) => candidate.repo === r.repo)) continue
     if (out.length >= 1 + maxExtra) break
-    if (!mentionsRepo(text, r)) continue
     out.push(r)
   }
   return out

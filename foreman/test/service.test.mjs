@@ -16,7 +16,7 @@ import {
   archiveFinishedOrchestrators,
   kickPickup,
 } from "../src/service.mjs"
-import { sleep } from "../src/util.mjs"
+import { parseArgs, sleep } from "../src/util.mjs"
 import { Book } from "../src/book.mjs"
 
 function tmpDir() {
@@ -389,6 +389,13 @@ test("resume RPC：只收会话 id，并 steer 这条会话而不是按工单续
   }
 })
 
+test("CLI 参数：重复 --repo 保留全部值，单个参数行为不变", () => {
+  const repeated = parseArgs(["dispatch", "yyzl/demo#7", "--repo", "yyzl/demo-b", "--repo=yyzl/demo-c"])
+  assert.deepEqual(repeated.flags.repo, ["yyzl/demo-b", "yyzl/demo-c"])
+  const single = parseArgs(["dispatch", "yyzl/demo#7", "--repo", "yyzl/demo-b"])
+  assert.equal(single.flags.repo, "yyzl/demo-b")
+})
+
 // 服务级 ctx 不带账本（只有 state/cfg/dws/engine），dispatch 这条 RPC 必须自己兜底开 Book，
 // 否则 handleIssue 一进来读 book.issue(key) 就崩：Cannot read properties of undefined (reading 'issue')。
 // pickup.maxRunning 只约束定时巡检；即使已经达到上限，agent 主动 dispatch 也必须能派。
@@ -396,9 +403,10 @@ test("dispatch RPC：达到定时巡检上限后，agent 仍能派且 ctx 不带
   const dir = tmpDir()
   try {
     const repo = { repo: "yyzl/demo", name: "demo", dir, base: "sit-20261126", product: "demo" }
+    const repoB = { repo: "yyzl/demo-b", name: "demo-b", dir, base: "sit-20261126", product: "demo" }
     const cfg = mkCfg(dir, {
       worktreeDir: path.join(dir, "worktrees"),
-      repos: [repo],
+      repos: [repo, repoB],
       sessionFlow: { enabled: true },
       pickup: { maxRunning: 1, maxPerRound: 1 },
     })
@@ -407,7 +415,7 @@ test("dispatch RPC：达到定时巡检上限后，agent 仍能派且 ctx 不带
     const ctx = {
       ...mkCtx(cfg),
       dryRun: true,
-      gitea: { viewIssue: async (repoArg, n) => ({ number: n, title: "登录改造", body: "", labels: [], assignees: [], url: `http://gitea/yyzl/demo/issues/${n}` }) },
+      gitea: { viewIssue: async (repoArg, n) => ({ number: n, title: "登录改造", body: "依赖 demo-b，但实际改动范围由编排显式指定", labels: [], assignees: [], url: `http://gitea/yyzl/demo/issues/${n}` }) },
     }
     assert.equal(ctx.book, undefined, "这条 RPC 的 ctx 就是服务级 ctx，本身没有 book")
     const missing = await handleRequest(ctx, { id: "t0", cmd: "dispatch", issue: "yyzl/demo#7" })
@@ -424,6 +432,13 @@ test("dispatch RPC：达到定时巡检上限后，agent 仍能派且 ctx 不带
     assert.match(r.prompt.split("\n").slice(0, 4).join("\n"), /工单链接：http:\/\/gitea\/yyzl\/demo\/issues\/7/)
     assert.match(r.prompt, /编排智能体补充指令/)
     assert.match(r.prompt, /只负责登录页前端；先复用现有请求封装，完成后跑前端单测。/)
+
+    const explicit = await handleRequest(ctx, {
+      id: "t-explicit", cmd: "dispatch", issue: "yyzl/demo#8", repos: ["demo-b"],
+      prompt: "本单明确需要同时修改 demo 与 demo-b。",
+    })
+    assert.equal(explicit.ok, true)
+    assert.deepEqual(explicit.workspaces.map((w) => w.repo), ["yyzl/demo", "yyzl/demo-b"])
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

@@ -27,9 +27,17 @@ const repos = [
 
 const primary = repos[0]
 
-test("工单提到 <仓库>/<子路径> 就认成跨工程，主仓库永远排第一", () => {
-  const issue = { number: 284, title: "镜像页", body: "改 win-ai-harness/web 与 yyjz-oa-frontend/apps/admin 的镜像页" }
+test("正文提到其它工程也不预建，默认只保留工单所在仓库", () => {
+  const issue = { number: 284, title: "镜像页", body: "依赖 win-ai-harness/web 与 yyjz-oa-frontend/apps/admin，实际只改 win-ai-harness" }
   const out = reposForIssue(issue, repos, primary)
+  assert.deepEqual(out.map((r) => r.repo), ["yyzl/win-ai-harness"])
+})
+
+test("显式 extraRepos 才增加工作区，支持工程名与 owner/name 并去重", () => {
+  const issue = { number: 284, title: "镜像页", body: "" }
+  const out = reposForIssue(issue, repos, primary, {
+    extraRepos: ["yyjz-oa-frontend", "yyzl/yyjz-oa-frontend"],
+  })
   assert.deepEqual(out.map((r) => r.repo), ["yyzl/win-ai-harness", "yyzl/yyjz-oa-frontend"])
 })
 
@@ -37,6 +45,13 @@ test("别的产品的仓库不拉进来；没提到的工程不预建", () => {
   const issue = { number: 1, title: "other-product/web 也要改" }
   const out = reposForIssue(issue, repos, primary)
   assert.deepEqual(out.map((r) => r.repo), ["yyzl/win-ai-harness"])
+})
+
+test("显式工程必须在本产品配置内，写错名字不能静默漏建", () => {
+  assert.throws(
+    () => reposForIssue({}, repos, primary, { extraRepos: ["other-product"] }),
+    /other-product.*不在本产品配置内/
+  )
 })
 
 test("短仓库名只认 owner/name 或 <仓库名>/ 路径，避免 api/web 这类词误命中", () => {
@@ -151,7 +166,7 @@ test("收尾：workspace 节点只清这次合并那条 PR 所属工程的工作
   }
 })
 
-test("派单：工单点了两个工程就各建一个工作区，首句按工程列清单", async () => {
+test("派单：显式指定两个工程才各建一个工作区，首句按工程列清单", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-ws-run-"))
   try {
     const mkRepo = (name) => {
@@ -189,6 +204,7 @@ test("派单：工单点了两个工程就各建一个工作区，首句按工�
       log: () => {},
       once: true,
       dryRun: false,
+      extraRepos: [repoB.name],
       gitea: {
         listIssues: async () => [issue],
         viewIssue: async (repo, n) => ({ ...issue, number: n }),
