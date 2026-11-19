@@ -1,21 +1,21 @@
-import { inspectorOnce } from "./inspector.mjs"
+import { routerOnce } from "./router.mjs"
 import { Book } from "./book.mjs"
 
 // 任务 → 所属 Agent 的唯一归属规则。优先使用工单绑定的编排，兼容补派监听与旧账本。
 export function taskOwner(book, watcher = {}) {
   const issue = watcher.issueKey ? book.issue(watcher.issueKey) : null
   const session = watcher.name ? book.session(watcher.name) : null
-  const inspector = book.data?.inspector?.convId ?? ""
+  const router = book.data?.router?.convId ?? book.data?.inspector?.convId ?? ""
   const candidates = [
     issue?.orchestrator,
     watcher.parent,
     session?.parent,
     watcher.notifyTo,
     book.data?.orchestrator?.convId,
-    inspector,
+    router,
   ]
   const owner = candidates.map((v) => String(v ?? "").trim()).find((v) => v && v !== String(watcher.target ?? ""))
-  return { owner: owner ?? "", viaInspector: Boolean(owner && owner === inspector && !issue?.orchestrator && !watcher.parent && !session?.parent && !watcher.notifyTo) }
+  return { owner: owner ?? "", viaInspector: Boolean(owner && owner === router && !issue?.orchestrator && !watcher.parent && !session?.parent && !watcher.notifyTo) }
 }
 
 export function taskUpdateText({ watcher = {}, phase = "", owner = "", finalText = "" } = {}) {
@@ -39,7 +39,7 @@ export function enqueueTaskUpdate(ctx, { watcher, phase, fingerprint = "", final
   if (!ctx.inbox) return { ok: false, reason: "no-inbox" }
   const book = ctx.book ?? ctx.bookFactory?.()
   if (!book) throw new Error("task.update 缺少账本")
-  const { owner, viaInspector } = taskOwner(book, watcher)
+  const { owner, viaInspector: viaRouter } = taskOwner(book, watcher)
   if (!owner) return { ok: false, reason: "no-owner" }
   const at = observedAt instanceof Date ? observedAt : new Date(observedAt)
   const stamp = at.toISOString()
@@ -54,7 +54,8 @@ export function enqueueTaskUpdate(ctx, { watcher, phase, fingerprint = "", final
       repo: String(watcher.repo ?? ""),
       number: watcher.number ?? null,
       owner,
-      viaInspector,
+      viaRouter,
+      viaInspector: viaRouter, // 旧事件字段兼容
       phase,
       fingerprint,
       finalText: String(finalText ?? ""),
@@ -72,10 +73,10 @@ export async function deliverTaskUpdate(ctx, event) {
   const target = String(p.owner ?? "").trim()
   if (!target) throw new Error("task.update 缺少归属 Agent")
   if (target === String(p.taskId ?? "")) throw new Error("task.update 不能投递给被监听任务自己")
-  if (p.viaInspector) {
-    const delivered = await inspectorOnce(ctx, { force: true, scheduled: false, notices: [event.text] })
+  if (p.viaRouter || p.viaInspector) {
+    const delivered = await routerOnce(ctx, { force: true, scheduled: false, notices: [event.text] })
     if (!delivered?.ok || delivered.skipped) {
-      throw new Error(delivered?.error || `检查智能体未接收 task.update：${delivered?.skipped || "unknown"}`)
+      throw new Error(delivered?.error || `router agent 未接收 task.update：${delivered?.skipped || "unknown"}`)
     }
   } else {
     if (typeof ctx.dws?.queue !== "function") throw new Error("dws.queue 不可用")

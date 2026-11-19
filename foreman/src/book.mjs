@@ -50,7 +50,7 @@ export class Book {
       seenAt: prev.seenAt ?? nowIso(),
       notifiedTo: pr.notifiedTo ?? prev.notifiedTo ?? "",
       notifiedAt: pr.notifiedTo ? nowIso() : prev.notifiedAt ?? "",
-      // 投递通道：inspector（候选交检查智能体）或 merge-assistant（已分配合并助手）等。
+      // 投递通道：router（候选交 router agent）或 merge-assistant（已分配合并助手）等。
       via: pr.via ?? prev.via ?? "",
       ui: pr.ui ?? prev.ui ?? false,
       reviewNotifiedTo: pr.reviewNotifiedTo ?? prev.reviewNotifiedTo ?? "",

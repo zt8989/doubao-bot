@@ -75,7 +75,7 @@ test("同一任务 pending 更新合并为最新状态，不制造一串过时�
   }
 })
 
-test("补派监听优先回 parent；完全无编排的旧任务回退检查智能体", () => {
+test("补派监听优先回 parent；完全无编排的旧任务回退router agent", () => {
   const { dir, book, inbox } = setup()
   try {
     book.record("worker", { parent: "conv-parent" })
@@ -88,7 +88,7 @@ test("补派监听优先回 parent；完全无编排的旧任务回退检查智�
   }
 })
 
-test("回退检查智能体投递失败必须抛错，不能消费任务更新", async () => {
+test("回退router agent投递失败必须抛错，不能消费任务更新", async () => {
   const { dir, cfg, book, inbox } = setup()
   try {
     book.data.inspector = { convId: "conv-inspector", name: "inspector" }

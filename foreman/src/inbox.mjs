@@ -342,29 +342,29 @@ export class AgentWorker {
         this.lastResult = out
         return out
       }
-      const inspectorEvents = events.filter((event) => event.kind === "inspector" || event.kind === "inspector.notice")
+      const routerEvents = events.filter((event) => ["router", "router.notice", "inspector", "inspector.notice"].includes(event.kind))
       const groups = new Map()
-      for (const event of events.filter((event) => event.kind !== "inspector" && event.kind !== "inspector.notice")) {
-        // 任务事件按条独立完成：不同任务可能属于不同 Agent，一条失败不能把已送达的另一条重投。
-        const groupKey = event.kind === "task.update" ? `${event.kind}:${event.id}` : event.kind
+      for (const event of events.filter((event) => !routerEvents.includes(event))) {
+        // 任务与邮件按条独立完成：不同事件可能属于不同 Agent，一条失败不能把已送达的另一条重投。
+        const groupKey = ["task.update", "mail.reply"].includes(event.kind) ? `${event.kind}:${event.id}` : event.kind
         if (!groups.has(groupKey)) groups.set(groupKey, { kind: event.kind, batch: [] })
         groups.get(groupKey).batch.push(event)
       }
-      if (inspectorEvents.length) groups.set("inspector", { kind: "inspector", batch: inspectorEvents })
+      if (routerEvents.length) groups.set("router", { kind: "router", batch: routerEvents })
       const errors = []
       let completed = 0
       for (const { kind, batch } of groups.values()) {
         const ids = batch.map((event) => event.id)
         try {
-          const handler = this.handlers[kind]
+          const handler = kind === "router" ? this.handlers.router ?? this.handlers.inspector : this.handlers[kind]
           if (typeof handler !== "function") throw new Error(`Worker 没有 ${kind} 处理器`)
-          const input = kind === "inspector"
+          const input = kind === "router"
             ? {
                 events: batch,
-                scheduled: batch.some((event) => event.kind === "inspector"),
-                notices: batch.filter((event) => event.kind === "inspector.notice").map((event) => event.text).filter(Boolean),
+                scheduled: batch.some((event) => ["router", "inspector"].includes(event.kind)),
+                notices: batch.filter((event) => ["router.notice", "inspector.notice"].includes(event.kind)).map((event) => event.text).filter(Boolean),
               }
-            : batch
+            : kind === "mail.reply" ? batch[0] : batch
           const result = await handler(input)
           if (result?.ok === false) throw new Error(result.error || `${kind} 处理失败`)
           this.store.complete(ids, now)

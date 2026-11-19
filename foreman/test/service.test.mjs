@@ -530,7 +530,7 @@ test("issue settle：只修本地完成账本，不关远端工单、不清工�
     const rec = new Book(cfg.stateFile).issue("yyzl/demo#7")
     assert.equal(rec.state, "done")
     assert.equal(rec.worktree, "/tmp/keep-this-worktree")
-    assert.equal(rec.settledBy, "inspector")
+    assert.equal(rec.settledBy, "router")
     assert.match(rec.settleNote, /本地状态漏收口/)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })

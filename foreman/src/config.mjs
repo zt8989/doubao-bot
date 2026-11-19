@@ -62,9 +62,9 @@ export const DEFAULTS = {
     // 只确认首句送达、不等回复（等回复会把服务轮询拖死）。
     waitFirstReply: false,
   },
-  // 检查智能体：Foreman 只定时 steer 同一条会话，不自行收工或接单。
-  // 24 小时连续未成功投递才新建检查会话；巡检不限制工作时间窗。
-  inspector: {
+  // 路由智能体：Foreman 只定时 queue 同一条会话，不自行收工或接单。
+  // 24 小时连续未成功投递才新建路由会话；巡检不限制工作时间窗。
+  router: {
     enabled: true,
     intervalSeconds: 600,
     recreateAfterHours: 24,
@@ -91,7 +91,7 @@ export const DEFAULTS = {
     events: ["done", "pr-open", "needs-human", "blocked", "escalated", "failed"],
   },
   // PR 监听：每 intervalSeconds 扫一遍各仓库 open PR；他人候选走合并助手分配，本人 UI 候选走验收指派。
-  // 两类候选都只 queue 给检查智能体；显式 pr assign / pr ui-assign 后才执行对应写操作。
+  // 两类候选都只 queue 给router agent；显式 pr assign / pr ui-assign 后才执行对应写操作。
   prWatch: {
     enabled: true,
     intervalSeconds: 300,
@@ -99,7 +99,7 @@ export const DEFAULTS = {
     maxPages: 3,
     // 自己的账号也在这里（跳过自己的 PR），loadConfig 会用 pickup.me 补齐。
     ignoreAuthors: [],
-    // 本人 UI PR 的验收指派人：检查智能体执行 pr ui-assign 后按数组顺序轮询。
+    // 本人 UI PR 的验收指派人：router agent执行 pr ui-assign 后按数组顺序轮询。
     // 每项 { name, username }；username 必须是真实 Gitea 登录名，配置不完整时不派。
     uiReviewers: [],
     notifyTarget: "earliest",
@@ -235,7 +235,10 @@ export function loadConfig(explicit) {
       throw new Error(`配置文件不是合法 JSON：${file}（${e.message}）`)
     }
   }
-  const cfg = merge(DEFAULTS, user)
+  const normalizedUser = !isObj(user.router) && isObj(user.inspector) ? { ...user, router: user.inspector } : user
+  const cfg = merge(DEFAULTS, normalizedUser)
+  // 旧 inspector 配置只作内存别名；新配置与公开文案使用 router。
+  cfg.inspector = cfg.router
   cfg.configPath = fs.existsSync(file) ? file : ""
   for (const key of ["pollSeconds", "timeoutMinutes", "maxAttempts", "perRepoPerRound"]) {
     const n = Number(cfg[key])
@@ -243,9 +246,9 @@ export function loadConfig(explicit) {
     cfg[key] = n
   }
   for (const key of ["intervalSeconds", "recreateAfterHours"]) {
-    const n = Number(cfg.inspector[key])
-    if (!Number.isFinite(n) || n <= 0) throw new Error(`配置项 inspector.${key} 要是正数，现在是：${cfg.inspector[key]}`)
-    cfg.inspector[key] = n
+    const n = Number(cfg.router[key])
+    if (!Number.isFinite(n) || n <= 0) throw new Error(`配置项 router.${key} 要是正数，现在是：${cfg.router[key]}`)
+    cfg.router[key] = n
   }
   cfg.repos = normalizeRepos(cfg)
   for (const key of ["pollMs", "retrySeconds", "leaseSeconds", "maxAttempts"]) {

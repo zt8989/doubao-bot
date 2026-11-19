@@ -234,7 +234,7 @@ test("服务里 prPoll：起服务后能手动跑一轮，状态里带 PR 计数
   }
 })
 
-test("服务里 prPoll：sessionFlow 开启时 PR 仍只交检查智能体，不 steer 全局编排", async () => {
+test("服务里 prPoll：sessionFlow 开启时 PR 仍只交router agent，不 steer 全局编排", async () => {
   const dir = tmpDir()
   try {
     const cfg = baseCfg(dir)
@@ -273,7 +273,7 @@ test("服务里 prPoll：sessionFlow 开启时 PR 仍只交检查智能体，不
   }
 })
 
-test("PR 扫描只把他人候选交给检查智能体，不直接创建合并助手", async () => {
+test("PR 扫描只把他人候选交给router agent，不直接创建合并助手", async () => {
   const dir = tmpDir()
   try {
     const cfg = baseCfg(dir)
@@ -311,7 +311,7 @@ test("PR 扫描只把他人候选交给检查智能体，不直接创建合并�
   }
 })
 
-test("服务 PR 扫描固定走检查智能体，即使配置了 deliver 也不直接建合并会话", async () => {
+test("服务 PR 扫描固定走router agent，即使配置了 deliver 也不直接建合并会话", async () => {
   const dir = tmpDir()
   try {
     const cfg = baseCfg(dir)

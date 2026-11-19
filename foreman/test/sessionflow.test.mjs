@@ -167,7 +167,7 @@ test("自动巡检：每张工单各建独立编排并绑定，重复交同一�
   }
 })
 
-test("fresh hand：检查智能体显式要求时才重开独立编排，普通 hand 仍复用", async () => {
+test("fresh hand：router agent显式要求时才重开独立编排，普通 hand 仍复用", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-fresh-hand-"))
   try {
     const cfg = mkCfg(dir)

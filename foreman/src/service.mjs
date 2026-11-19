@@ -30,9 +30,9 @@ import { DoubaoSessionAdapter } from "./workflow/adapters/doubao.mjs"
 import { GiteaTrackerAdapter } from "./workflow/adapters/gitea.mjs"
 import { prWatchOnce, prWatchTarget, mergeFailureReason, prNotifyText, shouldReport, ownedPrKeys, prKey, uiReviewers, uiReviewersReady, isOwnPr, isUiPrView } from "./prwatch.mjs"
 import { MailDriver, realRecipients } from "./mail.mjs"
-import { acceptanceGate, detectUiChange, mailPollOnce, requestAcceptance, mailAcceptanceSent, mailAcceptanceFailed } from "./mailflow.mjs"
+import { acceptanceGate, detectUiChange, mailPollOnce, requestAcceptance, mailAcceptanceSent, mailAcceptanceFailed, deliverMailReply } from "./mailflow.mjs"
 import { inflightIssues } from "./planner.mjs"
-import { inspectorOnce } from "./inspector.mjs"
+import { routerOnce } from "./router.mjs"
 import { listPulls, mergePr, closeIssue, createPr, commentIssue } from "./gitea.mjs"
 import { ConsoleStore } from "./console.mjs"
 import { InboxStore, AgentWorker, ScheduleRunner } from "./inbox.mjs"
@@ -491,7 +491,7 @@ export async function pickupOnce(ctx, { run = runRound, force = false } = {}) {
   }
 }
 
-// 自动接单已移除：收口后不再由代码补单，下一轮由检查智能体判断优先级和空余容量。
+// 自动接单已移除：收口后不再由代码补单，下一轮由router agent判断优先级和空余容量。
 // 保留同名函数是为了兼容旧调用点；它只返回 false，不再创建定时器或调用 pickupOnce。
 export function kickPickup() {
   return false
@@ -702,9 +702,9 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     // 自动接单巡检运行时
     pickup: { lastAt: null, count: 0, lastResult: null, running: false },
     pickupInterval: null,
-    // 检查智能体巡检运行时（持久会话与成功投递时间在 Book.inspector）
-    inspector: { lastAt: null, count: 0, lastResult: null, running: false, nextAt: "" },
-    inspectorInterval: null,
+    // router agent 巡检运行时（持久会话与成功投递时间在 Book.router）
+    router: { lastAt: null, count: 0, lastResult: null, running: false, nextAt: "" },
+    routerInterval: null,
     // 验收邮件轮询运行时
     mail: { lastPollAt: null, pollCount: 0, polling: false, lastResult: null, nextAt: "" },
     mailInterval: null,
@@ -810,7 +810,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   )
   log(`服务已起：pid=${process.pid} http=${ctx.httpUrl} portFile=${paths.portFile}`)
 
-  // 执行收工只保留手动/检查智能体按需触发入口，不再挂代码定时轮询。
+  // 执行收工只保留手动/router agent按需触发入口，不再挂代码定时轮询。
   const doPoll = async () => pollOnce(ctx)
 
   const doPrPoll = async () => prPollOnce(ctx)
@@ -819,26 +819,29 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   ctx.pickup = doPickup
   let worker
   let scheduler
-  const enqueueInspector = ({ notice = "", scheduled = false } = {}) => {
+  const enqueueRouter = ({ notice = "", scheduled = false } = {}) => {
     const text = String(notice ?? "").trim()
-    const kind = scheduled ? "inspector" : "inspector.notice"
+    const kind = scheduled ? "router" : "router.notice"
     const dedupeKey = scheduled
-      ? `inspector:manual:${Date.now()}`
-      : `inspector:notice:${crypto.createHash("sha256").update(text).digest("hex")}`
+      ? `router:manual:${Date.now()}`
+      : `router:notice:${crypto.createHash("sha256").update(text).digest("hex")}`
     const event = inbox.enqueue({
       kind, text, dedupeKey,
-      coalesceKey: scheduled ? "schedule:inspector" : "",
-      expiresAt: scheduled ? new Date(Date.now() + Number(cfg.inspector?.intervalSeconds ?? 600) * 1000).toISOString() : "",
+      coalesceKey: scheduled ? "schedule:router" : "",
+      expiresAt: scheduled ? new Date(Date.now() + Number((cfg.router ?? cfg.inspector)?.intervalSeconds ?? 600) * 1000).toISOString() : "",
     })
+    const book = new Book(cfg.stateFile)
     return {
       ok: true, action: "inbox", eventId: event.id, status: event.status,
-      convId: String(new Book(cfg.stateFile).data.inspector?.convId ?? ""),
+      convId: String(book.data.router?.convId ?? book.data.inspector?.convId ?? ""),
     }
   }
-  const doInspector = async () => enqueueInspector({ scheduled: true })
-  ctx.inspector = async () => enqueueInspector({ scheduled: true })
+  const doRouter = async () => enqueueRouter({ scheduled: true })
+  ctx.router = async () => enqueueRouter({ scheduled: true })
+  ctx.inspector = ctx.router // 旧 RPC 兼容；公开名称统一为 router agent。
   // PR 候选只持久化到 Inbox；Worker 负责合并、投递、失败重试，扫描器不直接调用 Agent。
-  ctx.notifyInspector = async (text) => enqueueInspector({ notice: text })
+  ctx.notifyRouter = async (text) => enqueueRouter({ notice: text })
+  ctx.notifyInspector = ctx.notifyRouter
   // 验收邮件轮询：读收件箱，按主题里的 [FM-…] 把回复认回 PR 并注回会话。
   // 回复可能在半夜到，所以这条定时器**不受工作时间窗限制**（只读收件箱，不打扰谁）。
   const doMailPoll = async () => {
@@ -868,8 +871,8 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     if (id === "prWatch") return prPollOnce(ctx, { force: true })
     // 验收邮件：立即轮询一次收件箱（不受工作时间窗限制）。
     if (id === "mail") return doMailPoll()
-    // 立即执行检查智能体巡检：仍然由它决定接单与异常处理。
-    if (id === "inspector") return doInspector()
+    // 立即执行 router agent 巡检：仍然由它决定接单与异常处理。
+    if (id === "router" || id === "inspector") return doRouter()
     throw Object.assign(new Error(`${id} 没有可以立即执行的动作`), { code: "schedule_not_runnable" })
   }
   // 合并不再有定时任务（合并通道已取消）：`foreman pr merge` 当场执行，合完直接返回。
@@ -902,7 +905,8 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     retryMs: Number(cfg.inbox?.retrySeconds ?? 30) * 1000,
     leaseMs: Number(cfg.inbox?.leaseSeconds ?? 900) * 1000,
     handlers: {
-      inspector: ({ scheduled, notices }) => inspectorOnce(ctx, { force: true, scheduled, notices }),
+      router: ({ scheduled, notices }) => routerOnce(ctx, { force: true, scheduled, notices }),
+      "mail.reply": (event) => deliverMailReply(ctx, event),
       "task.update": async (batch) => {
         const delivered = []
         for (const event of batch) delivered.push(await deliverTaskUpdate(ctx, event))
@@ -915,7 +919,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   ctx.inboxWorker = worker
   inbox.onChange = () => worker.wake()
   const syncScheduleState = (items) => {
-    const ids = { prWatch: "pr", mail: "mail", inspector: "inspector" }
+    const ids = { prWatch: "pr", mail: "mail", router: "router" }
     for (const [id, key] of Object.entries(ids)) {
       state[key].nextAt = items.find((item) => item.id === id)?.nextAt || ""
     }
@@ -931,7 +935,9 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     scheduler.sync([
       { id: "prWatch", kind: "prWatch", cron: cronOf(cfg, "prWatch"), enabled: cfg.prWatch?.enabled === true },
       { id: "mail", kind: "mail", cron: cronOf(cfg, "mail"), enabled: cfg.mail?.enabled === true },
-      { id: "inspector", kind: "inspector", cron: cronOf(cfg, "inspector"), enabled: cfg.inspector?.enabled === true },
+      { id: "router", kind: "router", cron: cronOf(cfg, "router"), enabled: (cfg.router ?? cfg.inspector)?.enabled === true },
+      // 停用旧持久 Schedule；旧 Inbox 事件仍由 router handler 兼容消费。
+      { id: "inspector", kind: "inspector", cron: cronOf(cfg, "router"), enabled: false },
     ])
   }
   worker.start()
@@ -970,8 +976,8 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     if (state.pickupKick) clearTimeout(state.pickupKick)
     if (state.mailInterval) clearTimeout(state.mailInterval)
     if (state.mailKick) clearTimeout(state.mailKick)
-    if (state.inspectorInterval) clearTimeout(state.inspectorInterval)
-    if (state.inspectorKick) clearTimeout(state.inspectorKick)
+    if (state.routerInterval) clearTimeout(state.routerInterval)
+    if (state.routerKick) clearTimeout(state.routerKick)
     if (state.mergeInterval) clearTimeout(state.mergeInterval)
     if (state.mergeKick) clearTimeout(state.mergeKick)
     scheduler?.stop()
@@ -994,12 +1000,12 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   ctx.poll = doPoll
 
   return {
-    server: consoleHttp.server, close, poll: doPoll, prPoll: doPrPoll, pickup: doPickup, inspector: doInspector,
+    server: consoleHttp.server, close, poll: doPoll, prPoll: doPrPoll, pickup: doPickup, router: doRouter, inspector: doRouter,
     worker, inbox, outbox, dispatcher, schedules: scheduler, port, portFile: paths.portFile, http: ctx.httpUrl,
   }
 }
 
-// 本人 UI PR 的验收指派：检查智能体显式触发，Foreman 复核本人/UI/open 后按配置顺序轮询。
+// 本人 UI PR 的验收指派：router agent显式触发，Foreman 复核本人/UI/open 后按配置顺序轮询。
 // 这里只改 Gitea assignees，不创建合并助手、不合并；指派成功才推进游标。
 export async function prUiAssignOnce(ctx, { repo = "", number = 0 } = {}) {
   const r = String(repo ?? "").trim()
@@ -1066,7 +1072,7 @@ export async function prUiAssignOnce(ctx, { repo = "", number = 0 } = {}) {
   }
 }
 
-// 检查智能体显式分配一条他人 PR：这里才创建合并助手；本人或作者不明一律拒绝。
+// router agent显式分配一条他人 PR：这里才创建合并助手；本人或作者不明一律拒绝。
 export async function prAssignOnce(ctx, { repo = "", number = 0 } = {}) {
   const repoName = String(repo ?? "").trim()
   const prNumber = Number(number)
@@ -1115,7 +1121,7 @@ export async function prAssignOnce(ctx, { repo = "", number = 0 } = {}) {
   }
 }
 
-// PR 扫描一轮：配置里每个仓库列 open PR → 过滤作者 → 去重 → 只通知检查智能体分配。
+// PR 扫描一轮：配置里每个仓库列 open PR → 过滤作者 → 去重 → 只通知 router agent 分配。
 // force 是页面上的「立即执行」：即使 prWatch.enabled 是 false（默认关）也扫这一轮。
 export async function prPollOnce(ctx, { force = false } = {}) {
   const { state, cfg, dws, gitea, log } = ctx
@@ -1126,13 +1132,13 @@ export async function prPollOnce(ctx, { force = false } = {}) {
   state.pr.polling = true
   try {
     const book = new Book(cfg.stateFile)
-    const notifyInspector = ctx.notifyInspector ?? (async (text) => inspectorOnce(ctx, { force: true, notice: text }))
-    const target = String(book.data.inspector?.convId ?? "").trim()
+    const notifyRouter = ctx.notifyRouter ?? ctx.notifyInspector ?? (async (text) => routerOnce(ctx, { force: true, notice: text }))
+    const target = String(book.data.router?.convId ?? book.data.inspector?.convId ?? "").trim()
     state.pr.target = target
     let out
     try {
-      // 扫描结果只交检查智能体；合并助手由它显式 pr assign，代码不直接新建。
-      out = await prWatchOnce({ cfg, gitea, dws, log, target, inspect: notifyInspector })
+      // 扫描结果只交 router agent；合并助手由它显式 pr assign，代码不直接新建。
+      out = await prWatchOnce({ cfg, gitea, dws, log, target, inspect: notifyRouter })
     } catch (e) {
       log(`PR 扫描失败：${e.message}`)
       return { ok: false, error: e.message }
@@ -2369,12 +2375,12 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     book.setIssue(key, {
       state: "done",
       settledAt: nowIso(),
-      settledBy: "inspector",
+      settledBy: "router",
       settleNote: note.slice(0, 1000),
     })
     ctx.consoleStore?.event({ kind: "issue_settled", key, repo, number, detail: note.slice(0, 200) })
     try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
-    ctx.log?.(`检查智能体本地完成 ${key}：${note}（不关远端、不清工作区）`)
+    ctx.log?.(`router agent本地完成 ${key}：${note}（不关远端、不清工作区）`)
     return ok({ key, state: "done", remoteClosed: false, workspaceCleaned: false })
   }
 
@@ -2528,10 +2534,16 @@ export async function handleRequest(ctx, req) {  const id = req?.id
         notifiedCount: ctx.state.pr?.notifiedCount ?? 0,
         pending: ctx.state.pr?.pending ?? 0,
       },
+      router: {
+        ...(new Book(ctx.cfg.stateFile).data.router ?? new Book(ctx.cfg.stateFile).data.inspector ?? {}),
+        running: ctx.state.router?.running === true,
+        nextAt: ctx.state.router?.nextAt ?? "",
+      },
+      // 旧控制台字段兼容；新调用方读取 router。
       inspector: {
-        ...(new Book(ctx.cfg.stateFile).data.inspector ?? {}),
-        running: ctx.state.inspector?.running === true,
-        nextAt: ctx.state.inspector?.nextAt ?? "",
+        ...(new Book(ctx.cfg.stateFile).data.router ?? new Book(ctx.cfg.stateFile).data.inspector ?? {}),
+        running: ctx.state.router?.running === true,
+        nextAt: ctx.state.router?.nextAt ?? "",
       },
       // 验收邮件：testers 还是占位符时 recipients=[]，此时不挡合并（沿用人工验收）。
       mail: {
@@ -2637,13 +2649,13 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     return ok(r)
   }
 
-  if (cmd === "inspect") {
-    const r = typeof ctx.inspector === "function" ? await ctx.inspector() : await inspectorOnce(ctx, { force: true })
-    if (!r.ok) return fail("inspector-failed", r.error || "检查智能体投递失败")
+  if (["route", "router", "inspect"].includes(cmd)) {
+    const r = typeof ctx.router === "function" ? await ctx.router() : await routerOnce(ctx, { force: true })
+    if (!r.ok) return fail("router-failed", r.error || "router agent 投递失败")
     return ok(r)
   }
 
-  // 手动催一轮候选处理；自动定时接单已移除，调用方通常是检查智能体。
+  // 手动催一轮候选处理；自动定时接单已移除，调用方通常是router agent。
   if (cmd === "pickup") {
     const r = await ctx.pickup({ force: true })
     return ok(r)

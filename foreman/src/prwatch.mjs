@@ -1,5 +1,5 @@
 // PR 监听：定时扫 open PR；他人候选走 pr assign 合并助手，本人 UI 候选走 pr ui-assign 验收指派。
-// 两类候选都只 queue 给检查智能体；扫描器自身不指派、不建合并会话、不合 PR。
+// 两类候选都只 queue 给router agent；扫描器自身不指派、不建合并会话、不合 PR。
 import { nowIso } from "./util.mjs"
 import { Book } from "./book.mjs"
 import { uiFilesChanged, uiPatterns } from "./mailflow.mjs"
@@ -130,13 +130,13 @@ export function prNotifyText(prs = []) {
   return lines.join("\n")
 }
 
-// 扫描器交给检查智能体的候选：只给分配命令，不让它主动扫 PR，也不让它直接合并。
+// 扫描器交给router agent的候选：只给分配命令，不让它主动扫 PR，也不让它直接合并。
 export function prInspectorText(prs = [], cfg = {}, uiPrs = []) {
   const me = String(cfg?.pickup?.me ?? cfg?.prWatch?.ignoreAuthors?.[0] ?? "").trim() || "本人"
   const lines = []
   if (prs.length) {
     lines.push(
-      "【Foreman · 检查智能体 · 他人 PR 待分配】",
+      "【Foreman · router agent · 他人 PR 待分配】",
       "代码已完成 open PR 扫描、作者过滤和冲突检查。你不需要主动读取 PR 列表；请核对下面的候选，决定是否分配合并助手。",
       `本人账号 ${me} 创建的 PR 不分配、不合并；作者不明的 PR 也不分配。你只通过 pr assign 分配，不要直接执行 foreman pr merge。`,
     )
@@ -151,7 +151,7 @@ export function prInspectorText(prs = [], cfg = {}, uiPrs = []) {
   if (uiPrs.length) {
     if (lines.length) lines.push("")
     lines.push(
-      "【Foreman · 检查智能体 · 本人 UI PR 待验收指派】",
+      "【Foreman · router agent · 本人 UI PR 待验收指派】",
       "代码已确认下列 PR 是本人创建且涉及 UI。请逐条执行 pr ui-assign，由 Foreman 在周晓亮、张振豪之间轮询指派一位验收人；不要自行指定人、不要分配合并助手、不要合并。",
     )
     for (const pr of uiPrs) {
@@ -208,7 +208,7 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
         const seen = book.prSeen[key]
         const item = { ...pr, repo, key, seen }
         if (isOwnPr(item, cfg, book)) {
-          // 本人 PR 不走合并助手；只有确认涉及 UI 时才交检查智能体做验收指派。
+          // 本人 PR 不走合并助手；只有确认涉及 UI 时才交router agent做验收指派。
           if (seen?.reviewNotifiedAt || seen?.reviewAssignedAt) continue
           if (!uiReviewersReady(cfg)) {
             if (seen?.skipped === "self" || ownedPrKeys(book).has(key)) continue
@@ -281,8 +281,8 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
   try {
     if (useInspect) {
       const out = await inspect(prInspectorText(fresh, cfg, uiToSend))
-      if (out?.ok === false || out?.skipped) throw new Error(out.error || `检查智能体接收 PR 候选失败：${out.skipped}`)
-      sentTo = String(out?.convId ?? out?.session ?? "").trim() || "检查智能体"
+      if (out?.ok === false || out?.skipped) throw new Error(out.error || `router agent接收 PR 候选失败：${out.skipped}`)
+      sentTo = String(out?.convId ?? out?.session ?? "").trim() || "router agent"
       convId = String(out?.convId ?? "").trim()
     } else if (usePush) {
       // 会话中心：同一条编排会话读所有待合并 PR，不新建、不起第二条会话。
@@ -314,7 +314,7 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
   }
   const inspectedPrs = [...fresh, ...uiToSend]
   log(useInspect
-    ? `PR 扫描：${inspectedPrs.length} 条候选已交给检查智能体 ${sentTo} 处理（${inspectedPrs.map((p) => `${p.repo}#${p.number}`).join("、")}）`
+    ? `PR 扫描：${inspectedPrs.length} 条候选已交给router agent ${sentTo} 处理（${inspectedPrs.map((p) => `${p.repo}#${p.number}`).join("、")}）`
     : `PR 扫描：${fresh.length} 条新 PR 已交给 ${sentTo || "编排会话"} 合并（${fresh.map((p) => `${p.repo}#${p.number}`).join("、")}）`)
   return {
     ok: true, checked, notified: inspectedPrs.length, uiNotified: uiToSend.length, conflicting,

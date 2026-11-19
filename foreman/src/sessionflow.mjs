@@ -273,7 +273,7 @@ export function ticketText({ repo, issue, orchestrator = "", fresh = false } = {
   const lines = [`【foreman · 编排会话 · 收到工单】${key} ${String(issue?.title ?? "")}`.trim()]
   lines.push(`工单键：${key}`)
   if (orchestrator) lines.push(`编排会话：${orchestrator}`)
-  if (fresh) lines.push("改派原因：检查智能体确认原编排无法继续。请接手工单，先核对现有执行会话与账本，再决定是否续跑或重新 dispatch；不要重复开执行会话。")
+  if (fresh) lines.push("改派原因：router agent 确认原编排无法继续。请接手工单，先核对现有执行会话与账本，再决定是否续跑或重新 dispatch；不要重复开执行会话。")
   lines.push("", "工单正文：", String(issue?.body ?? "").trim() || "（正文为空，按标题理解）")
   lines.push(
     "",

@@ -1,4 +1,5 @@
 // 统一外发入口：send --type mail|lark → Outbox。
+import { withSessionRoute } from "./mail.mjs"
 // 这里只校验并持久化，不调用外部 CLI；实际发送由 Dispatcher 的通道 adapter 完成。
 export function outboundPayload(type, input = {}) {
   const channel = String(type ?? "").trim().toLowerCase()
@@ -8,7 +9,8 @@ export function outboundPayload(type, input = {}) {
     const subject = String(input.subject ?? "").trim()
     if (!to.length) throw new Error("send --type mail 需要 --to <邮箱>，多个用逗号分隔")
     if (!subject) throw new Error("send --type mail 需要 --subject <主题>")
-    return { channel, payload: { to, subject, body: String(input.body ?? "") } }
+    const sessionId = String(input.sessionId ?? "").trim()
+    return { channel, payload: { to, subject: withSessionRoute(subject, sessionId), body: String(input.body ?? ""), ...(sessionId ? { sessionId } : {}) } }
   }
   if (channel === "lark") {
     const chatId = String(input.chatId ?? "").trim()

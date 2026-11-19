@@ -16,6 +16,13 @@ test("统一 send 校验 mail/lark 参数，不提供 lark send 独立通道", (
   assert.throws(() => outboundPayload("lark", { chatId: "oc_1", userId: "ou_1", text: "x" }), /只能提供一个/)
 })
 
+test("邮件主题自动携带可路由的会话 ID", () => {
+  const result = outboundPayload("mail", { to: "a@corp.test", subject: "发布", sessionId: "conv-123" })
+  assert.equal(result.payload.subject, "发布 [FM-SID:conv-123]")
+  assert.equal(result.payload.sessionId, "conv-123")
+  assert.throws(() => outboundPayload("mail", { to: "a@corp.test", subject: "发布", sessionId: "bad id" }), /session-id/)
+})
+
 test("统一 send 只写 Outbox，dedupeKey 防止重复入队", () => {
   const store = new OutboxStore(new DatabaseSync(":memory:"))
   const ctx = { outbox: store, cfg: { outbox: { maxAttempts: 8 } } }

@@ -74,6 +74,25 @@ export function parseAcceptTag(subject) {
   return m ? m[1].toLowerCase() : ""
 }
 
+// 普通邮件的回复路由：主题保留会话 ID，Worker 才能 steer 回发起会话。
+export function sessionRouteMarker(sessionId) {
+  const id = String(sessionId ?? "").trim()
+  if (!id) return ""
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id)) throw new Error("--session-id 只能包含字母、数字、下划线和连字符")
+  return `[FM-SID:${id}]`
+}
+
+export function withSessionRoute(subject, sessionId) {
+  const marker = sessionRouteMarker(sessionId)
+  const base = String(subject ?? "").trim().replace(/\s*\[FM-SID:[A-Za-z0-9_-]+\]/gi, "").trim()
+  return marker ? `${base} ${marker}` : base
+}
+
+export function parseSessionRoute(subject) {
+  const m = /\[FM-SID:([A-Za-z0-9][A-Za-z0-9_-]{0,127})\]/i.exec(String(subject ?? ""))
+  return m?.[1] ?? ""
+}
+
 const ENTITIES = {
   "&nbsp;": " ",
   "&amp;": "&",

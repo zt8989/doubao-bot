@@ -58,7 +58,7 @@ export class DoubaoSessionAdapter {
     return this.driver.steer(target, text)
   }
 
-  // queue：检查智能体巡检排到当前轮次之后，避免插入同一轮造成重复检查。
+  // queue：router agent巡检排到当前轮次之后，避免插入同一轮造成重复检查。
   queue(target, text) {
     return this.driver.queue(target, text)
   }

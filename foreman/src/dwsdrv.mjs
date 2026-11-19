@@ -115,7 +115,7 @@ export class DwsDriver {
     }
   }
 
-  // queue：检查智能体专用，排到当前轮次之后，避免重复插入同一轮巡检。
+  // queue：router agent 专用，排到当前轮次之后，避免重复插入同一轮巡检。
   async queue(name, text) {
     const tmp = writeTemp(text)
     try {

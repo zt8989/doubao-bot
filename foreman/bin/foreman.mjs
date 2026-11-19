@@ -26,17 +26,17 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman watch rm <会话id|标题> [-c] [--no-service]
   foreman watch poll [-c] [--no-service]
   foreman hand <owner/name>#<N> [--fresh]   --fresh 强制重派这条单的独立编排
-  foreman inspect                          立即写入检查智能体 Inbox，由 Worker 投递
+  foreman route                            立即写入 router agent Inbox，由 Worker 投递
   foreman inbox list [--limit <N>]        看事件、Schedule 与 pending/done/dropped 计数
   foreman worker run                       手动让 Worker 消费一轮（排障用）
   foreman issue settle <N> --repo R --note <完成依据>   仅本地完成，不关远端、不清工作区
   foreman pr list [-c] [--no-service]
   foreman pr poll [-c] [--no-service]
   foreman pr ui-assign <N> --repo R        本人 UI PR 轮询指派测试验收人
-  foreman pr assign <N> --repo R           检查智能体分配一条他人 PR 给合并助手
+  foreman pr assign <N> --repo R           路由智能体分配一条他人 PR 给合并助手
   foreman pr open --repo R --base <基线> --head <分支> --title <标题> [--body <正文>] [--issue <单号>] [--issue-repo <工单所在仓库>] [--ui]
   foreman pr merge <N> --repo R [--issue <单号>] [--style merge|rebase|squash] [--approved-by <人>] [--ui]
-  foreman send --type mail --to <邮箱>[,...] --subject <主题> [--body <正文>]
+  foreman send --type mail --to <邮箱>[,...] --subject <主题> [--body <正文>] [--session-id <会话ID>]
   foreman send --type lark (--chat-id <oc_...>|--user-id <ou_...>) (--text <正文>|--markdown <正文>)
   foreman outbox list [--limit <N>] [--status <状态>] [--channel mail|lark]
   foreman outbox run                       手动让 Dispatcher 消费一轮（排障用）
@@ -72,9 +72,9 @@ const HELP = `foreman — 接单编排 + 常驻服务
   watch add   登记一条监听（target 是会话 id 或侧边栏标题）
   watch list/rm/poll   看登记 / 删一条 / 立刻跑一轮（取证排障用）
   pr list     看 PR 监听账本（哪些 PR 见过/已通知）
-  pr poll     立刻扫一轮 PR，把他人候选与本人 UI 候选写入检查智能体 Inbox
+  pr poll     立刻扫一轮 PR，把他人候选与本人 UI 候选写入路由智能体 Inbox
   pr ui-assign <N> --repo R  本人 UI PR 轮询指派给周晓亮/张振豪（只指派，不合）
-  pr assign <N> --repo R   检查智能体核对候选后，显式创建这条 PR 的合并助手
+  pr assign <N> --repo R   路由智能体核对候选后，显式创建这条 PR 的合并助手
   deliver     旧投递模型保留；当前任务状态统一经 task.update Inbox，由 Worker queue 给所属编排。
   pr open     建 PR（唯一入口：agent 也走它，账本/控制台才记得到）
   pr merge <N> --repo R [--issue <单号>]   合并 PR（唯一入口：先核对关联工单再合；失败回理由）
@@ -96,7 +96,7 @@ run 以编排会话为中心：捞到单先交给编排会话（dws msg --mode s
 合并关单后由编排调 foreman clean 清 worktree 与会话。--direct 退回老行为（run 自己派活）。
 
 编排会话从哪来（工作会话与更新都绑它）：
-  1. 检查智能体接单：hand 按工单新建/复用独立编排；手工 orch start 仍可起全局兼容会话；
+  1. 路由智能体接单：hand 按工单新建/复用独立编排；手工 orch start 仍可起全局兼容会话；
   2. 用户自主发起：发起那条会话自己就是编排——hand/dispatch/resume 自动取 MCP_VM_CONVERSATION_ID
      （或显式 --orchestrator <会话id|标题>，--no-orchestrator 关掉自动识别），
      工作会话的状态更新由 Worker queue 回这条发起方会话。
@@ -396,7 +396,7 @@ async function cmdPickup(pos, flags) {
 }
 
 async function cmdRun(pos, flags) {
-  if (flags.every !== undefined) throw new Error("run --every 已移除：代码不再自动接单；请由检查智能体决策后调用 run --once")
+  if (flags.every !== undefined) throw new Error("run --every 已移除：代码不再自动接单；请由路由智能体决策后调用 run --once")
   const cfg = loadConfig(flags.config)
   if (!cfg.repos.length) throw new Error("配置里没有 repos，先写一条：{\"repo\":\"owner/name\",\"dir\":\"~/Documents/workspace/<repo>\"}")
   // --notify <目标> / --no-notify 只管本轮派出去的会话要不要登记监听。
@@ -643,7 +643,7 @@ async function cmdSessions(pos, flags) {
 }
 
 // 调用方会话 = 谁发起的这张单。两种来源：
-//   1) 检查智能体接单：服务进程没有用户会话 → hand 按工单建独立编排；手工兼容场景才用全局编排；
+//   1) 路由智能体接单：服务进程没有用户会话 → hand 按工单建独立编排；手工兼容场景才用全局编排；
 //   2) 用户在自己的豆包会话里发起：显式 --orchestrator <id|名称>，或自动取 MCP_VM_CONVERSATION_ID
 //      （在会话里跑时它就是发起方那条会话）。--no-orchestrator 关掉自动识别。
 function callerOrchestrator(flags = {}) {
@@ -671,10 +671,10 @@ async function cmdHand(pos, flags) {
   return out({ ok: true, ...r })
 }
 
-async function cmdInspect(pos, flags) {
+async function cmdRoute(pos, flags) {
   const cfg = loadConfig(flags.config)
   const port = await resolvePort(cfg)
-  const r = await callRaw(port, { id: "cli", cmd: "inspect" }, 300000)
+  const r = await callRaw(port, { id: "cli", cmd: "route" }, 300000)
   if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
   return out({ ok: true, ...r })
 }
@@ -695,6 +695,7 @@ async function cmdSend(pos, flags) {
   const r = await callRaw(await resolvePort(cfg), {
     id: "cli", cmd: "send", type,
     to: strFlag(flags.to), subject: strFlag(flags.subject), body: strFlag(flags.body),
+    sessionId: strFlag(flags["session-id"]) || String(process.env.MCP_VM_CONVERSATION_ID ?? "").trim(),
     chatId: strFlag(flags["chat-id"]), userId: strFlag(flags["user-id"]),
     text: strFlag(flags.text), markdown: strFlag(flags.markdown),
     dedupeKey: strFlag(flags["dedupe-key"]),
@@ -822,8 +823,10 @@ async function main() {
       return cmdSessions(pos, flags)
     case "hand":
       return cmdHand(pos, flags)
+    case "route":
+    case "router":
     case "inspect":
-      return cmdInspect(pos, flags)
+      return cmdRoute(pos, flags)
     case "inbox":
       return cmdInbox(pos, flags)
     case "send":
