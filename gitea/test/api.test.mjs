@@ -96,6 +96,35 @@ test("editIssue：ref 更新工单右侧分支字段并保留返回值", async (
   assert.equal(out.ref, "fix/issue-7")
 })
 
+test("createIssueBranch：建分支后回写工单右侧 ref", async () => {
+  let created = false
+  const fetchImpl = fakeFetch(({ method, path }) => {
+    if (method === "GET" && path === "/api/v1/repos/o/r/issues/7") return json(issue({ title: "Fix login" }))
+    if (method === "GET" && path === "/api/v1/repos/o/r") return json({ default_branch: "main" })
+    if (method === "GET" && path === "/api/v1/repos/o/r/branches/issue-7-fix-login") {
+      return created ? json({ name: "issue-7-fix-login" }) : json({ message: "not found" }, 404)
+    }
+    if (method === "POST" && path === "/api/v1/repos/o/r/branches") {
+      created = true
+      return json({ name: "issue-7-fix-login" }, 201)
+    }
+    if (method === "PATCH" && path === "/api/v1/repos/o/r/issues/7") {
+      return json(issue({ ref: "issue-7-fix-login" }))
+    }
+    return json({ message: "unexpected" }, 500)
+  })
+  const out = await api.createIssueBranch("o/r", 7, {
+    name: "fix-login",
+    base: "sit-20261126",
+    opts: { settings: SETTINGS, fetchImpl },
+  })
+  const createIndex = fetchImpl.calls.findIndex((c) => c.method === "POST" && c.path === "/api/v1/repos/o/r/branches")
+  const patchIndex = fetchImpl.calls.findIndex((c) => c.method === "PATCH" && c.path === "/api/v1/repos/o/r/issues/7")
+  assert.ok(createIndex >= 0 && patchIndex > createIndex, "必须先建分支，再更新工单 ref")
+  assert.deepEqual(JSON.parse(fetchImpl.calls[patchIndex].body), { ref: "issue-7-fix-login" })
+  assert.equal(out.branch, "issue-7-fix-login")
+})
+
 test("editIssueLabels：--label-add needs-triage 用组织标签 id 发 POST", async () => {
   let wrote = false
   const fetchImpl = fakeFetch(({ method, path }) => {
