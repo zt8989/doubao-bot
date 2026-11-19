@@ -251,6 +251,7 @@ test("handleRequest：Inbox 可观测，Worker 可手动消费一轮", async () 
       ...mkCtx(mkCfg(dir)),
       inbox: {
         list: ({ limit }) => [{ id: limit, kind: "inspector", status: "pending" }],
+        count: () => 1,
         schedules: () => [{ id: "inspector", nextAt: "next" }],
         counts: () => ({ pending: 1 }),
       },
@@ -277,6 +278,7 @@ test("handleRequest：统一 send 入 Outbox，outbox list/run 使用服务内�
     const outbox = {
       enqueue(event) { enqueued.push(event); return { id: "out-1", status: "pending", ...event } },
       list({ limit, status, channel }) { return [{ id: "out-1", limit, status, channel }] },
+      count() { return 1 },
       counts() { return { pending: enqueued.length, sent: runs } },
     }
     const ctx = {

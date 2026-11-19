@@ -2,8 +2,8 @@
 //   GET  /                 控制台页面（Vite 构建产物 console/dist）
 //   GET  /assets/<name>    带 hash 的 js/css，长缓存
 //   GET  /api/snapshot?day=YYYY-MM-DD  当天（或指定某天）任务 + PR + 统计；看今天时先跟账本对齐
-//   GET  /api/inbox?limit=100&status=   持久 Inbox 事件与状态统计（只读）
-//   GET  /api/outbox?limit=100&status=&channel=  持久 Outbox 消息与状态统计（只读）
+//   GET  /api/inbox?page=1&pageSize=20&status=   持久 Inbox 事件、分页总数与状态统计（只读）
+//   GET  /api/outbox?page=1&pageSize=20&status=&channel=  持久 Outbox 消息、分页总数与状态统计（只读）
 //   GET  /api/polls        最近几轮扫描记录
 //   GET  /api/history?days=7&day=YYYY-MM-DD&repo=R&key=<owner>/<repo>#<N>  历史事件（按天分组）
 //   POST /api/sync         立刻扫一轮 PR（Gitea REST）+ 落库，返回最新快照
@@ -150,15 +150,26 @@ export function startConsoleHttp({ store, ctx, dir, host = "127.0.0.1", port = 7
         if (req.method !== "GET") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
         if (!onRpc) return sendJson(res, 501, { ok: false, error: "rpc_not_enabled" })
         const kind = pathname === "/api/inbox" ? "inbox" : "outbox"
-        const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 100, 1), 500)
+        const page = Math.max(1, Math.floor(Number(url.searchParams.get("page")) || 1))
+        const pageSize = Math.min(100, Math.max(1, Math.floor(Number(url.searchParams.get("pageSize") ?? url.searchParams.get("limit")) || 20)))
+        const status = (url.searchParams.get("status") || "").trim()
         const r = await onRpc({
           id: `http-${kind}-list`,
           cmd: `${kind} list`,
-          limit,
-          status: (url.searchParams.get("status") || "").trim(),
+          limit: pageSize,
+          offset: (page - 1) * pageSize,
+          status,
           ...(kind === "outbox" ? { channel: (url.searchParams.get("channel") || "").trim() } : {}),
         })
-        return sendJson(res, r?.ok === false ? 500 : 200, r)
+        const rows = kind === "inbox" ? r?.events : r?.messages
+        const total = Math.max(0, Number(r?.total ?? rows?.length ?? 0))
+        return sendJson(res, r?.ok === false ? 500 : 200, {
+          ...r,
+          page,
+          pageSize,
+          total,
+          totalPages: Math.ceil(total / pageSize),
+        })
       }
 
       if (pathname === "/api/polls") {

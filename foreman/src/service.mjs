@@ -2256,8 +2256,10 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     }
   }
   if (cmd === "outbox list") {
+    const filter = { status: String(req.status ?? ""), channel: String(req.channel ?? "") }
     return ok({
-      messages: ctx.outbox.list({ limit: Number(req.limit ?? 100), status: String(req.status ?? ""), channel: String(req.channel ?? "") }),
+      messages: ctx.outbox.list({ ...filter, limit: Number(req.limit ?? 100), offset: Number(req.offset ?? 0) }),
+      total: ctx.outbox.count(filter),
       counts: ctx.outbox.counts(),
     })
   }
@@ -2636,8 +2638,10 @@ export async function handleRequest(ctx, req) {  const id = req?.id
   }
 
   if (cmd === "inbox list") {
+    const status = String(req.status ?? "")
     return ok({
-      events: ctx.inbox?.list({ limit: Number(req.limit ?? 100), status: String(req.status ?? "") }) ?? [],
+      events: ctx.inbox?.list({ limit: Number(req.limit ?? 100), offset: Number(req.offset ?? 0), status }) ?? [],
+      total: ctx.inbox?.count({ status }) ?? 0,
       schedules: ctx.inbox?.schedules() ?? [],
       counts: ctx.inbox?.counts() ?? {},
     })

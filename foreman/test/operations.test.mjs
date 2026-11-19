@@ -142,21 +142,26 @@ test("HTTP：/api/inbox 与 /api/outbox 返回首页队列并透传筛选条件"
     onRpc: async (req) => {
       calls.push(req)
       if (req.cmd === "inbox list") {
-        return { ok: true, events: [{ id: 1, kind: "task.update", status: "pending", payload: {} }], schedules: [], counts: { pending: 1 } }
+        return { ok: true, events: [{ id: 1, kind: "task.update", status: "pending", payload: {} }], total: 42, schedules: [], counts: { pending: 42 } }
       }
-      return { ok: true, messages: [{ id: 2, channel: "mail", status: "sent", payload: { subject: "验收" } }], counts: { sent: 1 } }
+      return { ok: true, messages: [{ id: 2, channel: "mail", status: "sent", payload: { subject: "验收" } }], total: 51, counts: { sent: 51 } }
     },
   })
   try {
-    const inbox = await (await fetch(`${h.url}/api/inbox?limit=25&status=pending`)).json()
+    const inbox = await (await fetch(`${h.url}/api/inbox?page=2&pageSize=25&status=pending`)).json()
     assert.equal(inbox.events[0].kind, "task.update")
-    assert.equal(inbox.counts.pending, 1)
-    const outbox = await (await fetch(`${h.url}/api/outbox?limit=50&status=sent&channel=mail`)).json()
+    assert.equal(inbox.counts.pending, 42)
+    assert.equal(inbox.page, 2)
+    assert.equal(inbox.pageSize, 25)
+    assert.equal(inbox.total, 42)
+    assert.equal(inbox.totalPages, 2)
+    const outbox = await (await fetch(`${h.url}/api/outbox?page=3&pageSize=50&status=sent&channel=mail`)).json()
     assert.equal(outbox.messages[0].channel, "mail")
-    assert.equal(outbox.counts.sent, 1)
-    assert.deepEqual(calls.map(({ cmd, limit, status, channel }) => ({ cmd, limit, status, channel })), [
-      { cmd: "inbox list", limit: 25, status: "pending", channel: undefined },
-      { cmd: "outbox list", limit: 50, status: "sent", channel: "mail" },
+    assert.equal(outbox.counts.sent, 51)
+    assert.equal(outbox.totalPages, 2)
+    assert.deepEqual(calls.map(({ cmd, limit, offset, status, channel }) => ({ cmd, limit, offset, status, channel })), [
+      { cmd: "inbox list", limit: 25, offset: 25, status: "pending", channel: undefined },
+      { cmd: "outbox list", limit: 50, offset: 100, status: "sent", channel: "mail" },
     ])
     const rejected = await fetch(`${h.url}/api/inbox`, { method: "POST" })
     assert.equal(rejected.status, 405)

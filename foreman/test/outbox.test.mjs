@@ -40,6 +40,17 @@ test("Outbox 写入不直接外发，Dispatcher 按通道发送并记 sent", asy
   assert.equal(store.get(lark.id).result.messageId, "om_1")
 })
 
+test("Outbox 列表按状态与通道分页并返回准确总数", () => {
+  const { store } = fixture()
+  for (let i = 1; i <= 3; i++) enqueue(store, "mail")
+  for (let i = 1; i <= 2; i++) enqueue(store, "lark")
+  assert.deepEqual(store.list({ limit: 2, offset: 1 }).map((event) => event.id), [4, 3])
+  assert.equal(store.count(), 5)
+  assert.equal(store.count({ channel: "mail" }), 3)
+  assert.equal(store.count({ channel: "lark", status: "pending" }), 2)
+  assert.equal(store.list({ limit: 1, offset: 1, channel: "mail" })[0].id, 2)
+})
+
 test("Outbox dedupeKey 跨完成状态去重，不重复外发", async () => {
   const { store } = fixture()
   const first = enqueue(store, "lark", { dedupeKey: "notice:pr-1" })

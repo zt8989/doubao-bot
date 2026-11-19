@@ -216,6 +216,58 @@ class FmStats extends LitElement {
   }
 }
 
+/* ---------------- 分页 ---------------- */
+const PAGE_SIZE = 20
+const pageSlice = (rows, requestedPage) => {
+  const total = rows.length
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+  const page = Math.min(pages, Math.max(1, Number(requestedPage) || 1))
+  return { page, total, rows: rows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE) }
+}
+const pageNumbers = (page, pages) => {
+  const wanted = [...new Set([1, pages, page - 1, page, page + 1].filter((n) => n >= 1 && n <= pages))].sort((a, b) => a - b)
+  const out = []
+  for (let i = 0; i < wanted.length; i++) {
+    if (i > 0 && wanted[i] - wanted[i - 1] > 1) out.push("…")
+    out.push(wanted[i])
+  }
+  return out
+}
+
+class FmPagination extends LitElement {
+  static properties = { page: { type: Number }, total: { type: Number }, pageSize: { type: Number }, scope: { type: String } }
+  createRenderRoot() {
+    return this
+  }
+  go(page) {
+    emit(this, "page-set", { scope: this.scope, page })
+  }
+  render() {
+    const total = Math.max(0, Number(this.total) || 0)
+    if (!total) return html``
+    const size = Math.max(1, Number(this.pageSize) || PAGE_SIZE)
+    const pages = Math.max(1, Math.ceil(total / size))
+    const page = Math.min(pages, Math.max(1, Number(this.page) || 1))
+    const start = (page - 1) * size + 1
+    const end = Math.min(total, page * size)
+    return html`
+      <div class="panel-foot pagination">
+        <span>第 ${start}–${end} 条 · 共 ${total} 条</span>
+        <div class="page-buttons" aria-label="分页">
+          <button class="ghost page-btn" ?disabled=${page <= 1} @click=${() => this.go(page - 1)}>上一页</button>
+          ${pageNumbers(page, pages).map((item) => item === "…"
+            ? html`<span class="page-ellipsis">…</span>`
+            : html`<button
+                class=${"ghost page-btn" + (item === page ? " is-active" : "")}
+                aria-current=${item === page ? "page" : "false"}
+                @click=${() => this.go(item)}
+              >${item}</button>`)}
+          <button class="ghost page-btn" ?disabled=${page >= pages} @click=${() => this.go(page + 1)}>下一页</button>
+        </div>
+      </div>`
+  }
+}
+
 /* ---------------- 今日任务（可展开看每个节点的详情） ---------------- */
 class FmTasks extends LitElement {
   static properties = {
@@ -234,6 +286,8 @@ class FmTasks extends LitElement {
     completeBusy: { type: String },
     completeNote: { type: String },
     completeError: { type: String },
+    page: { type: Number },
+    candidatePage: { type: Number },
   }
   createRenderRoot() {
     return this
@@ -320,6 +374,7 @@ class FmTasks extends LitElement {
   // 待分配：全部 open 工单，只做账本去重；标签原样展示，过滤规则仍只作用于自动巡检。
   pendingView() {
     const items = this.candidates || []
+    const paged = pageSlice(items, this.candidatePage)
     const info = this.candInfo || {}
     const cap = info.capacity || {}
     const busy = this.candBusy || ""
@@ -355,7 +410,7 @@ class FmTasks extends LitElement {
             </tr>
           </thead>
           <tbody>
-            ${items.map((c) => {
+            ${paged.rows.map((c) => {
               const key = `${c.repo}#${c.number}`
               const [cls, label] = BUCKET[c.bucket] || ["self", "他人认领"]
               const labels = (Array.isArray(c.labels) ? c.labels : [])
@@ -388,7 +443,8 @@ class FmTasks extends LitElement {
           </tbody>
         </table>
       </div>
-      <div class="panel-foot">
+      <fm-pagination scope="candidates" .page=${paged.page} .total=${paged.total} .pageSize=${PAGE_SIZE}></fm-pagination>
+      <div class="panel-foot pagination-note">
         ${(info.total || items.length) > items.length
           ? `共 ${info.total} 条待分配 · 按「我的 → 无人认领 → 他人认领」只显示前 ${items.length} 条 · `
           : ""}在跑 ${cap.inflight ?? 0}/${cap.maxRunning ?? "?"} · 手动接单不看自动接单开关 · 带 needs-info 类标签的走决策单（不监听）
@@ -396,6 +452,7 @@ class FmTasks extends LitElement {
   }
   render() {
     const rows = this.tasks || []
+    const paged = pageSlice(rows, this.page)
     const scope = this.scope || "今日"
     const tab = this.tab === "pending" ? "pending" : "today"
     const pending = (this.candidates || []).length
@@ -443,7 +500,7 @@ class FmTasks extends LitElement {
                     </tr>
                   </thead>
                   <tbody>
-                    ${rows.map((t) => {
+                    ${paged.rows.map((t) => {
                       const key = `${t.repo}#${t.number}`
                       return html`
                         <tr>
@@ -475,7 +532,8 @@ class FmTasks extends LitElement {
                     })}
                   </tbody>
                 </table>
-              </div>`
+              </div>
+              <fm-pagination scope="tasks" .page=${paged.page} .total=${paged.total} .pageSize=${PAGE_SIZE}></fm-pagination>`
           : html`
               <div class="empty">
                 <div class="empty-title">今天还没有分配到任务</div>
@@ -514,6 +572,9 @@ class FmQueue extends LitElement {
     filter: { type: String },
     busy: { type: String },
     error: { type: String },
+    page: { type: Number },
+    pageSize: { type: Number },
+    total: { type: Number },
   }
   createRenderRoot() {
     return this
@@ -544,9 +605,8 @@ class FmQueue extends LitElement {
   render() {
     const kind = this.kind === "outbox" ? "outbox" : "inbox"
     const title = kind === "outbox" ? "Outbox" : "Inbox"
-    const all = this.rows || []
+    const rows = this.rows || []
     const current = this.filter || "all"
-    const rows = current === "all" ? all : all.filter((row) => row.status === current)
     const filters = kind === "outbox"
       ? ["all", "pending", "processing", "sent", "failed"]
       : ["all", "pending", "processing", "done", "dropped"]
@@ -603,7 +663,13 @@ class FmQueue extends LitElement {
               </tbody>
             </table>
           </div>
-          <div class="panel-foot">当前显示 ${rows.length} 条 · 每 15 秒自动刷新 · 点击「详情」查看完整 payload</div>`
+          <fm-pagination
+            scope=${kind}
+            .page=${this.page || 1}
+            .total=${this.total ?? rows.length}
+            .pageSize=${this.pageSize || PAGE_SIZE}
+          ></fm-pagination>
+          <div class="panel-foot pagination-note">每 15 秒自动刷新 · 点击「详情」查看完整 payload</div>`
           : html`<div class="empty">
               <div class="empty-title">${this.busy === "loading" ? `正在读取 ${title}…` : "当前分类没有记录"}</div>
               <div class="empty-sub">${kind === "outbox" ? "外发意图入队后会出现在这里" : "持久事件写入后会出现在这里"}</div>
@@ -841,6 +907,8 @@ class FmConsole extends LitElement {
     outboxData: { attribute: false },
     inboxFilter: { type: String },
     outboxFilter: { type: String },
+    inboxPage: { type: Number },
+    outboxPage: { type: Number },
     inboxBusy: { type: String },
     outboxBusy: { type: String },
     inboxError: { type: String },
@@ -848,6 +916,8 @@ class FmConsole extends LitElement {
     workflow: { attribute: false },
     nodeBusy: { type: String },
     taskTab: { type: String },
+    taskPage: { type: Number },
+    candidatePage: { type: Number },
     candidates: { attribute: false },
     candInfo: { attribute: false },
     candBusy: { type: String },
@@ -882,6 +952,8 @@ class FmConsole extends LitElement {
     this.outboxData = { messages: [], counts: {} }
     this.inboxFilter = "all"
     this.outboxFilter = "all"
+    this.inboxPage = 1
+    this.outboxPage = 1
     this.inboxBusy = ""
     this.outboxBusy = ""
     this.inboxError = ""
@@ -890,6 +962,8 @@ class FmConsole extends LitElement {
     this.nodeBusy = ""
     // 分配任务卡片的两页：today（已分配）/ pending（待分配，可点接单）
     this.taskTab = "today"
+    this.taskPage = 1
+    this.candidatePage = 1
     this.candidates = []
     this.candInfo = null
     this.candBusy = ""
@@ -944,6 +1018,7 @@ class FmConsole extends LitElement {
     this._onTheme = (e) => this.setTheme(e.detail.mode)
     this._onDay = (e) => {
       this.day = e.detail.day || ""
+      this.taskPage = 1
       this.applyDayToUrl()
       this.load()
     }
@@ -970,8 +1045,21 @@ class FmConsole extends LitElement {
     this._onQueueFilter = (e) => {
       const kind = e.detail.queue === "outbox" ? "outbox" : "inbox"
       this[`${kind}Filter`] = e.detail.status || "all"
+      this[`${kind}Page`] = 1
+      this.loadQueue(kind)
     }
     this._onQueueRefresh = (e) => this.loadQueue(e.detail.queue)
+    this._onPage = (e) => {
+      const { scope, page } = e.detail
+      if (scope === "inbox" || scope === "outbox") {
+        this[`${scope}Page`] = Math.max(1, Number(page) || 1)
+        this.loadQueue(scope)
+      } else if (scope === "tasks") {
+        this.taskPage = Math.max(1, Number(page) || 1)
+      } else if (scope === "candidates") {
+        this.candidatePage = Math.max(1, Number(page) || 1)
+      }
+    }
     this.addEventListener("theme-set", this._onTheme)
     this.addEventListener("day-set", this._onDay)
     this.addEventListener("refresh", this._onRefresh)
@@ -986,10 +1074,13 @@ class FmConsole extends LitElement {
     this.addEventListener("operation-filter", this._onOpFilter)
     this.addEventListener("queue-filter", this._onQueueFilter)
     this.addEventListener("queue-refresh", this._onQueueRefresh)
+    this.addEventListener("page-set", this._onPage)
     this._onTaskTab = (e) => {
       const tab = e.detail.tab === "pending" ? "pending" : "today"
       if (this.taskTab === tab) return
       this.taskTab = tab
+      this.taskPage = 1
+      this.candidatePage = 1
       if (tab === "pending") this.loadCandidates()
     }
     this._onCandRefresh = () => this.loadCandidates({ refresh: true })
@@ -1046,6 +1137,7 @@ class FmConsole extends LitElement {
     this.removeEventListener("operation-filter", this._onOpFilter)
     this.removeEventListener("queue-filter", this._onQueueFilter)
     this.removeEventListener("queue-refresh", this._onQueueRefresh)
+    this.removeEventListener("page-set", this._onPage)
     this.removeEventListener("task-tab", this._onTaskTab)
     this.removeEventListener("candidates-refresh", this._onCandRefresh)
     this.removeEventListener("candidate-pick", this._onCandidatePick)
@@ -1212,7 +1304,13 @@ class FmConsole extends LitElement {
     if (this[`${queue}Busy`] === "loading") return
     this[`${queue}Busy`] = "loading"
     try {
-      const res = await fetch(`/api/${queue}?limit=200`, { cache: "no-store" })
+      const params = new URLSearchParams({
+        page: String(this[`${queue}Page`] || 1),
+        pageSize: String(PAGE_SIZE),
+      })
+      const status = this[`${queue}Filter`] || "all"
+      if (status !== "all") params.set("status", status)
+      const res = await fetch(`/api/${queue}?${params}`, { cache: "no-store" })
       const body = await res.json()
       if (!res.ok || body.ok === false) throw new Error(body.message || body.error || `HTTP ${res.status}`)
       this[`${queue}Data`] = body
@@ -1356,6 +1454,9 @@ class FmConsole extends LitElement {
               .rows=${this.inboxData.events || []}
               .counts=${this.inboxData.counts || {}}
               .filter=${this.inboxFilter}
+              .page=${this.inboxData.page || this.inboxPage}
+              .pageSize=${this.inboxData.pageSize || PAGE_SIZE}
+              .total=${this.inboxData.total || 0}
               .busy=${this.inboxBusy}
               .error=${this.inboxError}
             ></fm-queue>`
@@ -1365,6 +1466,9 @@ class FmConsole extends LitElement {
               .rows=${this.outboxData.messages || []}
               .counts=${this.outboxData.counts || {}}
               .filter=${this.outboxFilter}
+              .page=${this.outboxData.page || this.outboxPage}
+              .pageSize=${this.outboxData.pageSize || PAGE_SIZE}
+              .total=${this.outboxData.total || 0}
               .busy=${this.outboxBusy}
               .error=${this.outboxError}
             ></fm-queue>`
@@ -1378,6 +1482,8 @@ class FmConsole extends LitElement {
                 .workflows=${this.workflow?.workflows || []}
                 .scope=${this.data.isToday === false ? this.data.day : "今日"}
                 .tab=${this.taskTab}
+                .page=${this.taskPage}
+                .candidatePage=${this.candidatePage}
                 .candidates=${this.candidates}
                 .candInfo=${this.candInfo}
                 .candBusy=${this.candBusy}
@@ -1404,6 +1510,7 @@ customElements.define("fm-theme-switch", FmThemeSwitch)
 customElements.define("fm-sidebar", FmSidebar)
 customElements.define("fm-head", FmHead)
 customElements.define("fm-stats", FmStats)
+customElements.define("fm-pagination", FmPagination)
 customElements.define("fm-tasks", FmTasks)
 customElements.define("fm-queue", FmQueue)
 customElements.define("fm-schedules", FmSchedules)
