@@ -34,12 +34,24 @@ export function resolvePort(cfg) {
   return readPortFile(portFileOf(cfg)) || Number(cfg?.service?.http?.port) || 0
 }
 
-function httpJson(port, method, reqPath, body, timeoutMs = 3000) {
+// 客户端连哪个地址：监听 0.0.0.0 / :: 时走回环，否则就用配置里的 host（本机同样能连通）。
+export function connectHost(host) {
+  const h = String(host ?? "").trim()
+  if (!h || h === "0.0.0.0" || h === "::" || h === "[::]") return "127.0.0.1"
+  return h
+}
+
+// 一次解析出 host + port，避免各处各自拼。
+export function resolveTarget(cfg) {
+  return { host: connectHost(cfg?.service?.http?.host), port: resolvePort(cfg) }
+}
+
+function httpJson(host, port, method, reqPath, body, timeoutMs = 3000) {
   return new Promise((resolve, reject) => {
     const payload = body == null ? null : Buffer.from(JSON.stringify(body), "utf8")
     const req = http.request(
       {
-        host: "127.0.0.1",
+        host,
         port,
         path: reqPath,
         method,
@@ -80,10 +92,22 @@ function httpJson(port, method, reqPath, body, timeoutMs = 3000) {
   })
 }
 
-// 通用调用：POST /api/rpc。target 可以是端口号、端口文件路径、或 "http://127.0.0.1:port"。
+// 通用调用：POST /api/rpc。target 可以是 {host, port}、端口号、端口文件路径、或 "http://host:port"。
 export async function callRaw(target, req, timeoutMs = 3000) {
-  const port = portOfTarget(target)
-  return httpJson(port, "POST", "/api/rpc", req, timeoutMs)
+  const { host, port } = hostPortOfTarget(target)
+  return httpJson(host, port, "POST", "/api/rpc", req, timeoutMs)
+}
+
+// 兼容老的「只给端口」调用：没给 host 就按回环连。
+function hostPortOfTarget(target) {
+  if (target && typeof target === "object") {
+    return { host: connectHost(target.host), port: Number(target.port) || 0 }
+  }
+  if (typeof target === "string" && target.trim().startsWith("http")) {
+    const u = new URL(target.trim())
+    return { host: connectHost(u.hostname), port: Number(u.port) || 80 }
+  }
+  return { host: "127.0.0.1", port: portOfTarget(target) }
 }
 
 function portOfTarget(target) {
@@ -104,8 +128,8 @@ function portOfTarget(target) {
 
 // 短超时 ping：服务在不在。
 export async function pingOnce(target, timeoutMs = 200) {
-  const port = portOfTarget(target)
-  return httpJson(port, "GET", "/api/ping", null, timeoutMs)
+  const { host, port } = hostPortOfTarget(target)
+  return httpJson(host, port, "GET", "/api/ping", null, timeoutMs)
 }
 
 // 默认后台拉起：detach 一个 `node bin/foreman.mjs serve -c <cfgPath>`，stdout/stderr 接到 service.log。

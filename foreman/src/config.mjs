@@ -202,9 +202,12 @@ export const DEFAULTS = {
     stopTimeoutMs: 5000,
     // 唯一的通道：HTTP（CLI 的 RPC + 控制台同端口）；端口写到 portFile，CLI 读它连过来。
     http: {
+      // host 改成 0.0.0.0 就监听所有网卡（局域网 / tailscale 可访问）；
+      // 一旦不是回环地址，非回环请求必须带 token（token 文件下面那行，缺省自动生成）。
       host: "127.0.0.1",
       port: 7317,
       portFile: "~/.foreman/service.port",
+      tokenFile: "~/.foreman/console.token",
       db: "~/.foreman/console.db",
     },
   },
@@ -360,9 +363,13 @@ export function loadConfig(explicit) {
     throw new Error(`配置项 service.http.port 要是 0–65535 的整数，现在是：${cfg.service.http.port}`)
   }
   cfg.service.http.port = httpPort
-  cfg.service.http.host = String(cfg.service.http.host || "127.0.0.1")
-  for (const key of ["db", "portFile"]) {
-    const fallback = key === "db" ? "~/.foreman/console.db" : "~/.foreman/service.port"
+  cfg.service.http.host = String(cfg.service.http.host || "127.0.0.1").trim()
+  // 只接受单段主机名或地址，挡住带空格/斜杠的笔误。
+  if (!cfg.service.http.host || /[\s/]/.test(cfg.service.http.host)) {
+    throw new Error(`配置项 service.http.host 不像地址，现在是：${cfg.service.http.host}`)
+  }
+  for (const key of ["db", "portFile", "tokenFile"]) {
+    const fallback = key === "db" ? "~/.foreman/console.db" : key === "portFile" ? "~/.foreman/service.port" : "~/.foreman/console.token"
     const raw = expandHome(String(cfg.service.http[key] || fallback))
     cfg.service.http[key] = path.isAbsolute(raw) ? raw : path.resolve(baseDir, raw)
   }

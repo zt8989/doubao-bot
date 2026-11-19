@@ -42,13 +42,13 @@ import { OutboxStore, OutboxDispatcher } from "./outbox.mjs"
 import { enqueueOutbound } from "./outbound.mjs"
 import { LarkDriver } from "./lark.mjs"
 import { listSchedules, applySchedules, customAgentSchedules, hydrateSchedules, scheduleDefinitions, saveScheduleSettings } from "./schedules.mjs"
-import { agentScheduleCwd } from "./config.mjs"
+import { DEFAULTS, agentScheduleCwd } from "./config.mjs"
 import { normalizeEventEnvelope } from "./schedule-events.mjs"
 import { runConfiguredScript } from "./executors.mjs"
 import { startOperation, finishOperation } from "./operations.mjs"
 import { startConsoleHttp } from "./consolehttp.mjs"
 import { fileURLToPath } from "node:url"
-import { pingOnce, readPortFile } from "./svclient.mjs"
+import { pingOnce, readPortFile, connectHost } from "./svclient.mjs"
 import { worktreeRemove, statusPorcelain, git, createWorktree } from "./gitx.mjs"
 
 export const MAX_FRAME_BYTES = 1 << 20
@@ -368,14 +368,45 @@ export function mergeDecision({ cfg, watcher, book, result }) {
 
 // ---- 服务进程 ----
 
+// 监听参数一律从配置来：这里只提供 DEFAULTS 里的默认值，不再写死字面量。
 export function servicePaths(cfg) {
+  const http = cfg.service?.http ?? DEFAULTS.service.http
   return {
     pidFile: cfg.service.pidFile,
     logFile: cfg.service.logFile,
-    portFile: cfg.service?.http?.portFile ?? `${path.dirname(cfg.service.pidFile)}/service.port`,
-    port: Number(cfg.service?.http?.port ?? 7317),
-    host: cfg.service?.http?.host || "127.0.0.1",
+    portFile: http.portFile ?? `${path.dirname(cfg.service.pidFile)}/service.port`,
+    port: Number(http.port ?? DEFAULTS.service.http.port),
+    host: http.host || DEFAULTS.service.http.host,
+    tokenFile: http.tokenFile ?? `${path.dirname(cfg.service.pidFile)}/console.token`,
   }
+}
+
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"])
+
+/** 只要监听地址不是回环，外部来源就必须带 token；回环监听不生成 token。 */
+function consoleTokenFor(paths) {
+  if (LOOPBACK_HOSTS.has(String(paths.host ?? "").trim())) return ""
+  fs.mkdirSync(path.dirname(paths.tokenFile), { recursive: true })
+  try {
+    const raw = fs.readFileSync(paths.tokenFile, "utf8").trim()
+    if (raw) return raw
+  } catch {}
+  const token = crypto.randomBytes(24).toString("hex")
+  fs.writeFileSync(paths.tokenFile, `${token}\n`, { mode: 0o600 })
+  return token
+}
+
+/** 监听所有网卡时，把本机各网卡的入口列出来（tailscale 的 100.x 也在其中）。 */
+function consoleLanUrls(host, port) {
+  if (LOOPBACK_HOSTS.has(String(host ?? "").trim())) return []
+  const urls = []
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const item of list ?? []) {
+      if (item.family !== "IPv4" || item.internal) continue
+      urls.push(`http://${item.address}:${port}/`)
+    }
+  }
+  return urls
 }
 
 function readVersion() {
@@ -682,7 +713,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   const existing = readPortFile(paths.portFile)
   if (existing) {
     try {
-      await pingOnce(existing, 250)
+      await pingOnce({ host: connectHost(paths.host), port: existing }, 250)
       throw Object.assign(new Error(`服务已在运行（端口 ${existing}）`), { code: "already-running" })
     } catch (e) {
       if (e.code === "already-running") throw e
@@ -776,6 +807,8 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   // 前端走 Vite 构建产物（console/dist）；源码在 console/，改完跑 npm run build:console。
   const consoleDir = path.join(path.dirname(path.dirname(fileURLToPath(import.meta.url))), "console", "dist")
 
+  // 监听地址全部来自配置：host 不是回环时，控制台用 token 挡住外部来源。
+  const consoleToken = consoleTokenFor(paths)
   let consoleHttp
   try {
     consoleHttp = await startConsoleHttp({
@@ -784,6 +817,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
       dir: consoleDir,
       host: paths.host,
       port: paths.port,
+      token: consoleToken,
       log,
       onRpc: (req) => handleRequest(ctx, req),
     })
@@ -803,6 +837,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   ctx.httpUrl = consoleHttp.url
   ctx.consoleStore = consoleStore
 
+  const lanUrls = consoleLanUrls(paths.host, port)
   // 端口文件（纯数字一行，CLI 直接读）+ pidfile（带上端口，便于排查）。
   fs.writeFileSync(paths.portFile, `${port}\n`)
   fs.writeFileSync(
@@ -812,6 +847,8 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
         pid: process.pid,
         port,
         http: ctx.httpUrl,
+        lanUrls,
+        tokenFile: consoleToken ? paths.tokenFile : "",
         portFile: paths.portFile,
         startedAt: state.startedAt,
         version: state.version,
@@ -822,6 +859,8 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     ) + "\n"
   )
   log(`服务已起：pid=${process.pid} http=${ctx.httpUrl} portFile=${paths.portFile}`)
+  if (lanUrls.length) log(`监听 ${paths.host}，局域网/tailscale 入口：${lanUrls.join("  ")}`)
+  if (consoleToken && lanUrls.length) log(`控制台 token：${paths.tokenFile}（外部访问需带 ?token= 或 x-foreman-token 头）`)
 
   // 执行收工由 router Schedule 每 1 分钟直接运行这段代码，也保留手动轮询入口。
   const doPoll = async () => pollOnce(ctx)

@@ -279,6 +279,17 @@ Inbox、Outbox 与 ConsoleStore 共用 `~/.foreman/console.db` 的同一连接�
   - 数据在同一个 `console.db` 的 `operations` 表；查询接口 `GET /api/operations?limit=100&status=running&action=merge`（后两个参数可省略）。
   - 同时写一份到 `service.log`，前缀为 `[操作]`；日志写不进去不会阻断派单或合并主流程。
 
+### 监听地址与外部访问
+
+`service.http` 里的 `host` / `port` / `tokenFile` 就是唯一来源，代码里不写死；`host` 默认 `127.0.0.1`。
+
+- 想让局域网 / tailscale 访问，把 `host` 改成 `0.0.0.0`（监听所有网卡），`port` 按需改。
+- 只要监听地址不是回环，服务会自动生成访问 token 到 `~/.foreman/console.token`（0600）；
+  外部来源必须带 `?token=<token>`（第一次带会自动下发 cookie）、`x-foreman-token` 头或该 cookie，
+  否则页面和 `/api/*` 一律 401。本机回环请求免验，CLI 不受影响。
+- 启动日志与 pidFile 会列出本机各网卡入口（含 tailscale 的 `100.x`），token 只写文件不写日志。
+- CLI 连接地址同样读配置：`host` 是 `0.0.0.0`/`::` 时按回环连，否则连配置里的 host；端口优先读 `service.port`。
+
 ### 三个文件
 
 `service.port` / `pidFile` / `logFile` 默认都在 `~/.foreman/`：

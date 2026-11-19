@@ -12,7 +12,7 @@ import { Book } from "../src/book.mjs"
 import { DwsDriver } from "../src/dwsdrv.mjs"
 import { acquireLock, releaseLock, runRound, issueKey } from "../src/orchestrator.mjs"
 import { git, branchExists } from "../src/gitx.mjs"
-import { ensureService, callRaw, ServiceError, resolvePort, portFileOf, readPortFile } from "../src/svclient.mjs"
+import { ensureService, callRaw, ServiceError, resolvePort, resolveTarget, portFileOf, readPortFile } from "../src/svclient.mjs"
 import { startServer, pingOnce } from "../src/service.mjs"
 import { sessionTasks, formatSessionTasks } from "../src/tasktree.mjs"
 import { MemoryStore } from "../src/memory.mjs"
@@ -221,13 +221,13 @@ async function cmdServe(pos, flags) {
 
 async function cmdPing(pos, flags) {
   const cfg = loadConfig(flags.config)
-  const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "ping" }, 3000)
+  const r = await callRaw(resolveTarget(cfg), { id: "cli", cmd: "ping" }, 3000)
   out({ ok: true, ...r })
 }
 
 async function cmdStatus(pos, flags) {
   const cfg = loadConfig(flags.config)
-  const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "status" }, 3000)
+  const r = await callRaw(resolveTarget(cfg), { id: "cli", cmd: "status" }, 3000)
   out({ ok: true, ...r })
 }
 
@@ -236,11 +236,11 @@ async function cmdWatch(pos, flags) {
   const sub = pos.shift()
   if (!sub) throw new Error("用法：foreman watch add|list|rm|poll ...")
   if (sub === "list") {
-    const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "watch list" }, 3000)
+    const r = await callRaw(resolveTarget(cfg), { id: "cli", cmd: "watch list" }, 3000)
     return out({ ok: true, ...r })
   }
   if (sub === "poll") {
-    const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "poll" }, 60000)
+    const r = await callRaw(resolveTarget(cfg), { id: "cli", cmd: "poll" }, 60000)
     return out({ ok: true, ...r })
   }
   if (sub === "add") {
@@ -255,13 +255,13 @@ async function cmdWatch(pos, flags) {
       number: flags.number && flags.number !== true ? Number(flags.number) : null,
       ...callerOrchestratorArg(flags),
     }
-    const r = await callRaw(resolvePort(cfg), req, 3000)
+    const r = await callRaw(resolveTarget(cfg), req, 3000)
     return out({ ok: true, ...r })
   }
   if (sub === "rm" || sub === "remove") {
     const target = pos.shift()
     if (!target) throw new Error("用法：foreman watch rm <会话id|标题>")
-    const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "watch remove", target }, 3000)
+    const r = await callRaw(resolveTarget(cfg), { id: "cli", cmd: "watch remove", target }, 3000)
     return out({ ok: true, ...r })
   }
   throw new Error(`未知 watch 子命令：${sub}（add|list|rm|poll）`)
@@ -272,18 +272,18 @@ async function cmdPr(pos, flags) {
   const sub = pos.shift()
   if (!sub) throw new Error("用法：foreman pr list|poll|ui-assign|assign|open|merge")
   if (sub === "list") {
-    const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "pr list" }, 3000)
+    const r = await callRaw(resolveTarget(cfg), { id: "cli", cmd: "pr list" }, 3000)
     return out({ ok: true, ...r })
   }
   if (sub === "poll") {
-    const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "pr poll" }, 300000)
+    const r = await callRaw(resolveTarget(cfg), { id: "cli", cmd: "pr poll" }, 300000)
     return out({ ok: true, ...r })
   }
   if (sub === "ui-assign") {
     const number = Number(pos.shift())
     const repo = strFlag(flags.repo)
     if (!number || !repo) throw new Error("用法：foreman pr ui-assign <N> --repo R")
-    const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "pr ui-assign", repo, number }, 300000)
+    const r = await callRaw(resolveTarget(cfg), { id: "cli", cmd: "pr ui-assign", repo, number }, 300000)
     if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
     return out({ ok: true, ...r })
   }
@@ -291,7 +291,7 @@ async function cmdPr(pos, flags) {
     const number = Number(pos.shift())
     const repo = strFlag(flags.repo)
     if (!number || !repo) throw new Error("用法：foreman pr assign <N> --repo R")
-    const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "pr assign", repo, number }, 300000)
+    const r = await callRaw(resolveTarget(cfg), { id: "cli", cmd: "pr assign", repo, number }, 300000)
     if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
     return out({ ok: true, ...r })
   }
@@ -302,7 +302,7 @@ async function cmdPr(pos, flags) {
     // 基线不写死在命令里：没给 --base 就用配置里这条仓库的 repos[].base。
     const base = strFlag(flags.base) || (cfg.repos ?? []).find((r) => r.repo === repo)?.base || ""
     if (!repo || !base || !head || !title) throw new Error("用法：foreman pr open --repo R [--base <基线>] --head <分支> --title <标题> [--body <正文>] [--issue <单号>]（--base 不写取配置 repos[].base）")
-    const r = await callRaw(resolvePort(cfg), {
+    const r = await callRaw(resolveTarget(cfg), {
       id: "cli",
       cmd: "pr open",
       repo, base, head, title,
@@ -320,7 +320,7 @@ async function cmdPr(pos, flags) {
     const number = Number(pos.shift())
     const repo = strFlag(flags.repo)
     if (!number || !repo) throw new Error("用法：foreman pr merge <N> --repo R [--issue <单号>] [--style merge|rebase|squash] [--delete-branch]")
-    const r = await callRaw(resolvePort(cfg), {
+    const r = await callRaw(resolveTarget(cfg), {
       id: "cli",
       cmd: "pr merge",
       repo, number,
@@ -346,7 +346,7 @@ async function cmdWs(pos, flags) {
   if (!issue) throw new Error("ws 子命令要 --issue <owner/name>#<工单号>（首句里给的「工单键」）")
   const req = { id: "cli", cmd: `ws ${sub}`, issue, repo: strFlag(flags.repo), base: strFlag(flags.base) }
   if (sub === "add" && !req.repo) throw new Error("ws add 要 --repo <工程名|owner/name>")
-  const r = await callRaw(resolvePort(cfg), req, 300000)
+  const r = await callRaw(resolveTarget(cfg), req, 300000)
   if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
   return out({ ok: true, ...r })
 }
@@ -362,7 +362,7 @@ async function cmdWorkflow(pos, flags) {
     if (!stage) throw new Error(`用法：foreman workflow ${sub} <节点>`)
     req.stage = stage
   }
-  const r = await callRaw(resolvePort(cfg), req, 60000)
+  const r = await callRaw(resolveTarget(cfg), req, 60000)
   if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
   return out({ ok: true, ...r })
 }
@@ -379,19 +379,19 @@ async function cmdIssue(pos, flags) {
   if (sub === "comment") {
     const body = strFlag(flags.body) || pos.slice(1).join(" ")
     if (!body.trim()) throw new Error("issue comment 需要 --body <正文>")
-    const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "issue comment", repo, number, body }, 300000)
+    const r = await callRaw(resolveTarget(cfg), { id: "cli", cmd: "issue comment", repo, number, body }, 300000)
     if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
     return out({ ok: true, ...r })
   }
   if (sub === "settle") {
     const note = strFlag(flags.note).trim()
     if (!note) throw new Error("issue settle 需要 --note <完成依据>；它只改本地账本，不关远端、不清工作区")
-    const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "issue settle", repo, number, note }, 60000)
+    const r = await callRaw(resolveTarget(cfg), { id: "cli", cmd: "issue settle", repo, number, note }, 60000)
     if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
     return out({ ok: true, ...r })
   }
   if (sub === "close") {
-    const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "issue close", repo, number }, 300000)
+    const r = await callRaw(resolveTarget(cfg), { id: "cli", cmd: "issue close", repo, number }, 300000)
     if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
     return out({ ok: true, ...r })
   }
@@ -401,7 +401,7 @@ async function cmdIssue(pos, flags) {
 // 手动催一轮自动巡检：服务侧按 pickup 配置捞一轮（不影响命令行 run 的锁）。
 async function cmdPickup(pos, flags) {
   const cfg = loadConfig(flags.config)
-  const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "pickup" }, 900000)
+  const r = await callRaw(resolveTarget(cfg), { id: "cli", cmd: "pickup" }, 900000)
   if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
   return out({ ok: true, ...r })
 }
@@ -652,7 +652,7 @@ async function cmdSessions(pos, flags) {
   const cfg = loadConfig(flags.config)
   const orchestrator = callerOrchestrator(flags)
   if (!orchestrator) throw new Error("用法：foreman sessions [--orchestrator <会话id>]（豆包会话里会自动识别当前会话）")
-  const r = await callRaw(resolvePort(cfg), { id: "cli", cmd: "sessions", orchestrator }, 60000)
+  const r = await callRaw(resolveTarget(cfg), { id: "cli", cmd: "sessions", orchestrator }, 60000)
   if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
   return out({ ok: true, ...r })
 }

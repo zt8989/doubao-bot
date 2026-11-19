@@ -7,6 +7,7 @@
 //   GET  /api/polls        最近几轮扫描记录
 //   GET  /api/history?days=7&day=YYYY-MM-DD&repo=R&key=<owner>/<repo>#<N>  历史事件（按天分组）
 //   POST /api/sync         立刻扫一轮 PR（Gitea REST）+ 落库，返回最新快照
+import crypto from "node:crypto"
 import fs from "node:fs"
 import http from "node:http"
 import path from "node:path"
@@ -14,6 +15,39 @@ import { Book } from "./book.mjs"
 import { sessionTasks } from "./tasktree.mjs"
 
 const MAX_BODY = 1 << 20
+const LOOPBACK_ADDRESSES = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"])
+const TOKEN_COOKIE = "foreman_token"
+
+export const isLoopbackAddress = (addr) => LOOPBACK_ADDRESSES.has(String(addr ?? "").trim())
+
+function cookieToken(cookieHeader) {
+  const hit = String(cookieHeader ?? "")
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(`${TOKEN_COOKIE}=`))
+  return hit ? hit.slice(TOKEN_COOKIE.length + 1) : ""
+}
+
+function tokenEquals(a, b) {
+  const left = Buffer.from(String(a ?? ""), "utf8")
+  const right = Buffer.from(String(b ?? ""), "utf8")
+  if (!left.length || left.length !== right.length) return false
+  return crypto.timingSafeEqual(left, right)
+}
+
+/**
+ * 绑定到非回环地址时的访问控制：回环请求（本机 CLI / 页面）免验，
+ * 其余来源必须带 cookie、`x-foreman-token` 头或 `?token=` 之一。
+ * 返回 { ok, setCookie }；没配 token 视为不设防（老行为）。
+ */
+export function checkConsoleToken({ token, remoteAddress, cookieHeader = "", headerToken = "", queryToken = "" } = {}) {
+  if (!token) return { ok: true, setCookie: false }
+  if (isLoopbackAddress(remoteAddress)) return { ok: true, setCookie: false }
+  const cookie = cookieToken(cookieHeader)
+  if (tokenEquals(headerToken, token) || tokenEquals(cookie, token)) return { ok: true, setCookie: false }
+  if (tokenEquals(queryToken, token)) return { ok: true, setCookie: true }
+  return { ok: false, setCookie: false }
+}
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -66,7 +100,7 @@ pre{background:#111826;padding:12px 16px;border-radius:8px;color:#7dd3fc}</style
  * port 传 0 由系统分配；被占用时抛 code=EADDRINUSE，交给调用方处理。
  * onRpc：CLI 请求分发（service.mjs 的 handleRequest）。
  */
-export function startConsoleHttp({ store, ctx, dir, host = "127.0.0.1", port = 7317, log = () => {}, onRpc = null }) {
+export function startConsoleHttp({ store, ctx, dir, host, port, token = "", log = () => {}, onRpc = null }) {
   const startedAt = Date.now()
 
   const readBody = (req) =>
@@ -149,6 +183,26 @@ export function startConsoleHttp({ store, ctx, dir, host = "127.0.0.1", port = 7
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || host}`)
     const pathname = decodeURIComponent(url.pathname)
+
+    // 监听 0.0.0.0 时，非本机来源先过 token，避免局域网/Tailnet 里谁都能点合并、派活。
+    if (token) {
+      const verdict = checkConsoleToken({
+        token,
+        remoteAddress: req.socket?.remoteAddress,
+        cookieHeader: req.headers.cookie,
+        headerToken: req.headers["x-foreman-token"],
+        queryToken: url.searchParams.get("token") ?? "",
+      })
+      if (!verdict.ok) {
+        if (pathname.startsWith("/api/")) return sendJson(res, 401, { ok: false, error: "auth_required", message: "访问地址带上 ?token=，或用 x-foreman-token 头" })
+        const text = "<!doctype html><meta charset=\"utf-8\"><title>foreman 控制台需要 token</title><p>这个地址不是本机访问，请用带 token 的链接打开（token 在服务端的 console.token 文件里）。"
+        res.writeHead(401, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" })
+        return res.end(text)
+      }
+      if (verdict.setCookie) {
+        res.setHeader("set-cookie", `${TOKEN_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`)
+      }
+    }
 
     try {
       if (pathname === "/api/ping") {
