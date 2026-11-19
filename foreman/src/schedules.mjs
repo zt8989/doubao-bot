@@ -1,6 +1,5 @@
-// 定时任务开关：pickup.auto / prWatch.enabled / mail.enabled / router.enabled / workHours.offUntil
-// 页面上一键启停，写回 config.json 并立刻重排服务里的定时器（不用重启）。
-import fs from "node:fs"
+// 定时任务只以 SQLite 为准；config.json 仅在首次初始化时提供旧配置迁移值。
+// 页面上一键启停，写入 agent_schedules / agent_schedule_settings 并立刻重排定时器。
 import { inWorkHours } from "./util.mjs"
 import { validateCron } from "./cron.mjs"
 import { normalizeScriptExecutor, scriptExecutor } from "./executors.mjs"
@@ -12,6 +11,100 @@ export const SCHEDULE_IDS = ["pickup", "prWatch", "mail", "router", "dreaming", 
 /** 配置里登记的自定义 Agent 定时任务（每条到点新开一条豆包会话）。 */
 export function customAgentSchedules(cfg) {
   return Array.isArray(cfg?.agentSchedules) ? cfg.agentSchedules : []
+}
+
+const BUILTIN_SCHEDULE_IDS = ["pickup", "prWatch", "mail", "router", "dreaming"]
+
+/**
+ * 启动时把 SQLite 中的任务定义灌回运行时配置。
+ * 首次升级时，缺失的字段仍可取旧 config.json；initialized 写入后，文件里的调度字段不再生效。
+ */
+export function hydrateSchedules(cfg, store) {
+  const rows = store.schedules()
+  const byId = new Map(rows.map((row) => [row.id, row]))
+  const initialized = store.scheduleSetting("initialized")?.value === true
+
+  for (const id of BUILTIN_SCHEDULE_IDS) {
+    const row = byId.get(id)
+    if (!row) continue
+    if (id === "dreaming") {
+      cfg.memory = {
+        ...(cfg.memory ?? {}),
+        dreaming: { ...(cfg.memory?.dreaming ?? {}), enabled: row.enabled, cron: row.cron },
+      }
+      continue
+    }
+    cfg[id] = {
+      ...(cfg[id] ?? {}),
+      [id === "pickup" ? "auto" : "enabled"]: row.enabled,
+      cron: row.cron,
+      ...(row.payload?.script ? { script: row.payload.script } : {}),
+    }
+  }
+
+  const customRows = rows.filter((row) => row.kind === "agent" && !["dreaming", "inspector"].includes(row.id))
+  if (initialized || customRows.length) {
+    const legacy = customAgentSchedules(cfg)
+    cfg.agentSchedules = customRows.map((row) => {
+      const old = legacy.find((item) => item.id === row.id) ?? {}
+      return {
+        id: row.id,
+        label: String(row.payload?.label ?? old.label ?? row.id),
+        cron: row.cron,
+        enabled: row.enabled,
+        prompt: String(row.payload?.prompt ?? old.prompt ?? ""),
+        detail: String(row.payload?.detail ?? old.detail ?? ""),
+      }
+    })
+  }
+
+  const workHours = store.scheduleSetting("workHours")
+  if (workHours && typeof workHours === "object") cfg.workHours = { ...(cfg.workHours ?? {}), ...workHours }
+  if (cfg.inspector && cfg.router) cfg.inspector = cfg.router
+  return cfg
+}
+
+/** 运行时配置序列化成 SQLite 任务定义；脚本与 Agent 提示词也放在同一行 payload。 */
+export function scheduleDefinitions(cfg) {
+  const script = (id, enabled) => ({
+    id,
+    kind: id,
+    executor: "script",
+    cron: cronOf(cfg, id),
+    enabled,
+    payload: { script: scriptExecutor(cfg, id) },
+  })
+  return [
+    script("pickup", cfg.pickup?.auto === true),
+    script("prWatch", cfg.prWatch?.enabled === true),
+    script("mail", cfg.mail?.enabled === true),
+    script("router", (cfg.router ?? cfg.inspector)?.enabled === true),
+    { id: "dreaming", kind: "dreaming", executor: "agent", cron: cronOf(cfg, "dreaming"), enabled: cfg.memory?.dreaming?.enabled !== false },
+    ...customAgentSchedules(cfg).map((item) => ({
+      id: item.id,
+      kind: "agent",
+      executor: "agent",
+      cron: item.cron,
+      enabled: item.enabled !== false,
+      payload: { custom: true, label: item.label || item.id, prompt: String(item.prompt ?? ""), detail: String(item.detail ?? "") },
+    })),
+    // 停用旧持久 Schedule；旧 Inbox 事件仍由 router handler 兼容消费。
+    { id: "inspector", kind: "inspector", executor: "agent", cron: cronOf(cfg, "router"), enabled: false },
+  ]
+}
+
+/** 工作时间与迁移标记也落 SQLite，和任务定义在同一数据库完成初始化。 */
+export function saveScheduleSettings(store, cfg) {
+  store.tx(() => {
+    store.saveScheduleSetting("workHours", {
+      enabled: cfg.workHours?.enabled === true,
+      days: [...(cfg.workHours?.days ?? [1, 2, 3, 4, 5])],
+      start: String(cfg.workHours?.start ?? "08:30"),
+      end: String(cfg.workHours?.end ?? "18:30"),
+      offUntil: String(cfg.workHours?.offUntil ?? ""),
+    })
+    store.saveScheduleSetting("initialized", { value: true })
+  })
 }
 
 function customScheduleRows(cfg, state = {}) {
@@ -278,56 +371,4 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
   }
   if (cfg.inspector && cfg.router) cfg.inspector = cfg.router
   return listSchedules(cfg)
-}
-
-/** 开关对应的配置键名（pickup 沿用历史配置 auto，其余节点是 enabled）。 */
-const FLAG_KEY = { pickup: "auto", prWatch: "enabled", mail: "enabled", router: "enabled", dreaming: "enabled" }
-
-/**
- * 写回配置文件：只改定时任务开关/cron/script，其余字段（含用户手写的格式/注释式排版）原样保留。
- * 文件不存在就跳过——纯 CLI 跑的时候没有配置文件，开关只活在内存里。
- */
-export function persistSchedules(file, patch = {}, cfg = {}) {
-  if (patch.inspector && !patch.router) patch = { ...patch, router: patch.inspector }
-  if (!file || !fs.existsSync(file)) return false
-  const raw = JSON.parse(fs.readFileSync(file, "utf8"))
-  for (const id of SCHEDULE_IDS) {
-    if (!(id in patch)) continue
-    const value = patch[id]
-    const obj = value && typeof value === "object" ? value : { enabled: value === true || value === "true" }
-    if (id === "dreaming") {
-      const section = { ...(raw.memory?.dreaming ?? {}) }
-      if ("enabled" in obj) section.enabled = obj.enabled === true || obj.enabled === "true"
-      if ("cron" in obj) section.cron = String(cfg?.memory?.dreaming?.cron ?? obj.cron)
-      raw.memory = { ...(raw.memory ?? {}), dreaming: section }
-      continue
-    }
-    const section = { ...(raw[id] ?? {}) }
-    if (id === "workHours") {
-      if ("days" in obj || "start" in obj || "end" in obj) Object.assign(section, normalizeWorkHours(obj, cfg))
-      if ("enabled" in obj) section.offUntil = String(cfg?.workHours?.offUntil ?? "")
-    } else {
-      if ("enabled" in obj) section[FLAG_KEY[id]] = obj.enabled === true || obj.enabled === "true"
-      if ("cron" in obj) section.cron = String(cfg?.[id]?.cron ?? obj.cron)
-      if ("script" in obj) section.script = { ...cfg[id].script, args: { ...cfg[id].script.args } }
-    }
-    raw[id] = section
-  }
-  // 自定义 Agent 定时任务按 id 原地改，不动条目里用户自己写的其他字段。
-  const agentList = Array.isArray(raw.agentSchedules) ? raw.agentSchedules : []
-  for (const item of customAgentSchedules(cfg)) {
-    if (!(item.id in patch)) continue
-    const value = patch[item.id]
-    const obj = value && typeof value === "object" ? value : { enabled: value === true || value === "true" }
-    const index = agentList.findIndex((it) => it && typeof it === "object" && String(it.id ?? "").trim() === item.id)
-    if (index < 0) continue
-    const entry = { ...agentList[index] }
-    if ("enabled" in obj) entry.enabled = obj.enabled === true || obj.enabled === "true"
-    if ("cron" in obj) entry.cron = String(item.cron ?? obj.cron)
-    if ("agent" in obj) entry.prompt = String(item.prompt ?? "")
-    agentList[index] = entry
-  }
-  if (agentList.length) raw.agentSchedules = agentList
-  fs.writeFileSync(file, JSON.stringify(raw, null, 2) + "\n")
-  return true
 }

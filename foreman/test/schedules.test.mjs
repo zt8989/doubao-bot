@@ -1,10 +1,12 @@
-// 定时任务开关：状态视图、内存改值、写回配置，以及控制台的两个接口。
+// 定时任务开关：状态视图、内存改值、SQLite 持久化，以及控制台的两个接口。
 import test from "node:test"
 import assert from "node:assert/strict"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { listSchedules, applySchedules, persistSchedules, nextWorkdayStart, cronOf } from "../src/schedules.mjs"
+import { DatabaseSync } from "node:sqlite"
+import { listSchedules, applySchedules, nextWorkdayStart, cronOf, hydrateSchedules, scheduleDefinitions, saveScheduleSettings } from "../src/schedules.mjs"
+import { InboxStore, ScheduleRunner } from "../src/inbox.mjs"
 import { validateCron, nextCronTime } from "../src/cron.mjs"
 import { inWorkHours } from "../src/util.mjs"
 import { startConsoleHttp } from "../src/consolehttp.mjs"
@@ -15,6 +17,17 @@ const baseCfg = () => ({
   router: { enabled: true, intervalSeconds: 60, recreateAfterHours: 24 },
   workHours: { enabled: true, days: [1, 2, 3, 4, 5], start: "08:30", end: "17:30", offUntil: "" },
 })
+
+function sqliteSchedules() {
+  const store = new InboxStore(new DatabaseSync(":memory:"))
+  return {
+    store,
+    save(cfg) {
+      new ScheduleRunner({ store }).sync(scheduleDefinitions(cfg))
+      saveScheduleSettings(store, cfg)
+    },
+  }
+}
 
 test("listSchedules：我的工单扫描与执行会话轮询都是持久脚本任务", () => {
   const cfg = baseCfg()
@@ -88,10 +101,8 @@ test("applySchedules：router 代码轮询可改 cron 与开关，非法 cron �
   assert.throws(() => applySchedules(cfg, { workHours: { cron: "* * * * *" } }), /没有 cron/)
 })
 
-test("applySchedules：PR 与代码轮询的脚本路径、参数可编辑并持久化", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-sched-executors-"))
-  const file = path.join(dir, "config.json")
-  fs.writeFileSync(file, JSON.stringify({ prWatch: { ignoreAuthors: ["233151"] }, router: { recreateAfterHours: 24 } }))
+test("applySchedules：PR 与代码轮询的脚本路径、参数可编辑并持久化到 SQLite", () => {
+  const { store, save } = sqliteSchedules()
   const cfg = baseCfg()
   const rows = applySchedules(cfg, {
     prWatch: {
@@ -112,18 +123,16 @@ test("applySchedules：PR 与代码轮询的脚本路径、参数可编辑并持
     args: { batch: 10 },
   })
 
-  persistSchedules(file, {
-    prWatch: { enabled: true, cron: "*/7 * * * *", script: cfg.prWatch.script },
-    router: { script: cfg.router.script },
-  }, cfg)
-  const raw = JSON.parse(fs.readFileSync(file, "utf8"))
-  assert.equal(raw.prWatch.script.path, "scripts/pr-watch.mjs")
-  assert.equal(raw.prWatch.script.exportName, "scan")
-  assert.deepEqual(raw.prWatch.script.args, { limit: 5, labels: ["ready"] })
-  assert.equal(raw.prWatch.cron, "*/7 * * * *")
-  assert.deepEqual(raw.prWatch.ignoreAuthors, ["233151"])
-  assert.deepEqual(raw.router.script, { path: "scripts/watch.mjs", exportName: "poll", args: { batch: 10 } })
-  assert.equal(raw.router.recreateAfterHours, 24)
+  save(cfg)
+  const persisted = Object.fromEntries(store.schedules().map((row) => [row.id, row]))
+  assert.deepEqual(persisted.prWatch.payload.script, {
+    path: "scripts/pr-watch.mjs",
+    exportName: "scan",
+    args: { limit: 5, labels: ["ready"] },
+  })
+  assert.equal(persisted.prWatch.cron, "*/7 * * * *")
+  assert.deepEqual(persisted.router.payload.script, { path: "scripts/watch.mjs", exportName: "poll", args: { batch: 10 } })
+  assert.equal(cfg.router.recreateAfterHours, 24, "非调度配置仍留在原配置对象")
 
   assert.throws(() => applySchedules(cfg, { prWatch: { script: { args: [] } } }), /JSON 对象/)
   assert.throws(() => applySchedules(cfg, { mail: { script: { path: " " } } }), /脚本路径不能为空/)
@@ -145,20 +154,18 @@ test("applySchedules：pickup 使用 auto 开关，prWatch / router 独立翻转
   assert.equal(rows.find((r) => r.id === "prWatch").enabled, false)
 })
 
-test("applySchedules：dreaming 的开关与 cron 写入 memory.dreaming，保留其他记忆配置", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-sched-dreaming-"))
-  const file = path.join(dir, "config.json")
-  fs.writeFileSync(file, JSON.stringify({ memory: { dir: "custom-memory", maxEntryChars: 200 } }))
-  const cfg = baseCfg()
+test("applySchedules：dreaming 的开关与 cron 写入 SQLite，保留其他记忆配置", () => {
+  const { store, save } = sqliteSchedules()
+  const cfg = { ...baseCfg(), memory: { dir: "custom-memory", maxEntryChars: 200, dreaming: { enabled: true, cron: "0 3 * * *" } } }
   const rows = applySchedules(cfg, { dreaming: { enabled: false, cron: "0 4 * * *" } })
   assert.equal(rows.find((row) => row.id === "dreaming").enabled, false)
   assert.equal(rows.find((row) => row.id === "dreaming").cron, "0 4 * * *")
-  persistSchedules(file, { dreaming: { enabled: false, cron: "0 4 * * *" } }, cfg)
-  const raw = JSON.parse(fs.readFileSync(file, "utf8"))
-  assert.deepEqual(raw.memory.dreaming, { enabled: false, cron: "0 4 * * *" })
-  assert.equal(raw.memory.dir, "custom-memory")
-  assert.equal(raw.memory.maxEntryChars, 200)
-  assert.equal(raw.dreaming, undefined)
+  save(cfg)
+  const persisted = store.schedules().find((row) => row.id === "dreaming")
+  assert.equal(persisted.enabled, false)
+  assert.equal(persisted.cron, "0 4 * * *")
+  assert.equal(cfg.memory.dir, "custom-memory")
+  assert.equal(cfg.memory.maxEntryChars, 200)
   assert.throws(() => applySchedules(cfg, { dreaming: { agent: { prompt: "绕过门禁" } } }), /不是 Agent 执行器/)
 })
 
@@ -177,21 +184,22 @@ test("applySchedules：workHours 的开关是临时闭嘴，恢复后清空 offU
   assert.equal(listSchedules(cfg).find((r) => r.id === "workHours").enabled, true)
 })
 
-test("工作时间：工作日与开始结束时间可编辑、校验并持久化，其他配置保持不变", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-work-hours-"))
-  const file = path.join(dir, "config.json")
-  fs.writeFileSync(file, JSON.stringify({ pickup: { auto: true, me: "233151" }, workHours: { start: "08:30", end: "17:30", days: [1, 2, 3, 4, 5] } }))
+test("工作时间：工作日与开始结束时间可编辑、校验并持久化到 SQLite", () => {
+  const { store, save } = sqliteSchedules()
   const cfg = baseCfg()
   applySchedules(cfg, { workHours: { days: [1, 2, 3, 4, 5, 6], start: "07:45", end: "20:30" } })
   assert.equal(cfg.workHours.start, "07:45")
   assert.equal(cfg.workHours.end, "20:30")
   assert.deepEqual(cfg.workHours.days, [1, 2, 3, 4, 5, 6])
-  persistSchedules(file, { workHours: { days: [1, 2, 3, 4, 5, 6], start: "07:45", end: "20:30" } }, cfg)
-  const raw = JSON.parse(fs.readFileSync(file, "utf8"))
-  assert.equal(raw.workHours.start, "07:45")
-  assert.equal(raw.workHours.end, "20:30")
-  assert.deepEqual(raw.workHours.days, [1, 2, 3, 4, 5, 6])
-  assert.equal(raw.pickup.me, "233151")
+  save(cfg)
+  assert.deepEqual(store.scheduleSetting("workHours"), {
+    enabled: true,
+    days: [1, 2, 3, 4, 5, 6],
+    start: "07:45",
+    end: "20:30",
+    offUntil: "",
+  })
+  assert.equal(cfg.pickup.me, "233151")
   assert.throws(() => applySchedules(cfg, { workHours: { start: "25:00", end: "20:30" } }), /有效的 HH:mm/)
   assert.throws(() => applySchedules(cfg, { workHours: { start: "20:30", end: "08:30" } }), /早于结束时间/)
   assert.throws(() => applySchedules(cfg, { workHours: { days: [] } }), /至少选择一天/)
@@ -210,51 +218,58 @@ test("nextWorkdayStart：跳过周末，落在工作时段起点", () => {
   assert.equal(next.getMinutes(), 30)
 })
 
-test("persistSchedules：只改开关字段，其余配置原样保留", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-sched-"))
-  const file = path.join(dir, "config.json")
-  fs.writeFileSync(
-    file,
-    JSON.stringify(
-      {
-        repos: [{ repo: "yyzl/win-ai-harness", dir: "~/x", base: "sit-20261126" }],
-        pickup: { auto: false, me: "233151", intervalSeconds: 1800 },
-        prWatch: { enabled: true, ignoreAuthors: ["233151"] },
-        router: { enabled: true, intervalSeconds: 600 },
-        workHours: { start: "08:30", end: "17:30", days: [1, 2, 3, 4, 5] },
-      },
-      null,
-      2
-    )
-  )
+test("SQLite：重启后开关、cron、脚本与工作时间都以数据库为准", () => {
+  const { store, save } = sqliteSchedules()
   const cfg = baseCfg()
-  applySchedules(cfg, { pickup: true, router: false, workHours: false })
-  assert.equal(persistSchedules(file, { pickup: true, router: false, workHours: false }, cfg), true)
+  applySchedules(cfg, {
+    pickup: false,
+    router: {
+      enabled: false,
+      cron: "*/15 8-17 * * 1-5",
+      script: { path: "scripts/poll.mjs", exportName: "run", args: { limit: 6 } },
+    },
+    workHours: { days: [1, 2, 3, 4, 5, 6], start: "08:00", end: "20:30" },
+  })
+  save(cfg)
 
-  const raw = JSON.parse(fs.readFileSync(file, "utf8"))
-  assert.equal(raw.router.enabled, false)
-  assert.equal(raw.router.intervalSeconds, 600)
-  assert.equal(raw.pickup.auto, true, "自动接单开关写回 pickup.auto")
-  assert.equal(raw.pickup.me, "233151", "同段别的字段要留着")
-  assert.equal(raw.prWatch.ignoreAuthors[0], "233151")
-  assert.equal(raw.workHours.offUntil, cfg.workHours.offUntil)
-  assert.equal(raw.repos[0].base, "sit-20261126")
+  // 模拟重启时旧 config.json 仍留着一组完全不同的值。
+  const restarted = {
+    ...baseCfg(),
+    mail: { enabled: true, pollSeconds: 300 },
+    memory: { dreaming: { enabled: false, cron: "0 5 * * *" } },
+  }
+  restarted.router.cron = "* * * * *"
+  restarted.workHours.start = "09:00"
+  restarted.workHours.end = "18:00"
+  hydrateSchedules(restarted, store)
 
-  // 没配置文件时不做任何事（CLI 单独跑的场景）
-  assert.equal(persistSchedules("", { pickup: true }, cfg), false)
+  assert.equal(restarted.pickup.auto, false)
+  assert.equal(restarted.router.enabled, false)
+  assert.equal(restarted.router.cron, "*/15 8-17 * * 1-5")
+  assert.deepEqual(restarted.router.script, { path: "scripts/poll.mjs", exportName: "run", args: { limit: 6 } })
+  assert.equal(restarted.mail.enabled, false)
+  assert.equal(restarted.memory.dreaming.enabled, true)
+  assert.equal(restarted.memory.dreaming.cron, "0 3 * * *")
+  assert.deepEqual(restarted.workHours.days, [1, 2, 3, 4, 5, 6])
+  assert.equal(restarted.workHours.start, "08:00")
+  assert.equal(restarted.workHours.end, "20:30")
 })
 
-test("persistSchedules：对象 patch 同时写 enabled 与 cron", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-sched-cron-"))
-  const file = path.join(dir, "config.json")
-  fs.writeFileSync(file, JSON.stringify({ router: { enabled: false, intervalSeconds: 600 }, prWatch: { enabled: true } }))
+test("SQLite：首次升级时已有任务行优先，旧配置只补缺失的脚本定义", () => {
+  const { store, save } = sqliteSchedules()
+  new ScheduleRunner({ store }).sync([{ id: "router", kind: "router", cron: "*/9 * * * *", enabled: false }])
   const cfg = baseCfg()
-  applySchedules(cfg, { router: { enabled: true, cron: "*/15 8-17 * * 1-5" } })
-  persistSchedules(file, { router: { enabled: true, cron: "*/15 8-17 * * 1-5" } }, cfg)
-  const raw = JSON.parse(fs.readFileSync(file, "utf8"))
-  assert.equal(raw.router.enabled, true)
-  assert.equal(raw.router.cron, "*/15 8-17 * * 1-5")
-  assert.equal(raw.router.intervalSeconds, 600)
+  cfg.router.script = { path: "scripts/legacy.mjs", exportName: "poll", args: { from: "config" } }
+  hydrateSchedules(cfg, store)
+  assert.equal(cfg.router.enabled, false)
+  assert.equal(cfg.router.cron, "*/9 * * * *")
+  assert.deepEqual(cfg.router.script, { path: "scripts/legacy.mjs", exportName: "poll", args: { from: "config" } })
+  save(cfg)
+
+  const restarted = baseCfg()
+  restarted.router.script = { path: "scripts/changed.mjs", exportName: "other", args: {} }
+  hydrateSchedules(restarted, store)
+  assert.deepEqual(restarted.router.script, { path: "scripts/legacy.mjs", exportName: "poll", args: { from: "config" } })
 })
 
 test("HTTP：/api/schedules 读写开关，/api/pickup 立刻跑一轮", async () => {

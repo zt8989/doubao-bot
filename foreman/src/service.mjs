@@ -41,7 +41,7 @@ import { InboxStore, AgentWorker, ScheduleRunner } from "./inbox.mjs"
 import { OutboxStore, OutboxDispatcher } from "./outbox.mjs"
 import { enqueueOutbound } from "./outbound.mjs"
 import { LarkDriver } from "./lark.mjs"
-import { listSchedules, applySchedules, persistSchedules, cronOf, customAgentSchedules } from "./schedules.mjs"
+import { listSchedules, applySchedules, customAgentSchedules, hydrateSchedules, scheduleDefinitions, saveScheduleSettings } from "./schedules.mjs"
 import { normalizeEventEnvelope } from "./schedule-events.mjs"
 import { runConfiguredScript } from "./executors.mjs"
 import { startOperation, finishOperation } from "./operations.mjs"
@@ -767,6 +767,8 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   consoleStore.recoverOperations()
   const inbox = new InboxStore(consoleStore.db)
   ctx.inbox = inbox
+  // SQLite 是定时任务唯一事实源；旧 config.json 只在首次初始化时补迁移默认值。
+  hydrateSchedules(cfg, inbox)
   // workflow 里的清理、归档也走同一本操作日志。
   engine.consoleStore = consoleStore
   engine.session.consoleStore = consoleStore
@@ -1004,31 +1006,15 @@ ${String(item.prompt ?? "").trim()}
   ctx.inboxSchedules = scheduler
   const armSchedules = () => {
     scheduler.executors = buildScheduleExecutors()
-    scheduler.sync([
-      { id: "pickup", kind: "pickup", executor: "script", cron: cronOf(cfg, "pickup"), enabled: cfg.pickup?.auto === true },
-      { id: "prWatch", kind: "prWatch", executor: "script", cron: cronOf(cfg, "prWatch"), enabled: cfg.prWatch?.enabled === true },
-      { id: "mail", kind: "mail", executor: "script", cron: cronOf(cfg, "mail"), enabled: cfg.mail?.enabled === true },
-      { id: "router", kind: "router", executor: "script", cron: cronOf(cfg, "router"), enabled: (cfg.router ?? cfg.inspector)?.enabled === true },
-      { id: "dreaming", kind: "dreaming", executor: "agent", cron: cronOf(cfg, "dreaming"), enabled: cfg.memory?.dreaming?.enabled !== false },
-      // 配置里登记的 Agent 型定时任务：每条一个独立豆包会话。
-      ...customAgentSchedules(cfg).map((item) => ({
-        id: item.id,
-        kind: "agent",
-        executor: "agent",
-        cron: item.cron,
-        enabled: item.enabled !== false,
-        payload: { label: item.label || item.id },
-      })),
-      // 停用旧持久 Schedule；旧 Inbox 事件仍由 router handler 兼容消费。
-      { id: "inspector", kind: "inspector", executor: "agent", cron: cronOf(cfg, "router"), enabled: false },
-    ])
+    scheduler.sync(scheduleDefinitions(cfg))
+    saveScheduleSettings(inbox, cfg)
   }
   worker.start()
   dispatcher.start()
   armSchedules()
   scheduler.start(Number(cfg.inbox?.schedulePollMs ?? 1000))
 
-  // 页面上启停定时任务：改内存 cfg → 落盘 config.json → 立刻重排定时器。
+  // 页面上启停定时任务：改内存 cfg → 写 SQLite → 立刻重排定时器，不再写 config.json。
   const schedulesView = () => listSchedules(cfg, state)
   const workHoursView = () => ({
     days: [...(cfg.workHours?.days ?? [1, 2, 3, 4, 5])],
@@ -1039,13 +1025,9 @@ ${String(item.prompt ?? "").trim()}
   ctx.workHours = workHoursView
   ctx.applySchedules = (patch = {}) => {
     applySchedules(cfg, patch)
-    try {
-      if (persistSchedules(cfg.configPath, patch, cfg)) log(`定时任务已写回配置：${Object.keys(patch).join(",")}`)
-    } catch (e) {
-      log(`定时任务写回配置失败：${e.message}`)
-    }
     armSchedules()
     const view = schedulesView()
+    log(`定时任务已写入 SQLite：${Object.keys(patch).join(",")}`)
     log(`定时任务开关：${view.map((s) => `${s.id}=${s.enabled ? "on" : "off"}`).join(" ")}`)
     return view
   }

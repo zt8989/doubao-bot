@@ -228,7 +228,7 @@ foreman worker run             # 手动消费一轮（排障；正常由 wake/�
 }
 ```
 
-Inbox、Outbox 与 ConsoleStore 共用 `~/.foreman/console.db` 的同一连接，使用 `agent_inbox` / `agent_schedules` / `agent_outbox` 独立表；不使用 SQLite Trigger 唤醒 Node，也不另起 Worker 或 Dispatcher 进程。
+Inbox、Outbox 与 ConsoleStore 共用 `~/.foreman/console.db` 的同一连接，使用 `agent_inbox` / `agent_schedules` / `agent_schedule_settings` / `agent_outbox` 独立表；定时任务的开关、cron、脚本/Agent 定义与工作时间窗只以 SQLite 为准，旧 `config.json` 仅在首次初始化时提供迁移值。不使用 SQLite Trigger 唤醒 Node，也不另起 Worker 或 Dispatcher 进程。
 
 - 服务启动时把实际端口写成 `~/.foreman/service.port`（纯数字一行），CLI 就读这个文件。
 - CLI 走 `POST /api/rpc`（body 就是原来那一帧 `{id, cmd, ...}`），探活走 `GET /api/ping`。
@@ -265,11 +265,11 @@ Inbox、Outbox 与 ConsoleStore 共用 `~/.foreman/console.db` 的同一连接�
 - 左侧导航栏提供 **「工单」（可切日期回看某天）**、**「定时任务」** 和 **「操作日志」** 三个入口，图标加文字，可折叠成纯图标并记住折叠状态；窄屏自动只显示图标。
   - 「定时任务」列出我的工单扫描（`pickup.auto`）、执行会话代码轮询（`router.enabled`）、他人 PR 扫描（`prWatch.enabled`）、验收邮件（`mail.enabled`）、工作时间窗（`workHours.offUntil` 临时闭嘴）等持久任务，带运行状态、上次时间、下次触发与已跑轮数；
   - 三项任务的时间都可编辑 **cron 表达式**，脚本路径、导出函数和参数可在编辑区修改；对应配置 `router.cron` / `prWatch.cron` / `mail.cron`。没配 cron 时兼容 `intervalSeconds`，折成分钟级表达式；
-  - 点「开启/停止」或「保存时间」会 `POST /api/schedules`（如 `{"patch":{"router":{"enabled":true,"cron":"*/10 * * * *"}}}`）：先校验并改内存 cfg、再写回 `config.json`、然后立刻重排定时器，**不用重启服务**；非法 cron 返回 400，不会落盘；
+  - 点「开启/停止」或「保存时间」会 `POST /api/schedules`（如 `{"patch":{"router":{"enabled":true,"cron":"*/10 * * * *"}}}`）：先校验并改内存 cfg、再写入 SQLite、然后立刻重排定时器，**不用重启服务，也不再写回 `config.json`**；非法 cron 返回 400，不会落盘；
   - router agent的「立即巡检」走 `POST /api/schedules/run`，等价于手动 `foreman route`；它只是提前写入 Inbox，由 Worker 投递，不代替智能体决策。
   - `GET /api/schedules` 返回同一份状态，脚本/CLI 也可用。
-  - **自定义 Agent 型定时任务**：在 `config.json` 的 `agentSchedules` 里登记
-    `{ "id", "label", "cron", "enabled": true, "prompt", "detail" }`，发布后列表会多出一行，徽标是 **Agent**。
+  - **自定义 Agent 型定时任务**：旧 `config.json` 的 `agentSchedules` 会在首次初始化时迁入 SQLite，之后以 `agent_schedules` 中的定义为准；每条包含
+    `{ "id", "label", "cron", "enabled": true, "prompt", "detail" }`，列表独立成行，徽标是 **Agent**。
     到点由服务用 `dws open --no-wait` 新开一条 `foreman-<id>-<时间戳>` 会话，把提示词作为首句投递；
     不投给 router agent、不写 Inbox，跑完在会话里直接给最终回复。id 不能与内置任务重名。
     页面编辑区可改开关、cron 与提示词，保存同样走 `POST /api/schedules`；「立即执行」走 `POST /api/schedules/run`。

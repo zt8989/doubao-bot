@@ -32,6 +32,17 @@ organization 的读写；明文只显示一次，写入 `~/.foreman/gitea-token`
 - PR `mergeNote` 由 REST 字段合成（已合并 / 已关闭 / 分支已包含 / 不可自动合并），
   供 `prwatch` 判冲突。
 
+## OpenCLI gitea 补充（只列 REST 做不到的）
+
+`opencli gitea` 适配器已从 git 恢复，与上面的 CLI 命令名、参数、实现完全一致（同一份
+`src/api.mjs`），所以只有下面两类情况才值得走它，其余命令不要两边重复执行：
+
+1. **令牌不可用 / 失效**：`opencli gitea <同名命令>` 复用 Chrome 登录态，当备用通道；
+   发布入口是 `scripts/publish.sh adapters`，装到 `~/.opencli/clis/gitea`（文件级软链）。
+2. **关闭操作人 / 合并操作人 / 仓库 activity 动态**：REST 实体里没有 `closer`、`merged_by`、
+   `activity` 字段，`issue-view` / `pr-view` 也取不到；只能页面取证：
+   `opencli browser open <页面>` 后 `opencli browser eval` 取数。
+
 ## 测试
 
 ```bash

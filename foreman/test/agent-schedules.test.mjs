@@ -1,10 +1,12 @@
-// 自定义 Agent 型定时任务：配置登记 → 列表多一行 → 页面改开关/cron/提示词 → 写回配置。
+// 自定义 Agent 型定时任务：首次从配置迁移 → 列表多一行 → 页面改开关/cron/提示词 → 写入 SQLite。
 import test from "node:test"
 import assert from "node:assert/strict"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { listSchedules, applySchedules, persistSchedules } from "../src/schedules.mjs"
+import { DatabaseSync } from "node:sqlite"
+import { listSchedules, applySchedules, hydrateSchedules, scheduleDefinitions, saveScheduleSettings } from "../src/schedules.mjs"
+import { InboxStore, ScheduleRunner } from "../src/inbox.mjs"
 import { loadConfig } from "../src/config.mjs"
 
 const entry = () => ({
@@ -70,17 +72,27 @@ test("applySchedules：自定义任务拒绝脚本、空提示词与非法 cron"
   assert.equal(cfg.agentSchedules[0].cron, "25 17 * * 1-5")
 })
 
-test("persistSchedules：按 id 原地写回，不动条目里的其他字段", () => {
-  const file = tmpConfig({ agentSchedules: [{ ...entry(), note: "用户自己写的备注" }] })
-  const cfg = { agentSchedules: [entry()] }
-  const patch = { "daily-stats": { enabled: false, cron: "30 17 * * 1-5", agent: { prompt: "新的说明" } } }
-  applySchedules(cfg, patch)
-  assert.equal(persistSchedules(file, patch, cfg), true)
-  const raw = JSON.parse(fs.readFileSync(file, "utf8"))
-  assert.equal(raw.agentSchedules[0].enabled, false)
-  assert.equal(raw.agentSchedules[0].cron, "30 17 * * 1-5")
-  assert.equal(raw.agentSchedules[0].prompt, "新的说明")
-  assert.equal(raw.agentSchedules[0].note, "用户自己写的备注")
+test("SQLite：自定义 Agent 任务按 id 持久化，重启后不被旧配置覆盖", () => {
+  const store = new InboxStore(new DatabaseSync(":memory:"))
+  const cfg = baseCfg()
+  applySchedules(cfg, { "daily-stats": { enabled: false, cron: "30 17 * * 1-5", agent: { prompt: "新的说明" } } })
+  new ScheduleRunner({ store }).sync(scheduleDefinitions(cfg))
+  saveScheduleSettings(store, cfg)
+
+  const persisted = store.schedules().find((row) => row.id === "daily-stats")
+  assert.equal(persisted.enabled, false)
+  assert.equal(persisted.cron, "30 17 * * 1-5")
+  assert.equal(persisted.payload.prompt, "新的说明")
+  assert.equal(persisted.payload.label, "下班前统计")
+
+  const restarted = baseCfg()
+  restarted.agentSchedules[0].prompt = "旧配置里的说明"
+  restarted.agentSchedules[0].enabled = true
+  hydrateSchedules(restarted, store)
+  assert.equal(restarted.agentSchedules.length, 1)
+  assert.equal(restarted.agentSchedules[0].enabled, false)
+  assert.equal(restarted.agentSchedules[0].cron, "30 17 * * 1-5")
+  assert.equal(restarted.agentSchedules[0].prompt, "新的说明")
 })
 
 test("loadConfig：自定义 Agent 任务做 id/cron/提示词校验", () => {

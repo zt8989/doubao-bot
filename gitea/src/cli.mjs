@@ -407,6 +407,12 @@ const USAGE = `gitea — 内网 Gitea REST API 客户端（替代 opencli 浏览
   gitea milestone-close <id|name> --repo R [--reopen]
   gitea milestone-delete <id|name> --repo R
 
+OpenCLI gitea 补充（已从 git 恢复，只列 REST 做不到的；其余命令两边等价，不要重复跑）：
+  1. 令牌不可用/失效：opencli gitea <同名命令> 走 Chrome 登录态（与上面同一份 REST 实现），当备用通道。
+  2. 关闭操作人 / 合并操作人 / 仓库 activity 动态：REST 实体没有 closer、merged_by、activity 字段，
+     只能页面取证：opencli browser open <页面>，再 opencli browser eval 取数。
+  命令装在哪：~/.opencli/clis/gitea（scripts/publish.sh adapters 发布，文件级软链到 dist/adapters/gitea）。
+
 鉴权：GITEA_TOKEN / ~/.foreman/gitea-token / config gitea.token；站点 GITEA_BASE_URL。
 术语：仓库/工程=repo（--repo 必填）；「项目」=Gitea Projects 看板（--project），与仓库不是一回事。`
 

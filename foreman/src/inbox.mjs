@@ -40,6 +40,11 @@ const SCHEMA = `
     payload     TEXT NOT NULL DEFAULT '{}',
     updated_at  TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS agent_schedule_settings (
+    id          TEXT PRIMARY KEY,
+    payload     TEXT NOT NULL DEFAULT '{}',
+    updated_at  TEXT NOT NULL
+  );
 `
 
 function parseJson(text) {
@@ -217,6 +222,18 @@ export class InboxStore {
 
   schedules() {
     return this.db.prepare("SELECT * FROM agent_schedules ORDER BY id").all().map(scheduleOf)
+  }
+
+  scheduleSetting(id) {
+    const row = this.db.prepare("SELECT payload FROM agent_schedule_settings WHERE id = ?").get(id)
+    return row ? parseJson(row.payload) : null
+  }
+
+  saveScheduleSetting(id, payload, now = new Date()) {
+    this.db.prepare(`
+      INSERT INTO agent_schedule_settings (id, payload, updated_at) VALUES (?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at
+    `).run(id, JSON.stringify(payload ?? {}), iso(now))
   }
 }
 

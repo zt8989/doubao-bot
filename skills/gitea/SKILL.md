@@ -15,6 +15,16 @@ bash "$SKILL_DIR/scripts/gitea.sh" pr-view 217 --repo yyzl/win-ai-harness
 命令实现在仓库 `gitea/` 包（CLI 入口 `gitea/bin/gitea.mjs`），foreman 直接复用同一份
 `gitea/src/api.mjs`。单次调用是秒级，不用后台跑、不用等 20–40s。
 
+## OpenCLI gitea 补充（只列 REST 做不到的）
+
+`opencli gitea` 适配器已从 git 恢复，与上面的 CLI 同名同参、同一份实现。只在两种情况走它：
+
+- **令牌不可用/失效**：`opencli gitea <同名命令>` 复用 Chrome 登录态，当备用通道。
+- **要取 REST 没有的字段**：关闭操作人、合并操作人、仓库 activity 动态（REST 实体没有
+  `closer`、`merged_by`、`activity`），只能 `opencli browser open <页面>` 后 `opencli browser eval` 取数。
+
+其余读写在 `gitea` CLI 跑就行，不要两边重复执行。
+
 ## 令牌
 
 优先级：`GITEA_TOKEN` → `GITEA_TOKEN_FILE` → `~/.foreman/gitea-token` → `~/.config/gitea/token`。
