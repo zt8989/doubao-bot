@@ -94,26 +94,79 @@ test("Worker 投递失败把整组事件放回 Inbox，下一轮可重试", asyn
   assert.equal(store.counts().done, 1)
 })
 
-test("Schedule 到期只写 Inbox 并推进下次时间，不直接调用 Agent", () => {
+test("Schedule script 到期直接执行，结果写 Inbox 后由 Worker 简单确认", async () => {
   const { store } = fixture()
-  const scheduler = new ScheduleRunner({ store })
-  scheduler.sync([{ id: "inspector", kind: "inspector", cron: "*/10 * * * *", enabled: true }], new Date("2026-11-19T00:00:00Z"))
-  const fired = scheduler.tick(new Date("2026-11-19T00:00:00Z"))
+  const calls = []
+  const scheduler = new ScheduleRunner({
+    store,
+    executors: {
+      demo: { type: "script", run: async (_, options) => { calls.push(options); return { ok: true, checked: 3 } } },
+    },
+  })
+  scheduler.sync([{ id: "demo", kind: "demo", cron: "*/10 * * * *", enabled: true }], new Date("2026-11-19T00:00:00Z"))
+  const fired = await scheduler.tick(new Date("2026-11-19T00:00:00Z"))
   assert.equal(fired.length, 1)
-  assert.equal(fired[0].kind, "inspector")
+  assert.equal(fired[0].kind, "schedule.result")
+  assert.equal(fired[0].executor, "script")
+  assert.deepEqual(calls, [{ manual: false }])
   assert.equal(store.counts().pending, 1)
+  const event = store.list()[0]
+  assert.equal(event.kind, "schedule.result")
+  assert.equal(event.payload.scheduleId, "demo")
+  assert.equal(event.payload.executor, "script")
+  assert.equal(event.payload.result.checked, 3)
   const schedule = store.schedules()[0]
+  assert.equal(schedule.payload.executor, "script")
   assert.ok(Date.parse(schedule.nextAt) > Date.parse("2026-11-19T00:00:00Z"))
-  assert.deepEqual(scheduler.tick(new Date("2026-11-19T00:00:01Z")), [])
+  assert.deepEqual(await scheduler.tick(new Date("2026-11-19T00:00:01Z")), [])
+
+  const worker = new AgentWorker({ store, handlers: {} })
+  const out = await worker.runOnce(new Date("2026-11-19T00:00:02Z"))
+  assert.equal(out.ok, true)
+  assert.equal(out.completed, 1)
+  assert.equal(store.counts().done, 1)
 })
 
-test("Schedule 写事件失败时回滚 next_at，重启后不会静默丢这一轮", () => {
+test("Schedule agent 支持手动直接执行并写入执行结果", async () => {
   const { store } = fixture()
-  const scheduler = new ScheduleRunner({ store })
-  scheduler.sync([{ id: "broken", kind: "", cron: "* * * * *", enabled: true }], new Date("2026-11-19T00:00:00Z"))
+  const calls = []
+  const scheduler = new ScheduleRunner({
+    store,
+    executors: {
+      router: { type: "agent", run: async (_, options) => { calls.push(options); return { ok: true, action: "queued", convId: "router-1" } } },
+    },
+  })
+  scheduler.sync([{ id: "router", kind: "router", cron: "*/10 * * * *", enabled: false }])
+  const fired = await scheduler.runNow("router")
+  assert.equal(fired.executor, "agent")
+  assert.deepEqual(calls, [{ manual: true }])
+  assert.equal(fired.result.convId, "router-1")
+  const event = store.get(fired.id)
+  assert.equal(event.kind, "schedule.result")
+  assert.equal(event.payload.executor, "agent")
+  assert.equal(event.payload.result.action, "queued")
+  assert.equal(store.schedules()[0].payload.executor, "agent")
+})
+
+test("Schedule 执行失败也写结果并推进 next_at，不重复运行同一轮业务", async () => {
+  const { store } = fixture()
+  let calls = 0
+  const scheduler = new ScheduleRunner({
+    store,
+    executors: {
+      broken: { type: "script", run: async () => { calls++; throw new Error("script failed") } },
+    },
+  })
+  scheduler.sync([{ id: "broken", kind: "broken", cron: "* * * * *", enabled: true }], new Date("2026-11-19T00:00:00Z"))
   const dueAt = store.schedules()[0].nextAt
-  assert.throws(() => scheduler.tick(new Date("2026-11-19T00:01:01Z")), /缺少 kind/)
-  assert.equal(store.schedules()[0].nextAt, dueAt)
+  const fired = await scheduler.tick(new Date("2026-11-19T00:01:01Z"))
+  assert.equal(calls, 1)
+  assert.equal(fired[0].result.ok, false)
+  assert.match(fired[0].result.error, /script failed/)
+  assert.match(store.get(fired[0].id).text, /执行失败/)
+  assert.ok(Date.parse(store.schedules()[0].nextAt) > Date.parse(dueAt))
+  assert.deepEqual(await scheduler.tick(new Date("2026-11-19T00:01:02Z")), [])
+  assert.equal(calls, 1)
 })
 
 test("同进程写入后直接 wake Worker，无需等待轮询", async () => {

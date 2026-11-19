@@ -819,28 +819,22 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   ctx.pickup = doPickup
   let worker
   let scheduler
-  const enqueueRouter = ({ notice = "", scheduled = false } = {}) => {
+  const enqueueRouter = (notice = "") => {
     const text = String(notice ?? "").trim()
-    const kind = scheduled ? "router" : "router.notice"
-    const dedupeKey = scheduled
-      ? `router:manual:${Date.now()}`
-      : `router:notice:${crypto.createHash("sha256").update(text).digest("hex")}`
-    const event = inbox.enqueue({
-      kind, text, dedupeKey,
-      coalesceKey: scheduled ? "schedule:router" : "",
-      expiresAt: scheduled ? new Date(Date.now() + Number((cfg.router ?? cfg.inspector)?.intervalSeconds ?? 600) * 1000).toISOString() : "",
-    })
+    const dedupeKey = `router:notice:${crypto.createHash("sha256").update(text).digest("hex")}`
+    const event = inbox.enqueue({ kind: "router.notice", text, dedupeKey })
     const book = new Book(cfg.stateFile)
     return {
       ok: true, action: "inbox", eventId: event.id, status: event.status,
       convId: String(book.data.router?.convId ?? book.data.inspector?.convId ?? ""),
     }
   }
-  const doRouter = async () => enqueueRouter({ scheduled: true })
-  ctx.router = async () => enqueueRouter({ scheduled: true })
+  // 定时与手动巡检都直接调用 Agent；Inbox 只接收执行结果和非定时通知。
+  const doRouter = async () => scheduler.runNow("router")
+  ctx.router = doRouter
   ctx.inspector = ctx.router // 旧 RPC 兼容；公开名称统一为 router agent。
   // PR 候选只持久化到 Inbox；Worker 负责合并、投递、失败重试，扫描器不直接调用 Agent。
-  ctx.notifyRouter = async (text) => enqueueRouter({ notice: text })
+  ctx.notifyRouter = async (text) => enqueueRouter(text)
   ctx.notifyInspector = ctx.notifyRouter
   // 验收邮件轮询：读收件箱，按主题里的 [FM-…] 把回复认回 PR 并注回会话。
   // 回复可能在半夜到，所以这条定时器**不受工作时间窗限制**（只读收件箱，不打扰谁）。
@@ -868,11 +862,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   // 只 bypass「没开 / 不在工作时间」；容量、busy、锁、节点暂停这些保护仍然生效。
   ctx.runSchedule = async (id) => {
     if (id === "pickup") return pickupOnce(ctx, { force: true })
-    if (id === "prWatch") return prPollOnce(ctx, { force: true })
-    // 验收邮件：立即轮询一次收件箱（不受工作时间窗限制）。
-    if (id === "mail") return doMailPoll()
-    // 立即执行 router agent 巡检：仍然由它决定接单与异常处理。
-    if (id === "router" || id === "inspector") return doRouter()
+    if (["prWatch", "mail", "router", "inspector"].includes(id)) return scheduler.runNow(id === "inspector" ? "router" : id)
     throw Object.assign(new Error(`${id} 没有可以立即执行的动作`), { code: "schedule_not_runnable" })
   }
   // 合并不再有定时任务（合并通道已取消）：`foreman pr merge` 当场执行，合完直接返回。
@@ -897,7 +887,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   ctx.outboxDispatcher = dispatcher
   outbox.onChange = () => dispatcher.wake()
 
-  // 三条 Schedule 都只写 SQLite Inbox；Worker 在同进程消费，不依赖 SQL Trigger 唤醒。
+  // Worker 只投递普通消息；Schedule 到期直接执行下面的 script/agent，再把结果写回 Inbox。
   worker = new AgentWorker({
     store: inbox,
     log,
@@ -905,6 +895,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     retryMs: Number(cfg.inbox?.retrySeconds ?? 30) * 1000,
     leaseMs: Number(cfg.inbox?.leaseSeconds ?? 900) * 1000,
     handlers: {
+      // 兼容旧的定时 router 事件；新巡检由 Schedule 的 agent 执行器直接调用。
       router: ({ scheduled, notices }) => routerOnce(ctx, { force: true, scheduled, notices }),
       "mail.reply": (event) => deliverMailReply(ctx, event),
       "task.update": async (batch) => {
@@ -912,8 +903,6 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
         for (const event of batch) delivered.push(await deliverTaskUpdate(ctx, event))
         return delivered
       },
-      prWatch: () => doPrPoll(),
-      mail: () => doMailPoll(),
     },
   })
   ctx.inboxWorker = worker
@@ -926,6 +915,11 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   }
   scheduler = new ScheduleRunner({
     store: inbox,
+    executors: {
+      prWatch: { type: "script", run: (_, { manual }) => prPollOnce(ctx, { force: manual }) },
+      mail: { type: "script", run: () => doMailPoll() },
+      router: { type: "agent", run: () => routerOnce(ctx, { force: true, scheduled: true }) },
+    },
     allow: (schedule) => schedule.id !== "prWatch" || inWorkHours(cfg),
     onChange: syncScheduleState,
     onError: (error) => log(`Schedule 异常：${error.message}`),
@@ -933,11 +927,11 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   ctx.inboxSchedules = scheduler
   const armSchedules = () => {
     scheduler.sync([
-      { id: "prWatch", kind: "prWatch", cron: cronOf(cfg, "prWatch"), enabled: cfg.prWatch?.enabled === true },
-      { id: "mail", kind: "mail", cron: cronOf(cfg, "mail"), enabled: cfg.mail?.enabled === true },
-      { id: "router", kind: "router", cron: cronOf(cfg, "router"), enabled: (cfg.router ?? cfg.inspector)?.enabled === true },
+      { id: "prWatch", kind: "prWatch", executor: "script", cron: cronOf(cfg, "prWatch"), enabled: cfg.prWatch?.enabled === true },
+      { id: "mail", kind: "mail", executor: "script", cron: cronOf(cfg, "mail"), enabled: cfg.mail?.enabled === true },
+      { id: "router", kind: "router", executor: "agent", cron: cronOf(cfg, "router"), enabled: (cfg.router ?? cfg.inspector)?.enabled === true },
       // 停用旧持久 Schedule；旧 Inbox 事件仍由 router handler 兼容消费。
-      { id: "inspector", kind: "inspector", cron: cronOf(cfg, "router"), enabled: false },
+      { id: "inspector", kind: "inspector", executor: "agent", cron: cronOf(cfg, "router"), enabled: false },
     ])
   }
   worker.start()
@@ -981,7 +975,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     if (state.routerKick) clearTimeout(state.routerKick)
     if (state.mergeInterval) clearTimeout(state.mergeInterval)
     if (state.mergeKick) clearTimeout(state.mergeKick)
-    scheduler?.stop()
+    await scheduler?.stop()
     await dispatcher?.stop()
     await worker?.stop()
     await new Promise((r) => consoleHttp.server.close(r))
