@@ -279,8 +279,8 @@ export function ticketText({ repo, issue, orchestrator = "", fresh = false } = {
     "",
     "下一步（你只做决策，不写代码）：",
     `1. foreman dispatch --issue ${key} --prompt "<工单分析、这条编码会话的任务范围、依赖与验收要求>" —— 建一工程一工作区、开工作会话，编排指令随首句进入，会话 id 会绑回这条会话；`,
-    `2. 工作会话只管改完 commit（不 push、不开 PR、不碰工单），更新会 steer 进来并带执行会话 id；失败先按编排提示词归因处理，需要原会话续跑时 foreman resume <执行会话id>（不要传工单号）；`,
-    `3. 工作会话 commit 之后，foreman 自己 push 分支并开 PR（PR 号与链接写进账本与这条更新里）——你不用催它开 PR；`,
+    `2. 工作会话只修改、测试、commit 并给普通最终回复（不输出 RESULT，不 push、不开 PR、不碰工单）；状态与最终回复会经 task.update Inbox 由 Worker queue 进来并带执行会话 id。失败先按编排提示词归因处理，需要原会话续跑时 foreman resume <执行会话id>（不要传工单号）；`,
+    `3. 最终回复不是业务结论。你核对提交、diff、测试和工单后，决定是否 push、是否 foreman pr open；Foreman 不会自动 push、自动开 PR 或自动推进工单业务状态；`,
     `4. 核对 PR 后 foreman pr merge <N> --repo <PR 所在仓库>（合并即关单），合完 foreman clean --issue ${key}。`
   )
   return lines.join("\n")

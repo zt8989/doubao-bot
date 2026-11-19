@@ -1,15 +1,12 @@
-// 提示词与结果协议：会话里那个执行器必须交 RESULT 块，foreman 只认这个块。
+// 提示词与结果采集：执行会话只提交代码并给普通最终回复，业务结论由编排智能体判断。
 import { slugify } from "./util.mjs"
 import { builtinPrompt } from "./builtin-prompts.mjs"
 
-export const RESULT_SPEC = `结束时（而且只在结束时）输出一个 RESULT 块，格式严格如下：
-<RESULT>{"status":"done","tests":"<你跑过的测试命令与结果，一行>","summary":"<改了什么，50 字内>"}</RESULT>
-status 只有四种：
-- done：改完、自测通过、已经 commit（工作区里不留未提交改动）。push、开 PR、合并、关工单都不用你做，也别往 RESULT 里写 prs；
-- need_decision：缺信息或需要人拍板，加 "question" 字段写清楚要问什么，不要猜；
-- blocked：试过了做不了，summary 里写原因；要改的工程没有工作区也算 blocked，summary 写「缺工作区：<owner/name>」；
-- failed：这次没做成但还能再试，summary 写卡在哪。
-除 RESULT 块外不要在结尾再写别的。`
+export const FINAL_REPLY_SPEC = `结束时直接给出最终回复，不要输出 RESULT 块，也不要套用固定状态标签。最终回复写清：
+- 改了什么、提交是什么；
+- 跑过哪些测试及结果；跑不了就说明原因；
+- 如果未能完成，写清缺少的信息、阻塞原因或下一步建议。
+最终结果由编排智能体结合提交、diff、测试和工单统一判断。`
 
 export function issueBranch(issue, title) {
   const hasCJK = /[\u3400-\u9fff]/.test(String(title ?? ""))
@@ -31,14 +28,14 @@ export function kickoff({ repo, issue, worktree, branch, base, workspaces, faile
   const baseOf = (w) => w.base || base
   const rules = [
     `一工程一工作区：只在自己那条工作区里改（上面按工程列好了）。不要跨到别的工程目录，也不要动各仓库的主 checkout、不要动别的目录。`,
-    `要改的工程不在上面：先别动手，交 blocked，summary 写「缺工作区：<owner/name>」——工作区由外面补开，你不用自己开，也不要在主 checkout 里改。`,
+    `要改的工程不在上面：先别动手，在最终回复里写清「缺工作区：<owner/name>」——工作区由外面补开，你不用自己开，也不要在主 checkout 里改。`,
     `改完就 commit，然后结束。提交完就停：不要 push、不要开 PR、不要合并、不要关工单、不要动 worktree 或会话——push、PR、合并、收尾都由外面做。`,
     `提交信息用中文，首行写 “fix(#${issue.number}): <一句话>”，正文写清改法与验证方式。工作区里不要留未提交的改动。`,
     `想多看工单细节可以读：gitea issue-view --repo ${repo} ${issue.number}（只读，别改工单）。`,
     `先读各仓库里的 AGENTS.md / docs/agents/ 约定（如果有），按仓库自己的规矩来。`,
     multi
-      ? `改完必须自己在每个动过的工程里跑相关测试；某个工程跑不了就在 tests 里写清是哪个工程、为什么，不要假装跑过。`
-      : `改完必须自己跑相关测试；跑不了就在 tests 里写清原因，不要假装跑过。`,
+      ? `改完必须自己在每个动过的工程里跑相关测试；某个工程跑不了就在最终回复里写清是哪个工程、为什么，不要假装跑过。`
+      : `改完必须自己跑相关测试；跑不了就在最终回复里写清原因，不要假装跑过。`,
   ]
   const lines = [
     `【工作会话 · ${key} · 第 ${attempt} 次】`,
@@ -60,10 +57,10 @@ export function kickoff({ repo, issue, worktree, branch, base, workspaces, faile
     ])
   )
   if (failedWorkspaces.length) {
-    lines.push(``, `这些工程的工作区没建成（要改就先交 blocked，summary 写「缺工作区：<owner/name>」，工作区由外面补开）：`, ...failedWorkspaces.map((f) => `- ${f.repo}：${f.error}`))
+    lines.push(``, `这些工程的工作区没建成（要改就在最终回复里写清「缺工作区：<owner/name>」，工作区由外面补开）：`, ...failedWorkspaces.map((f) => `- ${f.repo}：${f.error}`))
   }
   if (lastFailure) lines.push(``, `上一次没成的反馈：${lastFailure}`)
-  lines.push(``, `要求：`, ...rules.map((r, i) => `${i + 1}. ${r}`), ``, RESULT_SPEC)
+  lines.push(``, `要求：`, ...rules.map((r, i) => `${i + 1}. ${r}`), ``, FINAL_REPLY_SPEC)
   return lines.join("\n")
 }
 
@@ -91,7 +88,7 @@ export function decisionKickoff({ repo, issue, base, workspaces = [], labels = [
     `2. 信息不够、或有多种合理做法：不要猜、不要硬做。写清缺什么信息、有哪些方案、你推荐哪个；需要人回答的，用 gitea issue-comment 回到工单上。`,
     `3. 判断下来确实能做、做法也明确：可以直接做。只在自己那条工作区里改，改完自己跑相关测试并 commit；不要 push、不要开 PR、不要合并、不要关工单。`,
     `4. 判断下来不该做（重复、已解决、方向不对）：说明理由并给出建议，但不要自己关单、不要自己改标签。`,
-    `5. 这次没有人监听你跑完后的状态：结论、疑问、建议都要在会话里写完整，别只丢一个 RESULT 块。`
+    `5. 这次没有人监听你跑完后的状态：结论、疑问、建议都要在会话里写完整，别只留一个状态标签。`
   )
   if (list.length) {
     lines.push(
@@ -104,7 +101,7 @@ export function decisionKickoff({ repo, issue, base, workspaces = [], labels = [
       ])
     )
   }
-  lines.push(``, RESULT_SPEC)
+  lines.push(``, FINAL_REPLY_SPEC)
   return lines.join("\n")
 }
 
@@ -115,10 +112,10 @@ export function resume({ issue, attempt, base = "", failure = "", repo = "", wor
   return [
     `继续工单 #${issue.number}（第 ${attempt} 次尝试）。`,
     failure ? `上一次的问题：${failure}` : "上一次没有跑完，接着当前工作区状态继续，不要重做已完成的部分。",
-    `${where}。要改的工程还没有工作区，交 blocked 并在 summary 写「缺工作区：<owner/name>」，别跨目录、别在主 checkout 里改。`,
+    `${where}。要改的工程还没有工作区，在最终回复里写清「缺工作区：<owner/name>」，别跨目录、别在主 checkout 里改。`,
     `改完就 commit，然后结束：不要 push、不要开 PR、不要合并、不要关工单、不要动 worktree 或会话。`,
     ``,
-    RESULT_SPEC,
+    FINAL_REPLY_SPEC,
   ].join("\n")
 }
 

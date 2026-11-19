@@ -5,7 +5,10 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { DatabaseSync } from "node:sqlite"
 import { Book } from "../src/book.mjs"
+import { InboxStore, AgentWorker } from "../src/inbox.mjs"
+import { deliverTaskUpdate } from "../src/taskevents.mjs"
 import { runRound } from "../src/orchestrator.mjs"
 import {
   cleanIssue,
@@ -80,7 +83,7 @@ test("编排会话幂等：账本里已有 convId 就复用，绝不开第二条
     assert.equal(dws.calls.openNew.length, 1)
     assert.match(dws.calls.openNew[0].name, /编排/)
     assert.match(dws.calls.openNew[0].prompt, /agent 主动 dispatch 不限在跑上限/)
-    assert.match(dws.calls.openNew[0].prompt, /额外工程.*--repo/)
+    assert.match(dws.calls.openNew[0].prompt, /跨工程时重复传.*--repo/)
     assert.ok(!dws.calls.openNew[0].prompt.includes("同时在跑最多"))
     assert.equal(dws.calls.openNew[0].noWait, true)
 
@@ -116,6 +119,9 @@ test("hand：编排职责与工单合进首句一次发出，不 steer，账本�
     assert.match(dws.calls.openNew[0].prompt, /工单键：yyzl\/demo#7/)
     assert.match(dws.calls.openNew[0].prompt, /改 demo 的镜像页/)
     assert.match(dws.calls.openNew[0].prompt, /foreman resume <执行会话id>/)
+    assert.match(dws.calls.openNew[0].prompt, /task\.update Inbox/)
+    assert.match(dws.calls.openNew[0].prompt, /是否 foreman pr open/)
+    assert.doesNotMatch(dws.calls.openNew[0].prompt, /foreman 自己 push|工作会话 commit 之后，foreman/)
     assert.ok(!dws.calls.openNew[0].prompt.includes("resume --issue"), "首句不能教编排按工单号续跑")
 
     const rec = new Book(cfg.stateFile).issue("yyzl/demo#7")
@@ -351,7 +357,7 @@ test("失败处理提示：带会话 id，由编排归因选择补派、续跑�
   assert.match(done, /foreman clean --issue yyzl\/demo#7/)
 })
 
-test("pollOnce：工作会话收工 → 结论 steer 进编排会话，不新建会话", async () => {
+test("pollOnce：工作会话最终回复经 Inbox/Worker queue 给所属编排", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-poll-"))
   try {
     const cfg = mkCfg(dir)
@@ -361,30 +367,34 @@ test("pollOnce：工作会话收工 → 结论 steer 进编排会话，不新建
     book.setIssue("demo/demo#1", { state: "working", agent: "foreman-demo-1", agentConvId: "conv-a", orchestrator: "conv-orch" })
     book.setWatch({ target: "conv-a", name: "foreman-demo-1", issueKey: "demo/demo#1", repo: "demo/demo", number: 1, notifyTo: "" })
 
-    const steered = []
-    const notified = []
+    const queued = []
+    const inbox = new InboxStore(new DatabaseSync(path.join(dir, "console.db")))
     const ctx = {
-      cfg,
+      cfg, book, inbox,
       state: { polling: false, watchers: new Map(), dwsErrors: 0, notifiedCount: 0 },
       log: () => {},
       gitea: {},
       dws: {
         runningMap: async () => ({ "conv-a": { running: false, title: "foreman-demo-1" } }),
         status: async () => ({ streaming: false, finished: true, chars: 500, head: "H", tail: "T", status: "ok" }),
-        info: async () => ({ lastReply: '<RESULT>{"status":"done","summary":"改完了","pr":12,"tests":"npm test 通过"}</RESULT>' }),
-        steer: async (target, text) => { steered.push({ target, text }) },
-        notify: async (target, text) => { notified.push({ target, text }) },
+        info: async () => ({ lastReply: "改完了，已提交，npm test 通过。" }),
+        queue: async (target, text) => { queued.push({ target, text }) },
       },
     }
+    const worker = new AgentWorker({ store: inbox, retryMs: 0, handlers: { "task.update": async (batch) => {
+      for (const event of batch) await deliverTaskUpdate(ctx, event)
+    } } })
 
     const r = await pollOnce(ctx)
-    assert.equal(r.steered, 1)
-    assert.equal(r.notified, 0, "会话中心不再通知、不新建会话")
-    assert.equal(notified.length, 0)
-    assert.equal(steered.length, 1)
-    assert.equal(steered[0].target, "conv-orch")
-    assert.match(steered[0].text, /工作会话更新/)
-    assert.match(steered[0].text, /foreman pr merge 12 --repo demo\/demo/)
+    assert.equal(r.steered, 0)
+    assert.equal(r.notified, 0)
+    assert.equal(queued.length, 0, "poll 只入箱，不直接投递")
+    await worker.runOnce()
+    assert.equal(queued.length, 1)
+    assert.equal(queued[0].target, "conv-orch")
+    assert.match(queued[0].text, /工作会话状态变化/)
+    assert.match(queued[0].text, /改完了，已提交，npm test 通过。/)
+    assert.doesNotMatch(queued[0].text, /自动开 PR|foreman pr merge/)
     assert.match(new Book(cfg.stateFile).notified["conv-a"].fingerprint, /^[0-9a-f]{12}$/)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
@@ -638,7 +648,7 @@ test("用户自主发起 hand：直接交给调用方会话（不开全局编排
   }
 })
 
-test("pollOnce：更新 steer 到单上绑的发起方会话，不是全局编排", async () => {
+test("pollOnce：任务事件 queue 到工单绑定的发起方，而不是全局编排", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-poll-caller-"))
   try {
     const cfg = mkCfg(dir)
@@ -652,27 +662,31 @@ test("pollOnce：更新 steer 到单上绑的发起方会话，不是全局编�
     })
     book.setWatch({ target: "conv-a", name: "foreman-demo-1", issueKey: "demo/demo#1", repo: "demo/demo", number: 1, notifyTo: "" })
 
-    const steered = []
+    const queued = []
+    const inbox = new InboxStore(new DatabaseSync(path.join(dir, "console.db")))
     const ctx = {
-      cfg,
+      cfg, book, inbox,
       state: { polling: false, watchers: new Map(), dwsErrors: 0, notifiedCount: 0 },
       log: () => {},
       gitea: {},
       dws: {
         runningMap: async () => ({ "conv-a": { running: false, title: "foreman-demo-1" } }),
         status: async () => ({ streaming: false, finished: true, chars: 500, head: "H", tail: "T", status: "ok" }),
-        info: async () => ({ lastReply: '<RESULT>{"status":"blocked","summary":"要改另一个仓库"}</RESULT>' }),
-        steer: async (target, text) => { steered.push({ target, text }) },
-        notify: async () => {},
+        info: async () => ({ lastReply: "还需要修改另一个仓库，当前工作区无法完成。" }),
+        queue: async (target, text) => { queued.push({ target, text }) },
       },
     }
+    const worker = new AgentWorker({ store: inbox, retryMs: 0, handlers: { "task.update": async (batch) => {
+      for (const event of batch) await deliverTaskUpdate(ctx, event)
+    } } })
 
     const r = await pollOnce(ctx)
-    assert.equal(r.steered, 1)
-    assert.equal(steered[0].target, "conv-user", "发起方会话才是这条单的编排")
-    assert.match(steered[0].text, /foreman resume conv-a/)
-    assert.match(steered[0].text, /需要其他智能体协作/)
-    assert.ok(!steered[0].text.includes("resume --issue"), "工作会话更新里的 resume 只能用会话 id")
+    assert.equal(r.steered, 0)
+    await worker.runOnce()
+    assert.equal(queued.length, 1)
+    assert.equal(queued[0].target, "conv-user", "发起方会话才是这条单的编排")
+    assert.match(queued[0].text, /还需要修改另一个仓库/)
+    assert.doesNotMatch(queued[0].text, /foreman resume conv-a/, "Worker 不自动补业务下一步")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

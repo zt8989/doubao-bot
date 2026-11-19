@@ -25,9 +25,13 @@ Gitea 侧一律走 REST（`gitea` 包/CLI）。
               ↓（编排读工单，自己决定怎么派）
          dispatch：建一工程一工作区 + 开工作会话，会话 id 绑回编排（issues[键].agentConvId / .orchestrator）
               ↓
-         工作会话只改代码、自测、commit；检查智能体发现收工后按需 watch poll，由 foreman push、开 PR 并把结论 steer 回编排
+         工作会话只改代码、自测、commit 并给普通最终回复；检查智能体发现收工后按需 watch poll
               ↓
-         失败/卡住 → 编排先归因：原会话能修正才 resume <执行会话id>；需要协作就补派并在完成后 steer 回原会话
+         状态与最终回复写入 task.update Inbox → Worker queue 给本单编排，不解析 RESULT、不自动开 PR
+              ↓
+         编排核对提交、diff、测试与工单，统一决定 pr open / resume / pr merge / clean
+              ↓
+         失败/卡住 → 编排先归因：原会话能修正才 resume <执行会话id>；需要协作就补派并登记归属
               ↓
          编排核对 → pr merge（合并即关单）→ clean：清 worktree、本地分支、工作会话与监听（幂等）
 ```
@@ -38,9 +42,9 @@ Gitea 侧一律走 REST（`gitea` 包/CLI）。
   1. **检查智能体接单**：它先 `foreman run --dry-run --once` 核对优先级与空余容量，确认后 `foreman run --once`，由 `hand` 新建/复用这张单自己的编排会话；
   2. **用户自主发起**：用户在某个豆包会话里调 `foreman dispatch`（或 hand/resume），
      发起方会话 id（`--orchestrator <id>`，不传则取 `MCP_VM_CONVERSATION_ID`）直接绑成这张单的编排，
-     工作会话的更新都 steer 回那条发起方会话，不会再另起编排会话。
+     工作会话的更新经 `task.update` Inbox 由 Worker queue 回那条发起方会话，不会再另起编排会话。
 - **绑定**：`dispatch` 把工作会话写进账本（`agent` / `agentConvId` / `orchestrator`，会话记录 `kind: "worker"`、`parent: <编排 id>`）。
-- **失败先归因**：原会话能修正时，`foreman resume <执行会话id>` 用 `dws msg --mode steer` 把「接着跑」插进指定会话，命令不收工单号；需要其他智能体时由编排补派并登记监听，完成后再 steer 回等待结果的原会话。
+- **失败先归因**：原会话能修正时，`foreman resume <执行会话id>` 用 `dws msg --mode steer` 把「接着跑」插进指定会话，命令不收工单号；需要其他智能体时由编排补派并登记监听，完成后由 Worker queue 回等待结果的原会话。
   续跑计数与 `lastFailure` 都写账本。
 - **收尾两步**：`pr merge` 合并关单 → `foreman clean <键>` 清残留 worktree / 分支 / 工作会话，并归档**这张单自己的编排会话**（worktree 有未提交改动就保留，不删别人正在写的东西）。
   clean 只认 `book.sessions` 里 `kind: "orchestrator"` 且带这张单 `issueKey` 的会话：全局编排和「用户发起方就是编排」的会话不归档。
@@ -63,19 +67,19 @@ herdr 从 origin/<base> 开 worktree（分支 fix/issue-N）
       ↓
 指定原工单右侧的分支 / Git 标签（Issue.ref；分支不变时不重复 PATCH）
       ↓
-dws 开会话，把工单 + 边界 + RESULT 协议一次发进去
+dws 开会话，把工单 + 边界 + 普通最终回复要求一次发进去（不要求 RESULT）
       ↓
-记账 + 登记监听 → 返回 dispatched（会话随后自己改、自测、commit）
+记账 + 登记监听与所属编排 → 返回 dispatched（会话随后自己改、自测、commit）
 ```
 
-run 到这里就返回：**不在进程里等回复、不读 RESULT、不验收、不 push/PR、不发通知**。
-代码不再按 `pollSeconds` 定时读取执行会话；检查智能体发现会话已收工后按需执行 `foreman watch poll`，由它推进账本、push、开 PR，并把结论 steer 回本单编排。
-当前 notify 节点只落痕、不投递（暂时不需要向谁通知）。
-`verify` / `publish` 的旧代码路径不作为当前入口；正常收口由 `watch poll` 内的 foreman 发布步骤完成。
+run 到这里就返回：**不在进程里等回复、不解析 RESULT、不验收、不 push/PR、不直接通知编排**。
+代码不再按 `pollSeconds` 定时读取执行会话；检查智能体发现会话已收工后按需执行 `foreman watch poll`，状态变化与普通最终回复写入 `task.update` Inbox。Worker 再 queue 给本单编排，成功投递后才消费回复指纹并标记 idle。
+是否已完成、是否 push/开 PR、续跑、合并、修改工单业务状态与收尾，都由编排智能体核对提交、diff、测试和工单后统一决定；Foreman 不根据最终回复自动补这些业务动作。
+`verify` / `publish` 的旧代码路径不作为当前入口；需要开 PR 时由编排显式执行 `foreman pr open`。
 
 worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for-human` / `agent-blocked`），返回 blocked。
 
-会话交 `need_decision` / `blocked` 这类结论时，由服务通知到人；**worktree 留着**，
+会话最终回复说明缺少信息或受阻时，由所属编排判断是否改单、续跑或交人处理；**worktree 留着**，
 人处理完 `foreman retry <仓库> <工单号>` 放回队列。
 
 ## 两条通道：派单与合并彻底分开
@@ -100,8 +104,8 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 - 会话层也分开：**派单会话**（`foreman-派单-<时间戳>`，读派单提示词，只做续跑/接单）与**合并会话**
   （`foreman-合并-<时间戳>`，读合并提示词，判断可合性 + 解冲突 + 直接执行 `foreman pr merge`）。账本 `sessions.kind` 记 `deliver:dispatch` / `deliver:merge`，
   `sessions.notice` 记触发类型。
-- 派单判定完一条会话，**不再当场合并、也不再入队**：`watch poll` 发现 commit 收工后由 foreman push + 开 PR，工单置 `pr-open`，
-  然后立刻返回（notify 节点只落痕，不发消息；见下面「通知口径」）。
+- 派单判定完一条会话，**不当场合并、不入队、不自动开 PR**：`watch poll` 只把最终回复交给所属编排；
+  编排核对后显式 `foreman pr open` / `foreman pr merge`，每次续跑仍使用原工作会话。
 - 合并结果不另开会话、也不回执：`foreman pr merge` 触发的合并只落账本 + 控制台
   （`mergeAsk` / `mergeTask` / `pr_merge`），关单 / 清工作区 / 归档做完即收工。
   命令本身**同步回包**（`merged` / `alreadyMerged` / `closed` / `cleanup` / `worktree` / `elapsedMs` / `summary`），
@@ -114,15 +118,16 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 
 ## 常驻服务与检查智能体
 
-常驻服务在同一个 Node 进程里运行 **Schedule → SQLite Inbox → 单 Worker**，保留三类持久 Schedule：检查智能体巡检、他人 PR 扫描、验收邮件。执行会话收工轮询和自动接单定时器已删除，收口后的代码自动补单也已删除。
+常驻服务在同一个 Node 进程里运行 **Schedule / 任务观察 → SQLite Inbox → 单 Worker**，保留三类持久 Schedule：检查智能体巡检、他人 PR 扫描、验收邮件；`watch poll` 另外把已登记执行会话的 `running/gone/finished/settled` 状态写成 `task.update`。执行会话收工轮询和自动接单定时器已删除，收口后的代码自动补单也已删除。
 
 - Schedule 到期只推进 `next_at` 并写 `agent_inbox`，**不直接给 Agent 发消息**；推进 Schedule 与写事件在同一 SQLite 事务里完成。PR 扫描和邮件轮询是 Worker 执行的代码任务，扫描发现候选后再写 `inspector.notice`。
-- `agent_inbox` 是投递事实源：相同来源的活跃事件去重；同一 Schedule 未开始的旧事件被新事件替换；过期 pending 直接丢弃；处理失败 30 秒后重试，重启通过租约恢复 processing。
+- `agent_inbox` 是投递事实源：相同来源的活跃事件去重；同一 Schedule 未开始的旧事件被新事件替换；同一任务的 pending 状态合并为最新状态；过期 pending 直接丢弃；处理失败 30 秒后重试，重启通过租约恢复 processing。
+- `task.update` 按工单绑定的 `orchestrator` 路由，补派任务其次取 `parent` / 显式通知目标，完全没有归属的旧任务才回退检查智能体。完成状态携带普通最终回复原文；Worker 成功 queue 后才写 `notified` 与 `idle`，只入箱不算已消费。不同任务的事件逐条完成，避免一条失败导致另一条已送达任务被重投。
 - Worker 收到同进程写入后直接 `wake()`，1 秒轮询只负责漏唤醒与重启恢复。巡检和多条 PR 通知合并成一次检查智能体运行；首次 `openNew` 创建，后续复用同一条会话，底层仍是 `dws msg --mode queue`。
 - 以最后一次成功投递为轮换基准；从未成功时从首次失败计时，连续 `inspector.recreateAfterHours`（默认 24 小时）未成功才新建检查会话。Inbox 的 done 只表示 Worker 已成功交给 dws，不表示 Agent 已处理完。
 - Schedule 不读取工单状态自行派单，Worker 也不替检查智能体做业务决策。检查智能体负责健康检查、必要时 `hand --fresh` 重派独立编排、用 `issue settle` 修复本地完成状态，以及每轮通过 `foreman tasks --json` 找出 `done/cleaned` 残留并执行 `foreman clean --all`。接单前必须独立统计全部在飞工单：`planned/handed/working/pr-open/needs-human/blocked/failed/escalated` 都占槽，合计最多 `pickup.maxRunning`（默认 2），不是每轮新增 2 张；dry-run 只看候选优先级，不能作为空余容量依据。达到上限后禁止用 `run/pickup/hand/orch start/dispatch` 接新单，每次接单后重新计数。
-- `watch poll` 保留为检查智能体/人工按需入口：处理已收工执行会话、推进账本、push/开 PR、steer 回本单编排。
-- **notify 节点当前只落痕、不投递**：判定照做、指纹照记，但不新建会话、不 `dws notify`。
+- `watch poll` 保留为检查智能体/人工按需入口：观察已登记执行会话，把状态变化与最终回复写入 `task.update`，由 Worker queue 给所属编排。它不解析 RESULT、不自动 push/开 PR、不推进工单业务状态。
+- **notify 节点不再承担执行会话投递**：其暂停状态仍会阻止任务事件入箱；成功投递以 Inbox done、Worker 日志和账本 `steers/notified` 为准，业务结论由编排判断。
 
 ### 起与停
 
@@ -230,19 +235,19 @@ Inbox 与 ConsoleStore 共用 `~/.foreman/console.db` 的同一连接，新增 `
 foreman watch add <会话id|标题> [--notify <会话id|标题>] [--repo owner/name --number N]
 foreman watch list                       # 现在在听哪些（自动登记的 + 显式盯的）
 foreman watch rm <会话id|标题>            # 取消登记
-foreman watch poll                       # 立刻跑一轮（checked / settled / notified），取证补漏
+foreman watch poll                       # 立刻跑一轮（checked / settled / enqueued），取证补漏
 ```
 
 在听的会话 = 这轮 run 派出去的（自动登记）∪ `watch add` 显式盯的，按会话去重，显式优先。
 
 代码不再每 `pollSeconds` 自动轮询。检查智能体或人工执行 `foreman watch poll` 时，先 `dws list --json` 读一次侧边栏（不切窗口），**以侧边栏的 `running` 为监听主判据**：
 
-- `running` 真 → 只记一笔，`dws status` / `dws info` 都不碰（这两个内部都要 `goto`，一个都不读才不会把用户窗口拽走）；
-- `running` 假、且这次收工已经处理过 → 直接跳过，一个字节都不读（`notified` 里记 `idle`）；
-- `running` 假、还没处理过 → 收工这轮读一次 `dws status` 判结论，该通知就通知，然后落 `idle`；
+- `running` 真 → 首次观察到该阶段时写一条 `task.update`，不调用 `dws status` / `dws info`（这两个内部都要 `goto`，不读才不会把用户窗口拽走）；
+- `running` 假、且这次收工已经由 Worker 成功投递 → 直接跳过，一个字节都不读（`notified` 里记 `idle`）；
+- `running` 假、还没处理过 → 收工这轮读一次 `dws status` 和最终回复，写入 `task.update`；Worker 投递成功后才落 `idle`；
 - 侧边栏再把它报成 `running` 时清掉 `idle`，等下一次收工重新判一轮。
 
-读不到侧边栏（`dws list` 失败）时，尚未消费的会话仍退化为逐条 `dws status`；一旦 RESULT 已消费就同样落 `idle`，不再每轮重读。后续由侧边栏重新出现 `running`，或 `resume` / 重派 steer 显式清掉 `idle`，再读取下一次结果。
+读不到侧边栏（`dws list` 失败）时，尚未消费的会话仍退化为逐条 `dws status`；一旦最终回复已由 Worker 投递就同样落 `idle`，不再每轮重读。后续由侧边栏重新出现 `running`，或 `resume` / 重派 steer 显式清掉 `idle`，再读取下一次结果。
 
 检查智能体决定执行 `run` / `pickup` 时也会先读侧边栏，但**默认不因此停派**（派单通道要并行 2 张单）：只有显式打开 `pickup.pauseWhileRunning: true` 时，才有在跑会话就跳过本轮（`window-busy`）。
 
@@ -250,22 +255,16 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 
 - `streaming` 真 → running，不动；`chars: 0`（dws 的"还没开始"坑）→ pending，不动。
 - `finished` 真 → finished；finished/streaming 都假但 `chars > 0` 且有 status 文本 → settled。只有这两种算跑完。
-- 指纹 = `sha1(chars|head|tail)` 前 12 位。**跑完 + 指纹相对上次已通知的指纹变了**，才发一次；
-  同一个 `(会话, 指纹)` 只发一次，去重记在 `state.json` 的 `notified` 键——**服务重启也不重发**。
+- 指纹 = `sha1(chars|head|tail)` 前 12 位。**跑完 + 指纹相对上次已投递的指纹变了**，才写完成事件；
+  同一个 `(会话, 指纹)` 只由 Worker 成功投递一次，去重记在 `state.json` 的 `notified` 键——**服务重启也不重发**。
 
-### 通知口径：notify 节点保留，暂时只落痕、不投递
+### 任务事件投递：Inbox / Worker 只路由，编排判业务
 
-- **notify 节点（`notice.delivered`）还在**：暂停 / 继续、累计执行次数、控制台状态照旧；
-  但节点里**不再真的发通知**——不新建派单会话、不 `dws notify`、也不拼续接催办，
-  只把指纹记进账本 `notified`、落一次节点痕（detail 写「通知已停用，未发送」）。
-- **PR 待合并仍然投递**：PR 扫描由 Worker 执行，候选写 `inspector.notice`；检查智能体显式 `pr assign` 后才新建 `foreman-合并-<时间戳>` 会话，
-  不经 notify 节点，所以「扫到别人的 PR 交给合并助手核对」照常工作。
-- **合并结果不回执**：合完只落账本（`mergeAsk` / `mergeTask`）+ 控制台 `pr_merge`，
-  关单、清工作区、归档执行会话与通知会话都在 `afterMerge` 里做完，然后收工；
-  合失败同样只记账，失败原因看控制台 / `mergeAsk.error`。
-- **恢复投递**：从 git 历史取回 2026-11-13 之前 `pollOnce` 里的 deliver / `dws.notify` 与续接那一段，接回本节第 1 条。
-- 账本 `notified` 仍按 `(会话, 指纹)` 去重：同一结论只落一次痕，服务重启不重复处理。
-- `--no-notify` 仍表示**这一轮不登记监听**：这一轮的会话不会被盯，也就不会进 notify 节点。
+- `watch poll` 把 `running/gone/finished/settled` 状态写入 `task.update`；完成状态同时保留 `dws.info` 的普通最终回复原文，不解析 RESULT，也不把 finished/settled 当成工单完成。
+- 入箱时按 `issues[键].orchestrator` → 补派 `parent` / 显式 `notifyTo` → 全局编排 → 检查智能体的顺序确定并固化归属；Worker 按事件里的归属 `dws msg --mode queue` 投递，不广播、不新建派单会话、不 steer。
+- 同一任务的 pending 更新合并为最新状态；不同任务逐条投递。失败保留事件并重试，重启由 SQLite 租约恢复；Worker 成功交给 dws 后才消费 `(会话, 指纹)` 并落 `idle`。
+- 编排收到最终回复后核对提交、diff、测试和工单，自行决定 `pr open`、`resume`、`pr merge`、`clean` 或修改工单业务状态。代码不自动 push、开 PR 或补业务结论。
+- notify 节点的暂停开关仍会阻止任务事件入箱；PR 扫描与验收邮件仍走各自 Inbox 事件。`--no-notify` 仍表示这一轮不登记监听，因此不会产生该执行会话的 `task.update`。
 
 ### 服务没在跑时，结论没人判
 

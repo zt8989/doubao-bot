@@ -337,7 +337,7 @@ export async function handleIssue(ctx, repoCfg, summary) {
   })
 
   // 派活：这条单已经有工作会话就 **steer 续跑同一条**（失败重试也不新开第二条），
-  // 没有才开新的。会话中心模式下用 openNew（只确认送达），更新由服务 steer 回编排。
+  // 没有才开新的。会话中心模式下用 openNew（只确认送达），更新经 task.update Inbox 由 Worker queue 回编排。
   const bound = workerOf(book, key)
   const agentName = bound.name || name
   const boundTarget = bound.convId || bound.name || book.session(name)?.convId || ""
@@ -402,7 +402,7 @@ export async function handleIssue(ctx, repoCfg, summary) {
   // --no-notify：不登记监听，同时账本标 notify:false，免得被 sessions 自动纳入规则捞回来。
   // 决策单一律不监听：它要的是 agent 的判断与提问，不是「跑完了吗 / 出 PR 了吗」。
   const noNotify = !!ctx.noNotify || decision
-  // 工作会话 id 绑到编排会话：后面任何状态更新都按这条绑定的会话 steer 回编排。
+  // 工作会话 id 绑到编排会话：后续 task.update 事件按这条绑定由 Worker queue 回编排。
   bindWorker(book, {
     issueKey: key,
     name: agentName,

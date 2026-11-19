@@ -6,7 +6,7 @@ import path from "node:path"
 import crypto from "node:crypto"
 import { nowIso, sleep, inWorkHours } from "./util.mjs"
 import { Book } from "./book.mjs"
-import { parseResult, deliverPrompt, noticeSessionName, issueBranch } from "./prompts.mjs"
+import { deliverPrompt, noticeSessionName, issueBranch } from "./prompts.mjs"
 import { builtinPrompt } from "./builtin-prompts.mjs"
 import { notifyTarget, shouldNotify, notifyText, runRound, acquireLock, releaseLock, handleIssue, bucketOf, CLOSED_STATES } from "./orchestrator.mjs"
 import {
@@ -15,17 +15,14 @@ import {
   delegatedSessions,
   ensureOrchestrator,
   handToOrchestrator,
-  nextStepLine,
-  orchestratorOf,
   orchestratorInfo,
   orchestratorTarget,
   ownedIssueOrchestrator,
   resumeWorker,
   sessionFlowEnabled,
-  steerOrchestrator,
   TERMINAL_ISSUE_STATES,
 } from "./sessionflow.mjs"
-import { openPrsForIssue } from "./prflow.mjs"
+import { enqueueTaskUpdate, deliverTaskUpdate } from "./taskevents.mjs"
 import { findWorkspace, mergeWorkspace, upsertPr } from "./workspaces.mjs"
 import { WorkflowEngine } from "./workflow/engine.mjs"
 import { NODE_TEARDOWN, runNodeCleanup, resolveIssueKey, issueKeyForPr } from "./workflow/cleaners.mjs"
@@ -883,6 +880,11 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     leaseMs: Number(cfg.inbox?.leaseSeconds ?? 900) * 1000,
     handlers: {
       inspector: ({ scheduled, notices }) => inspectorOnce(ctx, { force: true, scheduled, notices }),
+      "task.update": async (batch) => {
+        const delivered = []
+        for (const event of batch) delivered.push(await deliverTaskUpdate(ctx, event))
+        return delivered
+      },
       prWatch: () => doPrPoll(),
       mail: () => doMailPoll(),
     },
@@ -1143,7 +1145,7 @@ export async function prPollOnce(ctx, { force = false } = {}) {
   }
 }
 
-// 跑一轮：现读 book → 对每个 watcher 跑 dws.status → 收工就把结论 steer 进编排会话并落 notified。
+// 跑一轮：现读 book → 观察 watcher 状态与最终回复 → 只写 task.update Inbox；Worker 投递后才消费指纹。
 export async function pollOnce(ctx) {
   const { state, cfg, dws, log, gitea } = ctx
   // 直接构造 ctx 的调用方（测试/脚本）没有 engine 时补一个，保证流程事件照样发。
@@ -1184,6 +1186,11 @@ export async function pollOnce(ctx) {
       if (side?.running) {
         if (led.idle) book.clearIdle(key)
         if (led.gone) book.clearGone(key)
+        if (led.observedPhase !== "running") {
+          const published = enqueueTaskUpdate({ ...ctx, book }, { watcher: w, phase: "running" })
+          if (published.ok) book.markTaskObserved(key, "running")
+          else log(`任务 running 事件未入箱 ${key}：${published.reason}`)
+        }
         rec.lastPhase = "running"
         rec.lastPollAt = nowIso()
         continue
@@ -1191,7 +1198,12 @@ export async function pollOnce(ctx) {
       // 侧边栏里根本没有这条（已归档/已收起）：只记 gone，不读 status。
       // status 切不过去，只会回「侧边栏里没有任务」，每轮刷一次日志、白拽一次窗口。
       if (sidebar && !side) {
-        if (!led.gone) book.markGone(key)
+        if (!led.gone) {
+          const published = enqueueTaskUpdate({ ...ctx, book }, { watcher: w, phase: "gone" })
+          if (published.ok) book.markTaskObserved(key, "gone")
+          else log(`任务 gone 事件未入箱 ${key}：${published.reason}`)
+          book.markGone(key)
+        }
         rec.lastPhase = "gone"
         rec.lastPollAt = nowIso()
         continue
@@ -1242,103 +1254,28 @@ export async function pollOnce(ctx) {
         continue
       }
 
-      // 跑完且指纹变了：读最后回复 → 判 event → 决定通知 → 发。
-      let result = null
+      // 跑完且指纹变了：只读取最终回复并写持久 Inbox。不得在这里解析 RESULT、
+      // 推进工单业务状态、push/开 PR 或直接给编排发消息；这些决定统一交给所属编排。
+      let finalText = ""
       try {
         const info = await dws.info(w.target)
-        const text = info?.lastReply || ""
-        const parsed = text ? parseResult(text) : { status: "none", raw: "", text: "" }
-        result = parsed.status === "none"
-          ? { ...parsed, conversation: conversationTail(info?.messages) }
-          : parsed
+        finalText = String(info?.lastReply ?? "").trim()
       } catch (e) {
         state.dwsErrors++
         log(`dws info ${w.target} 失败：${e.message}`)
       }
 
-      // 工作会话只负责改完 commit：push 分支、开 PR 都由 foreman 在判定 done 之后自己做。
-      // 它压根不需要知道 foreman 的存在；PR 号与链接进账本，编排会话读到 PR 再决定合不合。
-      if (result?.status === "done" && !Number(result.pr) && w.issueKey) {
-        try {
-          const prOut = await openPrsForIssue(ctx, {
-            issueKey: w.issueKey,
-            summary: result.summary ?? "",
-            tests: result.tests ?? "",
-          })
-          if (prOut.prs.length) {
-            const first = prOut.prs.find((p) => p.repo === String(w.issueKey).split("#")[0]) ?? prOut.prs[0]
-            result = { ...result, prs: prOut.prs, pr: first.pr, prUrl: first.prUrl ?? "", branch: first.branch ?? result.branch }
-            log(`${w.issueKey}：工作会话只 commit 了，foreman 已代开 ${prOut.prs.map((p) => `${p.repo}#${p.pr}`).join("、")}`)
-            for (const p of prOut.prs) {
-              await engine.emit("pr.opened", { issueKey: w.issueKey, pr: p.pr, prUrl: p.prUrl ?? "", target: w.target, workflow: "own" })
-            }
-          } else {
-            // 没有可交付的提交（没 commit / 工作区脏）：当失败处理，交给编排 resume 同一条会话。
-            const why = prOut.notes.join("；") || "工作会话没有留下可交付的提交"
-            result = { ...result, status: "failed", summary: why }
-            log(`${w.issueKey}：done 但没有可开的 PR，按失败处理（${why}）`)
-          }
-        } catch (e) {
-          const why = `自动开 PR 失败：${String(e?.message ?? e).slice(0, 160)}`
-          result = { ...result, status: "failed", summary: why }
-          log(`${w.issueKey}：${why}`)
-        }
-      }
-
-      // 出结论就推进工单状态：done → pr-open/done，其余进各自的停态（failed 还能 retry）。
-      if (result && w.issueKey) {
-        const st = result.status === "done" ? (Number(result.pr) ? "pr-open" : "done")
-          : result.status === "need_decision" ? "needs-human"
-          : result.status === "blocked" ? "blocked"
-          : result.status === "failed" ? "failed" : ""
-        if (st) {
-          const patch = { state: st }
-          if (Number(result.pr)) { patch.pr = Number(result.pr); patch.prUrl = result.prUrl ?? "" }
-          new Book(cfg.stateFile).setIssue(w.issueKey, patch)
-          await engine.emit("issue.concluded", { issueKey: w.issueKey, target: w.target, status: result.status, pr: result.pr ?? null, workflow: "own" })
-          // 结论里带 PR 说明会话已经 push 并开好了 PR：推进到「出 PR」这一阶段。
-          if (Number(result.pr)) {
-            await engine.emit("pr.opened", {
-              issueKey: w.issueKey,
-              pr: Number(result.pr),
-              prUrl: result.prUrl ?? "",
-              target: w.target,
-              workflow: "own",
-            })
-          }
-        }
-      }
-
-      // 合并通道已取消：会话自己 push + 开 PR 之后就停在这里。
-      // PR 合不合由编排会话核对工单后用 `foreman pr merge` 直接合，poll 不再入队、也不在这轮里合。
-      const bookM = new Book(cfg.stateFile)
-      let mergeQueued = false
-      if (Number(result?.pr)) {
-        const pr = Number(result.pr)
-        const repo = w.repo || String(w.issueKey ?? "").split("#")[0]
-        if (w.issueKey) bookM.setIssue(w.issueKey, { state: "pr-open", pr, prUrl: result.prUrl ?? "" })
-        log(`PR ${repo}#${pr} 已开好，等编排核对后 foreman pr merge（不再排合并通道）`)
-      }
-      const resultOut = result ? { ...result, merged: false, mergeError: "", mergeQueued } : result
-
-      // 合并与收尾都不在这一轮做：等编排会话核对后调 foreman pr merge；合完再清工作区、归档执行会话。
-      const book2 = new Book(cfg.stateFile)
-      const nd = notifyDecision({ cfg, watcher: w, book: book2, env: process.env, result: resultOut })
-
-      // 通知节点被暂停：这一轮不落，也不记指纹，等继续后自然补一次（不影响别的节点）。
       if (ctx.engine?.paused?.("notify")) {
-        log(`通知跳过 ${w.target}：通知节点已暂停`)
+        log(`任务事件跳过 ${w.target}：通知节点已暂停`)
         continue
       }
-      // 已经归档 / 已关单合并的执行会话：结论不必再推给编排会话——
-      // 合并收尾时已经发过「合并完成」，这里再发一条只是重复。
-      // 节点照样落一次痕（不走 engine.emit，避免把跳过也算成「执行了 1 次」）。
+      // 已合并归档的会话不再补一条重复结论；其余任务一律经 task.update 事件路由。
       const issKey = String(w.issueKey ?? "")
-      const bookIss = new Book(cfg.stateFile)
-      const iss = issKey ? bookIss.issue(issKey) : null
+      const book2 = new Book(cfg.stateFile)
+      const iss = issKey ? book2.issue(issKey) : null
       const prOf = Number(iss?.pr ?? 0)
       const mergeKey = prOf ? `${w.repo || String(issKey).split("#")[0]}#${prOf}` : ""
-      const merged = mergeKey && bookIss.mergeAsk?.[mergeKey]?.status === "merged"
+      const merged = mergeKey && book2.mergeAsk?.[mergeKey]?.status === "merged"
       if (merged) {
         const payload = { issueKey: issKey, target: w.target, kind: "archived-skip", detail: "会话已归档，跳过通知" }
         book2.markNotified(w.target, decision.fingerprint, { phase: decision.phase, chars: status?.chars ?? 0 })
@@ -1349,52 +1286,20 @@ export async function pollOnce(ctx) {
         continue
       }
 
-      // 会话中心（默认）：把结论 steer 进**这条单绑定的编排会话**（用户自主发起时就是发起方会话；
-      // 自动接单时是这张单自己的编排会话），由它决定 dispatch / resume / merge / clean。
-      // 工单进展不再新建派单会话，也不 dws.notify——每张单的编排读自己的更新。
-      const orchId = orchestratorOf(new Book(cfg.stateFile), issKey)
-      if (sessionFlowEnabled(cfg) && orchId && typeof dws?.steer === "function") {
-        const body = [nd.text, nextStepLine({ issueKey: issKey, result: resultOut, sessionId: w.target })].filter(Boolean).join("\n")
-        const head = `【工作会话更新】${issKey ? `${issKey} · ` : ""}${w.name || w.target}`
-        try {
-          await steerOrchestrator(ctx, `${head}\n${body}`, { kind: nd.event || "session-done", target: orchId })
-          out.steered = (out.steered ?? 0) + 1
-          const b = new Book(cfg.stateFile)
-          b.markNotified(w.target, decision.fingerprint, { phase: decision.phase, chars: status?.chars ?? 0 })
-          rec.notifiedAt = nowIso()
-          const payload = { issueKey: issKey, target: orchId, kind: nd.event || "", detail: "已 steer 进编排会话" }
-          if (engine.lifecycle && typeof engine.lifecycle.emit === "function") await engine.lifecycle.emit("notice.delivered", payload)
-          else await engine.emit("notice.delivered", payload)
-          log(`已 steer 进编排会话 ${orchId}：${w.target}（${nd.event || "session-done"}）`)
-        } catch (e) {
-          // 投递失败 ≠ 已处理：只记一次尝试（同一指纹最多 notifyMaxAttempts 次），不落 idle，
-          // 下一轮同一条更新继续重试。以前这里不记账、末尾还统一 park，
-          // 一次 steer 失败就把这条结论永久吞掉了。
-          state.dwsErrors = (state.dwsErrors ?? 0) + 1
-          new Book(cfg.stateFile).markAttempted(w.target, decision.fingerprint, {
-            phase: decision.phase,
-            chars: status?.chars ?? 0,
-            error: String(e?.message ?? e).slice(0, 200),
-          })
-          rec.notifiedAt = nowIso()
-          log(`steer 编排会话失败（${w.target}）：${e.message}；已记一次尝试，下一轮重试`)
-          continue
-        }
-      } else {
-        // 没有编排会话（还没 foreman orch start）或适配器不支持 steer：只落一次痕，不新建会话。
-        const payload = {
-          issueKey: issKey,
-          target: "",
-          kind: nd.event || "",
-          detail: orchId ? "会话适配器不支持 steer，未发送" : "没有编排会话，未 steer",
-        }
-        book2.markNotified(w.target, decision.fingerprint, { phase: decision.phase, chars: status?.chars ?? 0 })
-        rec.notifiedAt = nowIso()
-        if (engine.lifecycle && typeof engine.lifecycle.emit === "function") await engine.lifecycle.emit("notice.delivered", payload)
-        else await engine.emit("notice.delivered", payload)
-        log(`通知跳过 ${w.target}：${payload.detail}（notify 节点只落痕）`)
+      const published = enqueueTaskUpdate({ ...ctx, book: book2 }, {
+        watcher: w,
+        phase: decision.phase,
+        fingerprint: decision.fingerprint,
+        finalText,
+      })
+      if (!published.ok) {
+        log(`任务事件未入箱 ${w.target}：${published.reason}；不落 idle，下一轮重试`)
+        continue
       }
-      park()
+      out.enqueued = (out.enqueued ?? 0) + (published.status === "pending" ? 1 : 0)
+      rec.eventQueuedAt = nowIso()
+      log(`任务事件已入箱 ${w.target}：${decision.phase} → ${published.owner}（等待 Worker 投递）`)
+      // 关键：enqueue 只代表持久化，不能 park；deliverTaskUpdate 成功 queue 后才 markIdle。
     }
     // 收口工单的编排会话也在这轮收：工单 done 之后它没有下一件事了，
     // 不收就会每张单在侧边栏留一条「工单编排」，越积越多。复用同一份侧边栏判断在不在跑。
@@ -2157,7 +2062,7 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     if (!dispatchPrompt) {
       return fail("bad-request", "dispatch 必须提供非空编排指令：--prompt <工单分析、任务范围与验收要求>，或 --file <指令文件>")
     }
-    // 用户自主发起：调用方会话就是这张单的编排，工作会话的更新都 steer 回它。
+    // 用户自主发起：调用方会话就是这张单的编排，工作会话更新经 task.update 由 Worker queue 回它。
     // 不传调用方时，由 handleIssue 新建/复用这张单自己的编排会话。
     const orchestrator = String(req.orchestrator ?? "").trim()
     let issue

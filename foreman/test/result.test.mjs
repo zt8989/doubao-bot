@@ -67,7 +67,9 @@ test("kickoff 写死一工程一工作区的边界（工作会话只 commit，�
   assert.match(p, /不要 push、不要开 PR/)
   assert.match(p, /缺工作区：<owner\/name>/)
   assert.match(p, /gitea issue-view/)
-  assert.match(p, /<RESULT>/)
+  assert.match(p, /结束时直接给出最终回复/)
+  assert.match(p, /不要输出 RESULT 块/)
+  assert.doesNotMatch(p, /<RESULT>/, "不再要求结构化 RESULT 协议")
   // 工作会话不该知道 foreman 的任何东西
   assert.ok(!/foreman/i.test(p), `工作会话提示词里不该出现 foreman：\n${p}`)
 })

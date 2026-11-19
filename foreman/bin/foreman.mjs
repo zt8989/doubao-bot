@@ -72,8 +72,7 @@ const HELP = `foreman — 接单编排 + 常驻服务
   pr poll     立刻扫一轮 PR，把他人候选与本人 UI 候选写入检查智能体 Inbox
   pr ui-assign <N> --repo R  本人 UI PR 轮询指派给周晓亮/张振豪（只指派，不合）
   pr assign <N> --repo R   检查智能体核对候选后，显式创建这条 PR 的合并助手
-  deliver     通知投递（老模型）：deliver.mode=new 每次新建一条会话；existing 才塞回已有会话。
-              会话中心（默认 sessionFlow.enabled）不走这条：更新一律 steer 进唯一编排会话。
+  deliver     旧投递模型保留；当前任务状态统一经 task.update Inbox，由 Worker queue 给所属编排。
   pr open     建 PR（唯一入口：agent 也走它，账本/控制台才记得到）
   pr merge <N> --repo R [--issue <单号>]   合并 PR（唯一入口：先核对关联工单再合；失败回理由）
                --approved-by <人>  用户当面验收过、明确回了「合并」时带上；UI PR 的邮件验收闸门认这条
@@ -89,15 +88,15 @@ const HELP = `foreman — 接单编排 + 常驻服务
   --no-service  跳过自动握手与拉起（逃生口）
 
 run 以编排会话为中心：捞到单先交给编排会话（dws msg --mode steer），由它调 foreman dispatch 分配工作；
-工作会话的每次状态更新都 steer 回这条编排会话；失败先由编排归因，原会话可修正时 foreman resume <执行会话id>，
-需要其他智能体协作时补派并登记监听，完成后再 steer 回等待结果的原会话。
+工作会话的状态变化与普通最终回复写入 task.update Inbox，Worker 再 queue 回这条编排会话；代码不解析 RESULT、
+不自动 push/开 PR。失败先由编排归因，原会话可修正时 foreman resume <执行会话id>，需要其他智能体协作时补派并登记监听。
 合并关单后由编排调 foreman clean 清 worktree 与会话。--direct 退回老行为（run 自己派活）。
 
 编排会话从哪来（工作会话与更新都绑它）：
   1. 检查智能体接单：hand 按工单新建/复用独立编排；手工 orch start 仍可起全局兼容会话；
   2. 用户自主发起：发起那条会话自己就是编排——hand/dispatch/resume 自动取 MCP_VM_CONVERSATION_ID
      （或显式 --orchestrator <会话id|标题>，--no-orchestrator 关掉自动识别），
-     工作会话的状态更新 steer 回这条发起方会话。
+     工作会话的状态更新由 Worker queue 回这条发起方会话。
 --notify <id|标题>：本轮派出去的会话通知给该目标；--no-notify：本轮不登记监听。
 `
 

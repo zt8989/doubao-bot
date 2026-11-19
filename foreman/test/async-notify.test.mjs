@@ -163,7 +163,7 @@ test("--no-notify：不登记 watch，sessions 里 notify=false（不被自动�
 
 // ---- 端到端异步 ----
 
-test("端到端：poll 跑完只落一次痕、一条消息都不发；同指纹不再处理；重启后仍不发", async () => {
+test("端到端：状态经 Inbox/Worker 投递，同指纹与重启都不重复", async () => {
   const dir = tmpDir()
   let server
   try {
@@ -174,43 +174,49 @@ test("端到端：poll 跑完只落一次痕、一条消息都不发；同指纹
 
     // 假 dws：status 队列控制行为；notify 记调用。
     const statusQueue = [
-      // 第一轮：还在跑
-      { name: "conv-e2e", streaming: true, finished: false, chars: 10, head: "H1", tail: "T1", status: "running" },
       // 第二轮：跑完，指纹变了
       { name: "conv-e2e", streaming: false, finished: true, chars: 500, head: "H2", tail: "T2", status: "ok" },
       // 第三轮：同指纹（重跑不发）
       { name: "conv-e2e", streaming: false, finished: true, chars: 500, head: "H2", tail: "T2", status: "ok" },
     ]
     const notified = []
+    let sidebarRunning = true
     const dws = {
+      runningMap: async () => ({ "conv-e2e": { running: sidebarRunning } }),
       status: async () => statusQueue.shift() ?? { name: "conv-e2e", streaming: false, finished: true, chars: 500, head: "H2", tail: "T2", status: "ok" },
-      info: async () => ({ lastReply: '<RESULT>{"status":"done","summary":"做完了"}</RESULT>' }),
-      notify: async (target, text) => {
-        notified.push({ target, text })
-      },
+      info: async () => ({ lastReply: "做完了，已提交并通过测试。" }),
+      queue: async (target, text) => { notified.push({ target, text }) },
+      notify: async () => { throw new Error("旧 notify 不应参与任务状态投递") },
     }
 
     server = await startServer({ cfg, book, dws, log: () => {} })
 
-    // 第一轮 running → 不通知
+    const drain = async () => { await server.worker.idle(); await server.worker.runOnce() }
+    // 第一轮 running 也入箱，由 Worker queue 给所属 Agent
     let r = await server.poll()
     assert.equal(r.checked, 1)
     assert.equal(r.settled, 0)
     assert.equal(r.notified, 0)
-    assert.equal(notified.length, 0)
+    await drain()
+    assert.equal(notified.length, 1, JSON.stringify({ r, events: server.inbox.list(), worker: server.worker.lastResult }))
+    assert.match(notified[0].text, /状态：running/)
+    sidebarRunning = false
 
-    // 第二轮 finished + 指纹变化 → notify 节点只落痕，不发消息
+    // 第二轮 finished + 指纹变化 → 先入箱，Worker 才投递并消费指纹
     r = await server.poll()
     assert.equal(r.settled, 1)
     assert.equal(r.notified, 0)
-    assert.equal(notified.length, 0, "通知停用期间一条都不发")
+    await drain()
+    assert.equal(notified.length, 2)
+    assert.match(notified[1].text, /做完了，已提交并通过测试。/)
     const led = new Book(cfg.stateFile).notified["conv-e2e"]
     assert.match(led.fingerprint, /^[0-9a-f]{12}$/)
 
-    // 第三轮同指纹 → 不再处理
+    // 第三轮同指纹 → 不再入箱或投递
     r = await server.poll()
-    assert.equal(r.notified, 0)
-    assert.equal(notified.length, 0)
+    assert.equal(r.enqueued ?? 0, 0)
+    await drain()
+    assert.equal(notified.length, 2)
 
     // 关闭服务（模拟重启）
     await server.close()
@@ -221,7 +227,8 @@ test("端到端：poll 跑完只落一次痕、一条消息都不发；同指纹
     try {
       r = await server2.poll()
       assert.equal(r.notified, 0, "重启后不重发")
-      assert.equal(notified.length, 0)
+      await server2.worker.idle()
+      assert.equal(notified.length, 2)
       await server2.close()
     } catch (e) {
       await server2.close()
@@ -246,6 +253,7 @@ test("notify 抛错 → dwsErrors 计数 + 不崩", async () => {
     const book = new Book(cfg.stateFile)
     book.setWatch({ target: "conv-fail", name: "w", issueKey: "demo/demo#1", repo: "demo/demo", number: 1, notifyTo: "boss" })
     const dws = {
+      runningMap: async () => ({ "conv-fail": { running: false } }),
       status: async () => ({ name: "conv-fail", streaming: false, finished: true, chars: 100, head: "H", tail: "T", status: "ok" }),
       info: async () => ({ lastReply: "" }),
       notify: async () => {
@@ -266,8 +274,8 @@ test("notify 抛错 → dwsErrors 计数 + 不崩", async () => {
   }
 })
 
-// 通知停用期间：不管 poll 多少轮，一条消息都不发；同一指纹只落一次痕。
-test("notify 停用：连跑五轮也不调用 notify，同一指纹只落一次痕", async () => {
+// 旧 notify 开关不再吞掉 task.update；Worker 成功 queue 后，同一指纹只消费一次。
+test("任务状态只经 queue：首轮投递后，后续同指纹不重复", async () => {
   const dir = tmpDir()
   let server
   try {
@@ -276,24 +284,25 @@ test("notify 停用：连跑五轮也不调用 notify，同一指纹只落一次
     book.setWatch({ target: "conv-ghost", name: "w", issueKey: "demo/demo#1", repo: "demo/demo", number: 1, notifyTo: "boss" })
     const sent = []
     const dws = {
+      runningMap: async () => ({ "conv-ghost": { running: false } }),
       status: async () => ({ name: "conv-ghost", streaming: false, finished: true, chars: 100, head: "H", tail: "T", status: "ok" }),
-      info: async () => ({ lastReply: '<RESULT>{"status":"done","summary":"做完了"}</RESULT>' }),
-      notify: async (target, text) => {
-        sent.push({ target, text })
-        throw new Error("通知停用期间不该调用 notify")
-      },
+      info: async () => ({ lastReply: "做完了，已提交并通过测试。" }),
+      queue: async (target, text) => { sent.push({ target, text }) },
+      notify: async () => { throw new Error("旧 notify 不应参与任务状态投递") },
     }
     server = await startServer({ cfg, book, dws, log: () => {} })
-    let notified = 0
-    for (let i = 0; i < 5; i++) {
+    await server.poll()
+    await server.worker.idle()
+    await server.worker.runOnce()
+    assert.equal(sent.length, 1)
+    for (let i = 0; i < 4; i++) {
       const r = await server.poll()
-      notified += r.notified
+      assert.equal(r.enqueued ?? 0, 0)
     }
-    assert.equal(sent.length, 0, "五轮 poll 一条都不发")
-    assert.equal(notified, 0, "notify 节点只落痕，不计已通知")
+    assert.equal(sent.length, 1, "同一指纹不重复 queue")
     const led = new Book(cfg.stateFile).notified["conv-ghost"]
     assert.match(led.fingerprint, /^[0-9a-f]{12}$/)
-    assert.equal(led.attempts ?? 0, 0, "不再记发送尝试次数")
+    assert.equal(led.attempts ?? 0, 0)
   } finally {
     if (server) await server.close()
     fs.rmSync(dir, { recursive: true, force: true })

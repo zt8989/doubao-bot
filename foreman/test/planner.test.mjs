@@ -106,13 +106,14 @@ test("plannerText：继续接单带工单列表，not-done 带原因与 retry �
   assert.match(t2, /foreman retry demo 1/)
 })
 
-test("poll：done 跑完推进状态与账本；通知停用期间不催接单、不发消息", async () => {
+test("poll：完成回复只入箱并由 Worker queue，不自动开 PR 或改业务状态", async () => {
   const dir = tmpDir()
   let server
   try {
     const cfg = mkCfg(dir)
     const book = new Book(cfg.stateFile)
     book.setWatch({ target: "conv-work", name: "foreman-demo-1", issueKey: "demo/demo#1", repo: "demo/demo", number: 1, notifyTo: "boss" })
+    book.setIssue("demo/demo#1", { state: "working", title: "测试单" })
 
     const sends = []
     const gitea = {
@@ -122,42 +123,51 @@ test("poll：done 跑完推进状态与账本；通知停用期间不催接单�
       closeIssue: async () => {},
     }
     const dws = {
+      runningMap: async () => ({ "conv-work": { running: false } }),
       status: async () => ({ streaming: false, finished: true, chars: 120, head: "h", tail: "t" }),
-      info: async () => ({ lastReply: `<RESULT>{"status":"done","branch":"fix/issue-1","pr":11,"prUrl":"u","tests":"ok","summary":"改完"}</RESULT>` }),
-      notify: async (target, text) => { sends.push({ target, text }) },
+      info: async () => ({ lastReply: "改完，已 commit，相关测试通过。" }),
+      queue: async (target, text) => { sends.push({ target, text }) },
+      notify: async () => { throw new Error("旧 notify 不应参与任务状态投递") },
     }
     server = await startServer({ cfg, book, dws, gitea, log: () => {} })
 
     const r = await server.poll()
-    assert.equal(sends.length, 0, "通知停用：不催接单、不发结论")
     assert.equal(r.notified, 0)
+    await server.worker.idle()
+    await server.worker.runOnce()
+    assert.equal(sends.length, 1)
     const rec = new Book(cfg.stateFile).issue("demo/demo#1")
-    assert.equal(rec.state, "pr-open", "结论照常推进状态")
-    assert.equal(rec.pr, 11)
+    assert.equal(rec.state, "working", "业务状态由编排判断")
+    assert.equal(rec.pr, undefined)
   } finally {
     if (server) await server.close()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test("poll：不是 done → 推进到 blocked，通知停用期间不发消息", async () => {
+test("poll：阻塞文本不自动改 blocked，Worker 只负责投递", async () => {
   const dir = tmpDir()
   let server
   try {
     const cfg = mkCfg(dir)
     const book = new Book(cfg.stateFile)
     book.setWatch({ target: "conv-work", name: "foreman-demo-1", issueKey: "demo/demo#1", repo: "demo/demo", number: 1, notifyTo: "boss" })
+    book.setIssue("demo/demo#1", { state: "working", title: "测试单" })
     const sends = []
     const gitea = { listPulls: async () => [], listIssues: async () => [issue(2)], mergePr: async () => {}, closeIssue: async () => {} }
     const dws = {
+      runningMap: async () => ({ "conv-work": { running: false } }),
       status: async () => ({ streaming: false, finished: true, chars: 120, head: "h", tail: "t" }),
-      info: async () => ({ lastReply: `<RESULT>{"status":"blocked","summary":"缺依赖"}</RESULT>` }),
-      notify: async (target, text) => { sends.push({ target, text }) },
+      info: async () => ({ lastReply: "还缺依赖，未能完成。" }),
+      queue: async (target, text) => { sends.push({ target, text }) },
+      notify: async () => { throw new Error("旧 notify 不应参与任务状态投递") },
     }
     server = await startServer({ cfg, book, dws, gitea, log: () => {} })
     await server.poll()
-    assert.equal(sends.length, 0, "不发消息")
-    assert.equal(new Book(cfg.stateFile).issue("demo/demo#1").state, "blocked", "状态推进到 blocked")
+    await server.worker.idle()
+    await server.worker.runOnce()
+    assert.equal(sends.length, 1)
+    assert.equal(new Book(cfg.stateFile).issue("demo/demo#1").state, "working", "阻塞原因只交编排判断")
   } finally {
     if (server) await server.close()
     fs.rmSync(dir, { recursive: true, force: true })

@@ -72,13 +72,14 @@ test("mergeDecision：开关、执行方、状态、PR、自证、去重", () =>
   }
 })
 
-test("poll：done+PR 只把 PR 记下来、不入队合并；通知停用期间不发消息", async () => {
+test("poll：不解析旧 RESULT 或自动记 PR；只有显式 runMergeTask 才合并", async () => {
   const dir = tmpDir()
   let server
   try {
     const cfg = mkCfg(dir)
     const book = new Book(cfg.stateFile)
     book.setWatch({ target: "conv-work", name: "foreman-demo-9", issueKey: "demo/demo#9", repo: "demo/demo", number: 9, notifyTo: "boss" })
+    book.setIssue("demo/demo#9", { state: "working", title: "测试单" })
 
     const sends = []
     const merged = []
@@ -88,16 +89,24 @@ test("poll：done+PR 只把 PR 记下来、不入队合并；通知停用期间�
       mergePr: async (repo, pr, opts) => { merged.push({ repo, pr, opts }) },
       closeIssue: async (repo, n) => { closed.push({ repo, n }) },
     }
-    server = await startServer({ cfg, book, dws: mkDws([JSON.stringify(doneResult)], sends), gitea, log: () => {} })
+    const dws = {
+      runningMap: async () => ({ "conv-work": { running: false } }),
+      status: async () => ({ name: "conv-work", streaming: false, finished: true, chars: 200, head: "H", tail: "T", status: "ok" }),
+      info: async () => ({ lastReply: `<RESULT>${JSON.stringify(doneResult)}</RESULT>` }),
+      queue: async (target, text) => { sends.push({ target, text }) },
+    }
+    server = await startServer({ cfg, book, dws, gitea, log: () => {} })
 
-    // 合并通道已取消：poll 不入队、也不合并，只把「PR 已开好」记进账本。
+    // 即使旧会话仍返回 RESULT，poll 也只当普通文本入箱，不自动记 PR、不改状态。
     const r1 = await server.poll()
-    assert.equal(r1.queued, undefined, "不再有合并队列")
-    assert.equal(sends.length, 0, "notify 节点只落痕，不发消息")
+    assert.equal(r1.queued, undefined)
+    await server.worker.idle()
+    await server.worker.runOnce()
+    assert.equal(sends.length, 1)
     assert.equal(merged.length, 0, "poll 不合并")
     const rec = new Book(cfg.stateFile).issue("demo/demo#9")
-    assert.equal(rec.state, "pr-open")
-    assert.equal(rec.pr, 12)
+    assert.equal(rec.state, "working")
+    assert.equal(rec.pr, undefined)
     // 账本里带着实现工作区：合并时要把「工程 + worktree」指出来。
     new Book(cfg.stateFile).setIssue("demo/demo#9", { worktree: "/w/demo/fix-issue-9", branch: "fix/issue-9" })
 
@@ -110,7 +119,7 @@ test("poll：done+PR 只把 PR 记下来、不入队合并；通知停用期间�
     assert.equal(out.ok, true)
     assert.deepEqual(merged[0], { repo: "demo/demo", pr: 12, opts: { style: "merge", deleteBranch: true } })
     assert.deepEqual(closed, [{ repo: "demo/demo", n: 9 }])
-    assert.equal(sends.length, 0, "合并成功不回执、不通知任何人")
+    assert.equal(sends.length, 1, "合并不再额外回执；只保留此前的任务状态投递")
     // 合并结果要指明工程与 worktree（有的话）：回包与日志都带。
     assert.equal(out.repo, "demo/demo", "回包写明工程")
     assert.equal(out.worktree, "/w/demo/fix-issue-9", "回包写明 worktree")

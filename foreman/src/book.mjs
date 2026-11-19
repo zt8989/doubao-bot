@@ -376,10 +376,27 @@ export class Book {
     return true
   }
 
+  // 已入箱的可观察阶段。它不代表已送达；最终回复仍以 markNotified + markIdle 为准。
+  markTaskObserved(target, phase, extra = {}) {
+    this.reload()
+    const key = String(target)
+    const prev = this.notified[key] ?? {}
+    this.notified[key] = {
+      ...prev,
+      observedPhase: String(phase ?? ""),
+      observedAt: nowIso(),
+      observedFingerprint: extra.fingerprint ?? prev.observedFingerprint ?? "",
+    }
+    this.save()
+    return this.notified[key]
+  }
+
   // 记录 (target, 指纹) 已通知，重启后不再重发。
   markNotified(target, fingerprint, extra = {}) {
     this.reload()
+    const prev = this.notified[String(target)] ?? {}
     this.notified[String(target)] = {
+      ...prev,
       fingerprint,
       at: nowIso(),
       phase: extra.phase ?? "",
@@ -387,6 +404,7 @@ export class Book {
       attempts: 0,
       failed: 0,
       lastError: "",
+      ...extra,
     }
     this.save()
     return this.notified[String(target)]

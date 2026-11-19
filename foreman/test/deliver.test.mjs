@@ -41,7 +41,7 @@ test("readFixedPrompt：配置没给路径就用内置提示词；给了路径�
   try {
     // 没配 promptFile：用代码内置的派单提示词（不再要求外部 md）。
     assert.match(readFixedPrompt({}), /派单会话提示词/)
-    assert.match(readFixedPrompt({}), /判合并/)
+    assert.match(readFixedPrompt({}), /最终回复由你统一判断/)
     assert.match(readFixedPrompt({}, "", { lane: "merge" }), /合并助手/)
     assert.match(readFixedPrompt({}, "", { lane: "merge" }), /按通知给出的命令逐条合并/)
     assert.match(readFixedPrompt({}, "", { lane: "merge" }), /不用 `<RESULT>`/)
@@ -160,7 +160,7 @@ test("deliverNewSession：没配固定提示词就用内置的，照常开会话
 
     assert.equal(calls.length, 1)
     assert.match(calls[0].prompt, /派单会话提示词/)
-    assert.match(calls[0].prompt, /判合并/)
+    assert.match(calls[0].prompt, /最终回复由你统一判断/)
     assert.match(calls[0].prompt, /监控项目：\/w\/win-ai-stack/)
     assert.equal(out.convId, "conv-builtin")
   } finally {
@@ -211,7 +211,7 @@ test("prWatchOnce：给了 deliver 就新建会话投递，不再通知已有会
   }
 })
 
-test("端到端：notify 节点只落痕，不新建派单会话、也不碰已有会话", async () => {
+test("端到端：任务回复只 queue 给所属 Agent，不走 deliver.new 或旧 notify", async () => {
   const dir = tmpDir()
   let server
   try {
@@ -245,9 +245,11 @@ test("端到端：notify 节点只落痕，不新建派单会话、也不碰已�
     const notified = []
     const opened = []
     const dws = {
+      runningMap: async () => ({ "conv-e2e": { running: false } }),
       status: async () => ({ streaming: false, finished: true, chars: 500, head: "H", tail: "T", status: "ok" }),
-      info: async () => ({ lastReply: '<RESULT>{"status":"done","summary":"做完了"}</RESULT>' }),
-      notify: async (target, text) => notified.push({ target, text }),
+      info: async () => ({ lastReply: "做完了，已提交并通过测试。" }),
+      queue: async (target, text) => notified.push({ target, text }),
+      notify: async () => { throw new Error("旧 notify 不应参与任务状态投递") },
       openNew: async (arg) => {
         opened.push(arg)
         return { convId: "conv-deliver" }
@@ -256,9 +258,12 @@ test("端到端：notify 节点只落痕，不新建派单会话、也不碰已�
 
     server = await startServer({ cfg, book, dws, log: () => {} })
     const r = await server.poll()
-    assert.equal(r.notified, 0, "notify 节点不再真的发通知")
-    assert.equal(notified.length, 0, "不往已有会话里塞")
-    assert.equal(opened.length, 0, "也不新开派单会话投递")
+    assert.equal(r.notified, 0)
+    await server.worker.idle()
+    await server.worker.runOnce()
+    assert.equal(notified.length, 1, "Worker queue 给所属 Agent")
+    assert.equal(notified[0].target, "boss")
+    assert.equal(opened.length, 0, "不走 deliver.new 新建派单会话")
 
     const b2 = new Book(cfg.stateFile)
     assert.match(b2.notified["conv-e2e"].fingerprint, /^[0-9a-f]{12}$/, "节点照样落痕，指纹落库")

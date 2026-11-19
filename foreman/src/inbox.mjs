@@ -345,13 +345,15 @@ export class AgentWorker {
       const inspectorEvents = events.filter((event) => event.kind === "inspector" || event.kind === "inspector.notice")
       const groups = new Map()
       for (const event of events.filter((event) => event.kind !== "inspector" && event.kind !== "inspector.notice")) {
-        if (!groups.has(event.kind)) groups.set(event.kind, [])
-        groups.get(event.kind).push(event)
+        // 任务事件按条独立完成：不同任务可能属于不同 Agent，一条失败不能把已送达的另一条重投。
+        const groupKey = event.kind === "task.update" ? `${event.kind}:${event.id}` : event.kind
+        if (!groups.has(groupKey)) groups.set(groupKey, { kind: event.kind, batch: [] })
+        groups.get(groupKey).batch.push(event)
       }
-      if (inspectorEvents.length) groups.set("inspector", inspectorEvents)
+      if (inspectorEvents.length) groups.set("inspector", { kind: "inspector", batch: inspectorEvents })
       const errors = []
       let completed = 0
-      for (const [kind, batch] of groups) {
+      for (const { kind, batch } of groups.values()) {
         const ids = batch.map((event) => event.id)
         try {
           const handler = this.handlers[kind]
