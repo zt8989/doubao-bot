@@ -269,6 +269,36 @@ test("handleRequest：Inbox 可观测，Worker 可手动消费一轮", async () 
   }
 })
 
+test("handleRequest：统一 send 入 Outbox，outbox list/run 使用服务内同一实例", async () => {
+  const dir = tmpDir()
+  try {
+    const enqueued = []
+    let runs = 0
+    const outbox = {
+      enqueue(event) { enqueued.push(event); return { id: "out-1", status: "pending", ...event } },
+      list({ limit, status, channel }) { return [{ id: "out-1", limit, status, channel }] },
+      counts() { return { pending: enqueued.length, sent: runs } },
+    }
+    const ctx = {
+      ...mkCtx(mkCfg(dir)),
+      outbox,
+      outboxDispatcher: { runOnce: async () => ({ ok: true, claimed: 1, completed: ++runs }) },
+    }
+    const sent = await handleRequest(ctx, { id: "send", cmd: "send", type: "lark", chatId: "oc_demo", text: "hello", dedupeKey: "notice-1" })
+    assert.equal(sent.ok, true)
+    assert.equal(sent.id, "out-1")
+    assert.equal(enqueued[0].channel, "lark")
+    assert.deepEqual(enqueued[0].payload, { chatId: "oc_demo", userId: "", text: "hello" })
+    const listed = await handleRequest(ctx, { id: "list", cmd: "outbox list", limit: 5, status: "pending", channel: "lark" })
+    assert.equal(listed.messages[0].limit, 5)
+    const ran = await handleRequest(ctx, { id: "run", cmd: "outbox run" })
+    assert.equal(ran.completed, 1)
+    assert.deepEqual(ran.counts, { pending: 1, sent: 1 })
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("handleRequest：watch add/list/remove 落地到 book", async () => {
   const dir = tmpDir()
   try {

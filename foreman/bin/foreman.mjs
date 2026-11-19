@@ -36,7 +36,10 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman pr assign <N> --repo R           检查智能体分配一条他人 PR 给合并助手
   foreman pr open --repo R --base <基线> --head <分支> --title <标题> [--body <正文>] [--issue <单号>] [--issue-repo <工单所在仓库>] [--ui]
   foreman pr merge <N> --repo R [--issue <单号>] [--style merge|rebase|squash] [--approved-by <人>] [--ui]
-  foreman mail send --to <邮箱>[,...] --subject <主题> [--body <正文>]
+  foreman send --type mail --to <邮箱>[,...] --subject <主题> [--body <正文>]
+  foreman send --type lark (--chat-id <oc_...>|--user-id <ou_...>) (--text <正文>|--markdown <正文>)
+  foreman outbox list [--limit <N>] [--status <状态>] [--channel mail|lark]
+  foreman outbox run                       手动让 Dispatcher 消费一轮（排障用）
   foreman mail request <owner/repo>#<N> [--url <PR链接>] [--issue <owner/repo>#<N> --title <标题>]
   foreman mail poll
   foreman mail requests
@@ -496,19 +499,9 @@ function cmdRetry(pos, flags) {
 async function cmdMail(pos, flags) {
   const cfg = loadConfig(flags.config)
   const sub = pos.shift() || "requests"
-  const SUBS = ["send", "request", "poll", "requests", "approve", "reject"]
+  const SUBS = ["request", "poll", "requests", "approve", "reject"]
   if (!SUBS.includes(sub)) throw new Error(`用法：foreman mail ${SUBS.join("|")} …`)
   const port = await resolvePort(cfg)
-
-  if (sub === "send") {
-    const to = strFlag(flags.to)
-    const subject = strFlag(flags.subject)
-    if (!to) throw new Error("mail send 要 --to <邮箱>（多个用逗号分隔）")
-    if (!subject) throw new Error("mail send 要 --subject <主题>")
-    const r = await callRaw(port, { id: "cli", cmd: "mail send", to, subject, body: strFlag(flags.body) }, 300000)
-    if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
-    return out({ ok: true, ...r })
-  }
 
   if (sub === "request") {
     const key = String(pos[0] ?? "").trim()
@@ -695,6 +688,33 @@ async function cmdInbox(pos, flags) {
   return out({ ok: true, ...r })
 }
 
+async function cmdSend(pos, flags) {
+  const cfg = loadConfig(flags.config)
+  const type = strFlag(flags.type).toLowerCase()
+  if (!["mail", "lark"].includes(type)) throw new Error("用法：foreman send --type mail|lark …")
+  const r = await callRaw(await resolvePort(cfg), {
+    id: "cli", cmd: "send", type,
+    to: strFlag(flags.to), subject: strFlag(flags.subject), body: strFlag(flags.body),
+    chatId: strFlag(flags["chat-id"]), userId: strFlag(flags["user-id"]),
+    text: strFlag(flags.text), markdown: strFlag(flags.markdown),
+    dedupeKey: strFlag(flags["dedupe-key"]),
+  }, 60000)
+  if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
+  return out({ ok: true, ...r })
+}
+
+async function cmdOutbox(pos, flags) {
+  const action = String(pos[0] ?? "list")
+  if (!["list", "run"].includes(action)) throw new Error("用法：foreman outbox list|run …")
+  const cfg = loadConfig(flags.config)
+  const r = await callRaw(await resolvePort(cfg), {
+    id: "cli", cmd: `outbox ${action}`,
+    limit: Number(flags.limit ?? 100), status: strFlag(flags.status), channel: strFlag(flags.channel),
+  }, 300000)
+  if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
+  return out({ ok: true, ...r })
+}
+
 async function cmdWorker(pos, flags) {
   const action = String(pos[0] ?? "run")
   if (action !== "run") throw new Error("用法：foreman worker run")
@@ -806,6 +826,10 @@ async function main() {
       return cmdInspect(pos, flags)
     case "inbox":
       return cmdInbox(pos, flags)
+    case "send":
+      return cmdSend(pos, flags)
+    case "outbox":
+      return cmdOutbox(pos, flags)
     case "worker":
       return cmdWorker(pos, flags)
     case "dispatch":

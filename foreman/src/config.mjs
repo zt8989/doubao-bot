@@ -158,6 +158,13 @@ export const DEFAULTS = {
     retrySeconds: 30,
     leaseSeconds: 900,
   },
+  outbox: {
+    pollMs: 1000,
+    retrySeconds: 30,
+    leaseSeconds: 120,
+    maxAttempts: 8,
+  },
+  lark: { bin: "lark-cli", as: "user" },
   // 定时检查的工作时间窗：只在工作日 8:30–18:30 跑轮询（enabled:false 或整段省略 = 全天跑）。
   // offUntil 是临时闭嘴时间点，到点自动恢复。
   workHours: { enabled: false, days: [1, 2, 3, 4, 5], start: "08:30", end: "18:30", offUntil: "" },
@@ -241,6 +248,14 @@ export function loadConfig(explicit) {
     cfg.inspector[key] = n
   }
   cfg.repos = normalizeRepos(cfg)
+  for (const key of ["pollMs", "retrySeconds", "leaseSeconds", "maxAttempts"]) {
+    const n = Number(cfg.outbox[key])
+    if (!Number.isFinite(n) || n <= 0) throw new Error(`配置项 outbox.${key} 要是正数，现在是：${cfg.outbox[key]}`)
+    cfg.outbox[key] = n
+  }
+  cfg.lark.bin = String(cfg.lark.bin || "lark-cli").trim()
+  cfg.lark.as = String(cfg.lark.as || "user").trim()
+  if (!["user", "bot"].includes(cfg.lark.as)) throw new Error(`配置项 lark.as 只支持 user|bot，现在是：${cfg.lark.as}`)
   // 身份（自己的 Gitea 账号）与基线都从配置来：me 与 ignoreAuthors 互相补齐，缺了就留空。
   const me = String(cfg.pickup?.me ?? "").trim() || String((cfg.prWatch?.ignoreAuthors ?? []).map(String).find((x) => x.trim()) ?? "").trim()
   if (me) {

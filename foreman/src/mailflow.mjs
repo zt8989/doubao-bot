@@ -149,6 +149,94 @@ function acceptanceBody({ repo, pr, url, issueKey, title }) {
   return lines.join("\n")
 }
 
+// Dispatcher 确认外发后才推进验收账本；Outbox 入队本身不算已发送。
+export async function mailAcceptanceSent(ctx, event) {
+  const acceptance = event?.payload?.acceptance
+  if (!acceptance?.key) return { ok: true, skipped: "not-acceptance" }
+  const book = new Book(ctx.cfg.stateFile)
+  const key = String(acceptance.key)
+  const prev = book.mail.requests[key] ?? {}
+  if (["approved", "merged", "rejected"].includes(prev.status)) return { ok: true, skipped: "terminal" }
+  if (Number(prev.lastDeliveredOutboxId ?? 0) === Number(event.id)) return { ok: true, skipped: "already-recorded" }
+  if (Number(prev.pendingOutboxId ?? 0) && Number(prev.pendingOutboxId) !== Number(event.id)) {
+    return { ok: true, skipped: "superseded" }
+  }
+  const tried = new Set((prev.tried ?? []).map(String))
+  for (const email of event.payload.to ?? []) tried.add(email)
+  book.markMailRequest(key, {
+    status: "waiting",
+    to: (event.payload.to ?? []).join("、"),
+    subject: String(event.payload.subject ?? ""),
+    sentAt: prev.sentAt ?? nowIso(),
+    lastSentAt: nowIso(),
+    sentCount: Number(prev.sentCount ?? 0) + 1,
+    reminders: Number(prev.reminders ?? 0) + (acceptance.reminder ? 1 : 0),
+    tried: [...tried],
+    error: "",
+    pendingOutboxId: 0,
+    lastDeliveredOutboxId: Number(event.id),
+  })
+  ctx.log?.(`验收邮件已发送：${key} · Outbox ${event.id}`)
+  return { ok: true, key }
+}
+
+export async function mailAcceptanceFailed(ctx, event, error) {
+  const acceptance = event?.payload?.acceptance
+  if (!acceptance?.key) return { ok: true, skipped: "not-acceptance" }
+  const book = new Book(ctx.cfg.stateFile)
+  const key = String(acceptance.key)
+  const prev = book.mail.requests[key] ?? {}
+  if (["approved", "merged", "rejected"].includes(prev.status)) return { ok: true, skipped: "terminal" }
+  if (Number(prev.pendingOutboxId ?? 0) !== Number(event.id)) return { ok: true, skipped: "superseded" }
+  book.markMailRequest(key, {
+    status: "send-failed",
+    pendingOutboxId: 0,
+    error: String(error?.message ?? error).slice(0, 300),
+    lastTryAt: nowIso(),
+  })
+  return { ok: false, key, error: String(error?.message ?? error) }
+}
+
+async function requestAcceptanceOutbox(ctx, { key, base, picked, subject, body, reminder, dedupeKey }) {
+  const payload = {
+    to: picked.list, subject, body,
+    acceptance: { key, reminder: reminder === true },
+  }
+  let event
+  try {
+    event = ctx.outbox.enqueue({
+      channel: "mail", payload, dedupeKey,
+      maxAttempts: Number(ctx.cfg.outbox?.maxAttempts ?? 8),
+    })
+  } catch (error) {
+    new Book(ctx.cfg.stateFile).markMailRequest(key, {
+      ...base, status: "send-failed", error: String(error.message).slice(0, 300), lastTryAt: nowIso(), subject,
+    })
+    return { ok: false, skipped: "send-failed", tag: base.tag, error: error.message }
+  }
+  const book = new Book(ctx.cfg.stateFile)
+  book.setMailRr(picked.index + 1)
+  if (event.status === "sent") {
+    await mailAcceptanceSent(ctx, { ...event, payload })
+    return { ok: true, tag: base.tag, to: picked.list.join("、"), subject, reminder, outboxId: event.id, status: "sent" }
+  }
+  if (event.status === "failed") {
+    book.markMailRequest(key, { ...base, status: "send-failed", error: "Outbox 此前发送失败", lastTryAt: nowIso(), subject })
+    return { ok: false, skipped: "send-failed", tag: base.tag, error: "Outbox 此前发送失败" }
+  }
+  book.markMailRequest(key, {
+    ...base,
+    status: "queued",
+    to: picked.list.join("、"),
+    subject,
+    pendingOutboxId: Number(event.id),
+    queuedAt: nowIso(),
+    error: "",
+  })
+  ctx.log?.(`验收邮件已写入 Outbox：${key} → ${picked.list.join("、")} · 事件 ${event.id}`)
+  return { ok: true, queued: true, tag: base.tag, to: picked.list.join("、"), subject, reminder, outboxId: event.id, status: event.status }
+}
+
 // 发/补发一封验收邮件，记进账本 mail.requests[<repo>#<pr>]。
 // 没有真收件人（testers 还是占位符）只记 no-recipient，不报错、不挡流程。
 export async function requestAcceptance(ctx, opts = {}) {
@@ -183,6 +271,9 @@ export async function requestAcceptance(ctx, opts = {}) {
   if (prev?.status === "waiting" && opts.force !== true) {
     return { ok: true, skipped: "already-sent", tag, to: prev.to }
   }
+  if (prev?.status === "queued" && prev.pendingOutboxId) {
+    return { ok: true, skipped: "already-queued", queued: true, outboxId: Number(prev.pendingOutboxId), tag, to: prev.to }
+  }
 
   // 只有「本来就在等回复」的补发才算催办；首次补发（之前没真邮箱 / 发失败）按正常验收发。
   const reminder = opts.force === true && String(prev?.status ?? "") === "waiting"
@@ -191,6 +282,13 @@ export async function requestAcceptance(ctx, opts = {}) {
   const body = reminder
     ? `${acceptanceBody(base)}\n\n——\n这是催办：上一位同学还没回复，麻烦也帮忙看一下。`
     : acceptanceBody(base)
+  if (typeof ctx.outbox?.enqueue === "function") {
+    return requestAcceptanceOutbox(ctx, {
+      key, base, picked, subject, body, reminder,
+      // 自动入口可去重；显式 force 表示调用方要再发一封，生成新 Outbox 事件。
+      dedupeKey: opts.force === true ? "" : `mail:acceptance:${key}:${tag}:initial`,
+    })
+  }
   try {
     await mailDriverOf(ctx).send({ to: picked.list, subject, body })
   } catch (e) {
@@ -398,6 +496,7 @@ async function sendAcceptanceReminders(ctx, driver) {
   let sent = 0
   for (const [key, req] of Object.entries(new Book(cfg.stateFile).mail.requests ?? {})) {
     if (String(req?.status ?? "") !== "waiting") continue
+    if (req.pendingOutboxId) continue
     if (Number(req.reminders ?? 0) >= max) continue
     const last = Date.parse(String(req.lastSentAt ?? req.sentAt ?? ""))
     if (!Number.isFinite(last) || Date.now() - last < minutes * 60_000) continue
@@ -406,10 +505,30 @@ async function sendAcceptanceReminders(ctx, driver) {
     if (!picked.list.length) continue
     const subject = String(req.subject ?? "").replace(/\s*（催办）\s*/g, " ")
     const body = `${acceptanceBody({ repo: req.repo, pr: req.pr, url: req.url, issueKey: req.issueKey, title: req.title })}\n\n——\n这是催办：上一位同学还没回复，麻烦也帮忙看一下。`
+    const reminderSubject = subject.replace(/\s*\[FM-[0-9a-f]{8}\]\s*$/i, "") + `（催办） ${tagMarker(req.tag)}`
     try {
+      if (typeof ctx.outbox?.enqueue === "function") {
+        const event = ctx.outbox.enqueue({
+          channel: "mail",
+          payload: { to: picked.list, subject: reminderSubject, body, acceptance: { key, reminder: true } },
+          dedupeKey: `mail:acceptance:${key}:${req.tag}:reminder-${Number(req.reminders ?? 0) + 1}`,
+          maxAttempts: Number(cfg.outbox?.maxAttempts ?? 8),
+        })
+        book.setMailRr(picked.index + 1)
+        if (event.status === "sent") {
+          const applied = await mailAcceptanceSent(ctx, { ...event, payload: { to: picked.list, subject: reminderSubject, body, acceptance: { key, reminder: true } } })
+          if (!applied.skipped) sent++
+          continue
+        }
+        if (event.status === "failed") continue
+        book.markMailRequest(key, { pendingOutboxId: Number(event.id), queuedAt: nowIso(), error: "" })
+        ctx.log?.(`验收催办已写入 Outbox：${key} → ${picked.list.join("、")} · 事件 ${event.id}`)
+        sent++
+        continue
+      }
       await driver.send({
         to: picked.list,
-        subject: subject.replace(/\s*\[FM-[0-9a-f]{8}\]\s*$/i, "") + `（催办） ${tagMarker(req.tag)}`,
+        subject: reminderSubject,
         body,
       })
       book.setMailRr(picked.index + 1)
@@ -456,6 +575,14 @@ export async function acceptanceGate(ctx, { repo, pr, issueKey = "", url = "", t
       allow: false,
       reason: "acceptance-rejected",
       message: `${key} 的 UI 验收被驳回${why ? `：${why}` : ""}；先让执行会话修正，重新验收通过后再合并`,
+      request: req,
+    }
+  }
+  if (req?.status === "queued") {
+    return {
+      allow: false,
+      reason: "acceptance-queued",
+      message: `${key} 涉及 UI，验收邮件已写入 Outbox（事件 ${req.pendingOutboxId || "?"}），正在等待实际发送；发送后会继续等测试同学回复`,
       request: req,
     }
   }

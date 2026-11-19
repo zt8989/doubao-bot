@@ -129,6 +129,23 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 - `watch poll` 保留为检查智能体/人工按需入口：观察已登记执行会话，把状态变化与最终回复写入 `task.update`，由 Worker queue 给所属编排。它不解析 RESULT、不自动 push/开 PR、不推进工单业务状态。
 - **notify 节点不再承担执行会话投递**：其暂停状态仍会阻止任务事件入箱；成功投递以 Inbox done、Worker 日志和账本 `steers/notified` 为准，业务结论由编排判断。
 
+### Outbox：邮件与飞书统一外发
+
+业务代码只把外发意图写入同库独立表 `agent_outbox`；同一个 Node 进程里的单 Dispatcher 收到写入后直接唤醒，串行调用 `agently-cli` 或 `lark-cli`，1 秒轮询只补漏与恢复重启。Outbox 与 Agent Inbox 分工不同：Inbox 把事件交给 Agent，Outbox 把消息送到外部通道。
+
+```bash
+foreman send --type mail --to a@x.com,b@y.com --subject "发布结果" --body "已完成"
+foreman send --type lark --chat-id oc_xxx --text "已完成"
+foreman send --type lark --user-id ou_xxx --markdown "## 发布结果\n\n- 已完成"
+foreman outbox list [--limit 100] [--status pending|processing|sent|failed] [--channel mail|lark]
+foreman outbox run                 # 排障时手动消费一轮
+```
+
+- `send` 返回 `pending` 只表示已持久化，不表示外部已收到；`sent` 才表示 CLI 发送成功。失败默认 30 秒后重试，最多 `outbox.maxAttempts`（默认 8）次，最终记 `failed`；过期 processing 租约重启后恢复。
+- 可选 `--dedupe-key <稳定键>` 跨全部状态去重。Lark 使用 `fm-<事件UUID>` 作为供应端幂等键；邮件没有供应端幂等键。若进程恰好在外部已发送、本地尚未写 sent 时崩溃，仍可能重复，不能宣称绝对 exactly-once。
+- 验收邮件先记 `queued`，Dispatcher 发送成功后才记 `waiting` 并开放回复等待；最终失败记 `send-failed`。催办在上一封仍 pending 时不会重复入队。
+- 统一入口只有 `foreman send --type mail|lark`；旧 `foreman mail send` 已删除，也不提供 `foreman lark send`。Lark 当前支持纯文本/Markdown，接收目标二选一：`--chat-id` 或 `--user-id`，默认用户身份（`lark.as: "user"`）。
+
 ### 起与停
 
 ```bash
@@ -170,11 +187,18 @@ foreman worker run             # 手动消费一轮（排障；正常由 wake/�
     "schedulePollMs": 1000,
     "retrySeconds": 30,
     "leaseSeconds": 900
-  }
+  },
+  "outbox": {
+    "pollMs": 1000,
+    "retrySeconds": 30,
+    "leaseSeconds": 120,
+    "maxAttempts": 8
+  },
+  "lark": { "bin": "lark-cli", "as": "user" }
 }
 ```
 
-Inbox 与 ConsoleStore 共用 `~/.foreman/console.db` 的同一连接，新增 `agent_inbox` / `agent_schedules` 两表；不使用 SQLite Trigger 唤醒 Node，也不另起 Worker 进程。
+Inbox、Outbox 与 ConsoleStore 共用 `~/.foreman/console.db` 的同一连接，使用 `agent_inbox` / `agent_schedules` / `agent_outbox` 独立表；不使用 SQLite Trigger 唤醒 Node，也不另起 Worker 或 Dispatcher 进程。
 
 - 服务启动时把实际端口写成 `~/.foreman/service.port`（纯数字一行），CLI 就读这个文件。
 - CLI 走 `POST /api/rpc`（body 就是原来那一帧 `{id, cmd, ...}`），探活走 `GET /api/ping`。
@@ -331,7 +355,8 @@ UI 改动的 PR 不能直接合。foreman 把 PR 链接发到测试同学邮箱�
 foreman mail requests                # 看每条验收请求：发给谁、状态、几封回复
 foreman mail poll                     # 立刻收一轮（不等下一个 cron 点）
 foreman mail request <repo>#<N> --url <PR链接>   # 补发/催办一条
-foreman mail send --to a@x.com,b@y.com --subject "…" --body "…"   # 手动发一封（不进账本）
+foreman send --type mail --to a@x.com,b@y.com --subject "…" --body "…"   # 手动入 Outbox（不进验收账本）
+foreman send --type lark --chat-id oc_xxx --text "…"                  # 飞书群聊；私聊改用 --user-id ou_xxx
 foreman mail approve <repo>#<N> --by <人> --note "当面验收通过"
 foreman mail reject  <repo>#<N> --by <人> --note "按钮错位"
 foreman doctor                        # 开了邮件会顺带查 agently-cli 授权与验收人
@@ -372,7 +397,9 @@ foreman pr merge <N> --repo R --approved-by <人>   # 用户当面验收、明�
 foreman mail requests            # 验收请求与回复状态
 foreman mail poll                # 立刻收一轮回复
 foreman mail request <repo>#<N> [--url <PR链接>]    # 补发/催办验收邮件
-foreman mail send --to <邮箱> --subject "…" --body "…"   # 手动发一封
+foreman send --type mail --to <邮箱> --subject "…" --body "…"      # 手动写入 Outbox
+foreman send --type lark (--chat-id <oc_…>|--user-id <ou_…>) (--text "…"|--markdown "…")
+foreman outbox list [--limit 100]                                  # 看 pending/sent/failed 与重试错误
 foreman mail approve|reject <repo>#<N> --by <人> [--note "…"]
 foreman issue comment <N> --repo R --body "…"   # 评论工单（记账）
 foreman issue settle <N> --repo R --note "完成依据"  # 仅本地完成：不关 Gitea、不清 worktree、不合 PR

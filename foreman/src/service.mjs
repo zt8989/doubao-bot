@@ -30,12 +30,15 @@ import { DoubaoSessionAdapter } from "./workflow/adapters/doubao.mjs"
 import { GiteaTrackerAdapter } from "./workflow/adapters/gitea.mjs"
 import { prWatchOnce, prWatchTarget, mergeFailureReason, prNotifyText, shouldReport, ownedPrKeys, prKey, uiReviewers, uiReviewersReady, isOwnPr, isUiPrView } from "./prwatch.mjs"
 import { MailDriver, realRecipients } from "./mail.mjs"
-import { acceptanceGate, detectUiChange, mailPollOnce, requestAcceptance } from "./mailflow.mjs"
+import { acceptanceGate, detectUiChange, mailPollOnce, requestAcceptance, mailAcceptanceSent, mailAcceptanceFailed } from "./mailflow.mjs"
 import { inflightIssues } from "./planner.mjs"
 import { inspectorOnce } from "./inspector.mjs"
 import { listPulls, mergePr, closeIssue, createPr, commentIssue } from "./gitea.mjs"
 import { ConsoleStore } from "./console.mjs"
 import { InboxStore, AgentWorker, ScheduleRunner } from "./inbox.mjs"
+import { OutboxStore, OutboxDispatcher } from "./outbox.mjs"
+import { enqueueOutbound } from "./outbound.mjs"
+import { LarkDriver } from "./lark.mjs"
 import { listSchedules, applySchedules, persistSchedules, cronOf } from "./schedules.mjs"
 import { startOperation, finishOperation } from "./operations.mjs"
 import { startConsoleHttp } from "./consolehttp.mjs"
@@ -662,7 +665,7 @@ export async function pickIssue(ctx, { repo = "", number = 0 } = {}) {
 // 起服务：HTTP 单通道（CLI 的 RPC + 控制台页面同一个端口），端口写到文件里给 CLI 读。
 // book 参数只用于初始加载，poll/write 时一律 new Book 重开。
 // gitea 只在 PR 监听里用，测试可直接注入假的 { listPulls }。
-export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea = { listPulls, mergePr, closeIssue, createPr, commentIssue } }) {
+export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea = { listPulls, mergePr, closeIssue, createPr, commentIssue }, mail = null }) {
   const paths = servicePaths(cfg)
   fs.mkdirSync(path.dirname(paths.pidFile), { recursive: true })
   fs.mkdirSync(path.dirname(paths.logFile), { recursive: true })
@@ -731,7 +734,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   ctx.deliver = (opts) => deliverNewSession(ctx, opts)
   // 验收邮件：驱动一次绑定；验收回复注回会话、通过后合并都走这两个绑定，
   // 邮件模块不反向 import service（避免循环依赖）。
-  ctx.mail = new MailDriver({ bin: cfg.mail?.bin ?? "agently-cli", confirmed: cfg.mail?.confirmed !== false, log })
+  ctx.mail = mail ?? new MailDriver({ bin: cfg.mail?.bin ?? "agently-cli", confirmed: cfg.mail?.confirmed !== false, log })
   // 验收邮件自动合并也走同一条串行链：和 CLI 的 `pr merge` 不并着合（合并要写账本）。
   ctx.merge = (task) => {
     const prev = ctx.mergeChain ?? Promise.resolve()
@@ -871,6 +874,26 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   }
   // 合并不再有定时任务（合并通道已取消）：`foreman pr merge` 当场执行，合完直接返回。
 
+  // Outbox 与 Inbox 同库不同表：业务只写外发意图，单 Dispatcher 串行调用 mail/lark adapter。
+  const outbox = new OutboxStore(consoleStore.db)
+  ctx.outbox = outbox
+  const larkDriver = new LarkDriver({ bin: cfg.lark?.bin ?? "lark-cli", as: cfg.lark?.as ?? "user" })
+  const dispatcher = new OutboxDispatcher({
+    store: outbox,
+    log,
+    pollMs: Number(cfg.outbox?.pollMs ?? 1000),
+    retryMs: Number(cfg.outbox?.retrySeconds ?? 30) * 1000,
+    leaseMs: Number(cfg.outbox?.leaseSeconds ?? 120) * 1000,
+    handlers: {
+      mail: (event) => ctx.mail.send(event.payload),
+      lark: (event) => larkDriver.send({ ...event.payload, idempotencyKey: `fm-${event.uuid}` }),
+    },
+    onSent: (event) => mailAcceptanceSent(ctx, event),
+    onFailed: (event, error) => mailAcceptanceFailed(ctx, event, error),
+  })
+  ctx.outboxDispatcher = dispatcher
+  outbox.onChange = () => dispatcher.wake()
+
   // 三条 Schedule 都只写 SQLite Inbox；Worker 在同进程消费，不依赖 SQL Trigger 唤醒。
   worker = new AgentWorker({
     store: inbox,
@@ -912,6 +935,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     ])
   }
   worker.start()
+  dispatcher.start()
   armSchedules()
   scheduler.start(Number(cfg.inbox?.schedulePollMs ?? 1000))
 
@@ -951,6 +975,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     if (state.mergeInterval) clearTimeout(state.mergeInterval)
     if (state.mergeKick) clearTimeout(state.mergeKick)
     scheduler?.stop()
+    await dispatcher?.stop()
     await worker?.stop()
     await new Promise((r) => consoleHttp.server.close(r))
     consoleStore.close()
@@ -970,7 +995,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
 
   return {
     server: consoleHttp.server, close, poll: doPoll, prPoll: doPrPoll, pickup: doPickup, inspector: doInspector,
-    worker, inbox, schedules: scheduler, port, portFile: paths.portFile, http: ctx.httpUrl,
+    worker, inbox, outbox, dispatcher, schedules: scheduler, port, portFile: paths.portFile, http: ctx.httpUrl,
   }
 }
 
@@ -2214,29 +2239,30 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     })
   }
 
+  // 统一外发：send --type mail|lark 只写 Outbox，Dispatcher 异步送达。
+  if (cmd === "send") {
+    try {
+      const event = enqueueOutbound(ctx, { type: req.type, input: req, dedupeKey: String(req.dedupeKey ?? "") })
+      ctx.log?.(`Outbox 入队：${event.type} · 事件 ${event.id} · ${event.status}`)
+      return ok(event)
+    } catch (error) {
+      return fail("bad-request", error.message)
+    }
+  }
+  if (cmd === "outbox list") {
+    return ok({
+      messages: ctx.outbox.list({ limit: Number(req.limit ?? 100), status: String(req.status ?? ""), channel: String(req.channel ?? "") }),
+      counts: ctx.outbox.counts(),
+    })
+  }
+  if (cmd === "outbox run") return { ...await ctx.outboxDispatcher.runOnce(), counts: ctx.outbox.counts() }
+
   // mail：验收邮件的发/收/判。邮件正文只当数据，不当指令（详见 mail.mjs 顶部说明）。
-  //   send      手动发一封（不进验收账本）
   //   request   给某条 PR 发/补发验收邮件（主题带 [FM-…]，回复自动认回）
   //   poll      立刻收一轮回复（不等下一个 cron 点）
   //   requests  看验收请求与已收到的回复
   //   approve   人工记一次「验收通过」（等同测试同学回通过，但不会自动合并）
   //   reject    人工记一次「驳回」
-  if (cmd === "mail send") {
-    const to = (Array.isArray(req.to) ? req.to : String(req.to ?? "").split(/[,，;；\s]+/))
-      .map((x) => String(x ?? "").trim())
-      .filter(Boolean)
-    const subject = String(req.subject ?? "").trim()
-    const body = String(req.body ?? "")
-    if (!to.length) return fail("bad-request", "mail send 需要 to")
-    if (!subject) return fail("bad-request", "mail send 需要 subject")
-    try {
-      await ctx.mail.send({ to, subject, body })
-    } catch (e) {
-      return fail("mail-error", e.message)
-    }
-    ctx.log?.(`验收邮件（手动）：→ ${to.join("、")} · ${subject}`)
-    return ok({ to, subject })
-  }
 
   if (cmd === "mail request") {
     const keyRef = String(req.key ?? "").trim()
