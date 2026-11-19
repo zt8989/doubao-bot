@@ -25,16 +25,18 @@ export async function inspectionSnapshot(ctx) {
   if (typeof ctx.dws?.runningMap === "function") {
     try { running = await ctx.dws.runningMap() } catch { running = null }
   }
-  const issues = Object.entries(book.issues ?? {})
+  const active = Object.entries(book.issues ?? {})
     .filter(([, rec]) => ACTIVE_STATES.has(String(rec?.state ?? "")))
     .sort(([a], [b]) => a.localeCompare(b))
-    .slice(0, 60)
-    .map(([key, rec]) => issueLine(key, rec, running))
+  const issues = active.slice(0, 60).map(([key, rec]) => issueLine(key, rec, running))
+  const maxRunning = Number(ctx.cfg.pickup?.maxRunning ?? 2)
+  const remaining = Math.max(0, maxRunning - active.length)
   const cleanup = cleanableIssues(book)
   return [
     "每轮先执行 `foreman tasks --json`；只对 state=done/cleaned 的残留任务执行 `foreman clean --all`，及时清理已合并、已关闭工单的工作区与会话。working/pr-open 等非终态不得清理。",
     `已收口待清理快照：${cleanup.length ? cleanup.join("、") : "空。"}`,
-    `在飞上限：${Number(ctx.cfg.pickup?.maxRunning ?? 2)}；本轮只按现有优先级补足空余槽位。`,
+    `在飞容量：${active.length}/${maxRunning}；还可新接：${remaining}。这是全部未收口工单的合计上限，不是本轮新增额度。`,
+    "dry-run 只用于确认候选优先级，不得采用它的空余槽位；达到上限时禁止 run/pickup/hand/orch start/dispatch 接新单。handed 也占槽，每次接单后重新计算。",
     issues.length ? "未收口工单快照：" : "未收口工单快照：空。",
     ...issues,
   ].join("\n")
@@ -112,7 +114,7 @@ export async function inspectorOnce(ctx, { now = new Date(), force = false } = {
     const snapshot = await inspectionSnapshot(ctx)
     const text = [
       "【Foreman · 检查智能体 · 10分钟巡检】",
-      "请检查任务是否正常运行；有空余容量时按优先级接单。状态处理由你决策，不要机械重派。",
+      "请检查任务是否正常运行；先按 tasks 核对全部在飞工单总数，达到上限时禁止接新，只有仍有容量才按优先级接单。状态处理由你决策，不要机械重派。",
       snapshot,
     ].join("\n\n")
     const out = await deliver(ctx, rec, text, { now, action, reason: stale ? "stale-24h" : "" })

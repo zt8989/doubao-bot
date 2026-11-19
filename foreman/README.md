@@ -116,7 +116,7 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 
 - 每 `inspector.intervalSeconds`（默认 600 秒）向同一条检查会话 `steer` 一次；首次 `openNew` 创建。
 - 以最后一次成功投递为轮换基准；从未成功时从首次失败计时，连续 `inspector.recreateAfterHours`（默认 24 小时）未成功才新建检查会话。
-- 定时器只投递，不读取工单状态自行派单。检查智能体负责健康检查、按现有优先级与 `pickup.maxRunning` 接单、必要时 `hand --fresh` 重派独立编排、用 `issue settle` 修复本地完成状态，以及每轮通过 `foreman tasks --json` 找出 `done/cleaned` 残留并执行 `foreman clean --all`。
+- 定时器只投递，不读取工单状态自行派单。检查智能体负责健康检查、必要时 `hand --fresh` 重派独立编排、用 `issue settle` 修复本地完成状态，以及每轮通过 `foreman tasks --json` 找出 `done/cleaned` 残留并执行 `foreman clean --all`。接单前必须独立统计全部在飞工单：`planned/handed/working/pr-open/needs-human/blocked/failed/escalated` 都占槽，合计最多 `pickup.maxRunning`（默认 2），不是每轮新增 2 张；dry-run 只看候选优先级，不能作为空余容量依据。达到上限后禁止用 `run/pickup/hand/orch start/dispatch` 接新单，每次接单后重新计数。
 - `watch poll` 保留为检查智能体/人工按需入口：处理已收工执行会话、推进账本、push/开 PR、steer 回本单编排。
 - **notify 节点当前只落痕、不投递**：判定照做、指纹照记，但不新建会话、不 `dws notify`。
 
