@@ -791,12 +791,24 @@ class FmSchedules extends LitElement {
     if (input) emit(this, "schedule-save", { id, cron: input.value.trim() })
   }
   render() {
-    const rows = this.schedules || []
+    const allRows = this.schedules || []
+    const workWindow = allRows.find((s) => s.id === "workHours")
+    const rows = allRows.filter((s) => s.id !== "workHours")
     return html`
       <section class="panel work-hours-panel">
         <div class="panel-head">
           <h2>工作时间</h2>
-          <div class="panel-side"><span class="hint">保存后立即生效，无需重启服务</span></div>
+          <div class="panel-side">
+            ${workWindow ? html`
+              <span class=${"badge " + (workWindow.enabled ? "notified" : "self")}>${workWindow.enabled ? "运行中" : "已停止"}</span>
+              <button
+                class=${workWindow.enabled ? "ghost danger" : "ghost"}
+                ?disabled=${this.busy === workWindow.id}
+                @click=${() => emit(this, "schedule-toggle", { id: workWindow.id, enabled: !workWindow.enabled })}
+              >${this.busy === workWindow.id ? "…" : workWindow.enabled ? "停止" : "开启"}</button>
+            ` : ""}
+            <span class="hint">保存后立即生效，无需重启服务</span>
+          </div>
         </div>
         <div class="work-hours-body">
           <div class="work-hours-form">
@@ -813,6 +825,13 @@ class FmSchedules extends LitElement {
               ${this.busy === "work-hours" ? "保存中…" : "保存工作时间"}
             </button>
           </div>
+          ${workWindow ? html`
+            <div class="work-hours-status">
+              <span class=${"dot " + (workWindow.enabled ? "on" : "off")}></span>
+              <span>${workWindow.detail}</span>
+              ${workWindow.lastResult ? html`<span class="pr-note">${workWindow.lastResult}</span>` : ""}
+            </div>
+          ` : ""}
           <div class="hint">适用于工作日自动派单与相关定时任务；开始时间需早于结束时间。</div>
           ${this.note ? html`<div class="sched-note">${this.note}</div>` : ""}
         </div>
