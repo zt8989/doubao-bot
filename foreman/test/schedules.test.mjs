@@ -24,7 +24,7 @@ test("listSchedules：保留 PR/邮件，检查智能体取代自动接单与执
   assert.equal(inspector.enabled, true)
   assert.equal(inspector.cron, "*/10 * * * *")
   assert.equal(inspector.runLabel, "立即巡检")
-  assert.match(inspector.detail, /steer 同一检查会话/)
+  assert.match(inspector.detail, /queue 同一检查会话/)
   assert.match(inspector.detail, /24/)
   assert.equal(rows.find((r) => r.id === "prWatch").enabled, true)
   assert.equal(rows.find((r) => r.id === "prWatch").cron, "*/5 * * * *")

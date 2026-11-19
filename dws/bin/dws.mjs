@@ -33,13 +33,12 @@ const HELP = `dws ${VERSION} —— 豆包会话 CLI（开启会话 / 会话状�
 公共参数：
   -c, --config <文件>   配置文件（默认 ./config.json，其次 ~/.dws/config.json）
 
-发消息的两个模式（只 dws msg / dws steer 认）：
+发消息的两个模式（只 dws msg 认）：
   steer  插进当前这一轮，不等这一轮结束（不排队）
   queue  排到当前任务之后，这一轮跑完才轮到它
   键位跟着配置的默认模式走（messageMode，默认 steer）：
     messageMode=steer → Enter = steer，Command+Enter = queue
     messageMode=queue → Enter = queue，Command+Enter = steer
-  dws steer 是「dws msg --mode steer」的旧名字，保留兼容。
 
 会话名可以是本地记录的名字，也可以是豆包侧边栏里的任务标题：按标题精确匹配，
 其次唯一包含匹配；命中后命令输出里会写明实际操作的「任务 <id>」，多条重名则不猜、直接报错。
@@ -83,11 +82,7 @@ const HELP_BY_CMD = {
   ],
   msg: [
     "dws msg <任务id|会话名> <文字> | --file <文件> [--mode steer|queue]",
-    "给会话发一条消息，只确认发出、不等回复。两个模式：steer = 插进当前这一轮（Enter），queue = 排到这一轮之后（Command+Enter）。键位跟着配置的 messageMode 走（默认 steer；改成 queue 则 Enter/Command+Enter 对调）。dws steer 是 --mode steer 的旧名字。",
-  ],
-  steer: [
-    "dws steer <任务id|会话名> <文字> | --file <文件>",
-    "等同于 dws msg --mode steer（兼容别名，新代码请用 dws msg --mode steer|queue）。",
+    "给会话发一条消息，只确认发出、不等回复。两个模式：steer = 插进当前这一轮（Enter），queue = 排到这一轮之后（Command+Enter）。键位跟着配置的 messageMode 走（默认 steer；改成 queue 则 Enter/Command+Enter 对调）。",
   ],
   status: [
     "dws status [会话名|任务id] [--json]",
@@ -167,8 +162,6 @@ async function main() {
       return cmdStop()
     case "msg":
       return cmdMessage()
-    case "steer":
-      return cmdMessage({ alias: "steer" })
     case "status":
       return cmdStatus()
     case "info":
@@ -453,15 +446,14 @@ async function cmdStop() {
 }
 
 // 发消息：两个模式（steer / queue），按键由配置的默认模式决定（见 client.message / keyForMode）。
-// steer 是旧名字，等价 --mode steer；msg 是新名字，可用 --mode 选模式。
-async function cmdMessage({ alias = "" } = {}) {
+async function cmdMessage() {
   const target = pos[0]
   if (!target) throw Error("用法：dws msg <任务id|会话名> <文字>（或 --file）[--mode steer|queue]")
   const { cfg, book, session } = ctx()
   const text = (await promptOf()) || pos.slice(1).join(" ")
   if (!text) throw Error("要发送的内容为空")
   const defaultMode = cfg?.messageMode === "queue" ? "queue" : "steer"
-  const want = String(flags.mode && flags.mode !== true ? flags.mode : "").trim() || alias || defaultMode
+  const want = String(flags.mode && flags.mode !== true ? flags.mode : "").trim() || defaultMode
   if (!["steer", "queue"].includes(want)) throw Error(`--mode 只能是 steer / queue：${want}`)
   const key = keyForMode(want, defaultMode)
   const where = key === "enter" ? "Enter" : "Command+Enter"

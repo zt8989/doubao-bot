@@ -68,7 +68,7 @@ dws projects                 # 侧边栏「项目」分组下的项目
 dws use 38452760105511426    # 把窗口切到那条任务；status/info/send 也都认任务 id
 dws archive <任务id|会话名>   # 整段对话存到 archives/ 并把侧边栏里的任务归档收起
 dws stop <任务id|会话名>      # 中断正在跑的任务（双击 Esc；没在跑会如实说）
-dws steer <任务id|会话名> "..."  # 跑动中追加指令（Command+Enter，不打断当前任务）
+dws msg <任务id|会话名> "..." --mode steer  # 插进当前这一轮（不排队）
 dws status                   # 全部会话的状态；也看单条：dws status win-ai-harness
 dws status --json            # 给脚本用
 dws info win-ai-harness      # 整段对话（含思考），--json 出结构化，--out 写文件

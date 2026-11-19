@@ -1,7 +1,7 @@
 // 以工单绑定的编排会话为中心：自动巡检每张工单各起一条编排智能体会话，工作会话绑在它身上。
 //
 // 与老模型的区别（老：每次收工新建「派单/合并」会话、由服务通知）：
-//   - 自动巡检按工单起编排会话（ensureIssueOrchestrator 幂等），编排职责与工单合进首句，后续更新用 dws steer；
+//   - 自动巡检按工单起编排会话（ensureIssueOrchestrator 幂等），编排职责与工单合进首句，后续更新用 dws msg --mode steer；
 //   - 用户从当前会话主动派单时，当前会话直接作为这张单的编排，不另起；
 //   - 工单先交给自己的编排（hand），由编排调 `foreman dispatch` 分配工作；
 //   - 工作会话 id 写进账本 issues[<键>] 的 agent / agentConvId / orchestrator；
@@ -173,7 +173,7 @@ export function orchestratorOf(book, issueKey = "", fallback = "") {
   return own || String(fallback ?? "").trim()
 }
 
-// 往编排会话里插一条（dws steer：Command+Enter，不打断它当前那一轮）。
+// 往编排会话里插一条（dws msg --mode steer：Command+Enter，不打断它当前那一轮）。
 // target 给了就用它（单上绑的编排 / 调用方会话），没给才用全局编排会话。
 export async function steerOrchestrator(ctx, text, { kind = "", target = "" } = {}) {
   const cfg = ctx?.cfg ?? {}

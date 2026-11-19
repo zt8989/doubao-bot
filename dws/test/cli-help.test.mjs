@@ -52,12 +52,13 @@ test("顶层 dws --help 仍列出全部命令", () => {
   assert.equal(r.status, 0, r.stderr)
   assert.match(r.stdout, /dws \d+\.\d+\.\d+ —— 豆包会话 CLI/)
   assert.equal(r.stdout.includes("dws help <命令>"), true)
+  assert.equal(r.stdout.includes("dws steer"), false, "只保留 dws msg，不再展示 steer 别名")
   assert.deepEqual(r.files, [])
 })
 
 // dws 只管豆包会话：工单/PR/编排那几条命令必须真的没了，不能被重新加回来。
 test("已下线的命令不再可用", () => {
-  for (const cmd of ["run", "retry", "tasks"]) {
+  for (const cmd of ["run", "retry", "tasks", "steer"]) {
     const r = run([cmd])
     assert.equal(r.status, 0, r.stderr)
     assert.match(r.stdout, /未知命令/)

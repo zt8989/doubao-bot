@@ -903,7 +903,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     }
 
     // 自动接单已交由检查智能体决策：这里不再挂 pickup 定时器。
-    // 检查智能体：每 10 分钟 steer 同一条会话；24 小时未成功投递由 inspectorOnce 轮换。
+    // 检查智能体：每 10 分钟 queue 同一条会话；24 小时未成功投递由 inspectorOnce 轮换。
     if (cfg.inspector?.enabled === true) {
       armOne("inspector", cronOf(cfg, "inspector"), doInspector)
       state.inspectorKick = setTimeout(() => {

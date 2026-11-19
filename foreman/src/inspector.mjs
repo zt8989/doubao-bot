@@ -61,7 +61,8 @@ async function deliver(ctx, rec, text, { now, action, reason = "" }) {
     convId = String(opened?.convId ?? "").trim()
     if (!convId) throw new Error("新建检查会话成功返回但没有 convId")
   } else {
-    await dws.steer(convId, text)
+    // 排到当前轮次之后，避免 steer 插入造成同一轮重复飞行检查。
+    await dws.queue(convId, text)
   }
 
   const at = now.toISOString()
@@ -101,8 +102,8 @@ export async function inspectorOnce(ctx, { now = new Date(), force = false } = {
   const rec = book.data.inspector ?? {}
   try {
     if (ctx.cfg.inspector?.enabled === false && !force) return { ok: true, skipped: "disabled" }
-    if (typeof ctx.dws?.openNew !== "function" || typeof ctx.dws?.steer !== "function") {
-      throw new Error("dws 缺少 openNew/steer，无法投递检查智能体")
+    if (typeof ctx.dws?.openNew !== "function" || typeof ctx.dws?.queue !== "function") {
+      throw new Error("dws 缺少 openNew/queue，无法投递检查智能体")
     }
     const staleMs = Number(ctx.cfg.inspector?.recreateAfterHours ?? 24) * 3600000
     const lastSent = Date.parse(rec.lastSentAt ?? "")
@@ -110,7 +111,7 @@ export async function inspectorOnce(ctx, { now = new Date(), force = false } = {
     const createdAt = Date.parse(rec.createdAt ?? "")
     const idleSince = Number.isFinite(lastSent) ? lastSent : Number.isFinite(failingSince) ? failingSince : createdAt
     const stale = Boolean(rec.convId) && Number.isFinite(idleSince) && now.getTime() - idleSince >= staleMs
-    const action = !rec.convId || stale ? "created" : "steered"
+    const action = !rec.convId || stale ? "created" : "queued"
     const snapshot = await inspectionSnapshot(ctx)
     const text = [
       "【Foreman · 检查智能体 · 10分钟巡检】",

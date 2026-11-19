@@ -87,7 +87,7 @@ export function listSchedules(cfg, state = {}) {
       cron: cronOf(cfg, "inspector"),
       nextAt: state.inspector?.nextAt || "",
       intervalSeconds: Number(cfg?.inspector?.intervalSeconds ?? 600),
-      detail: `每 ${Math.round(Number(cfg?.inspector?.intervalSeconds ?? 600) / 60)} 分钟 steer 同一检查会话；由智能体按优先级和上限接单 · 连续 ${Number(cfg?.inspector?.recreateAfterHours ?? 24)} 小时投递失败才换会话 · 不受工作时间窗限制`,
+      detail: `每 ${Math.round(Number(cfg?.inspector?.intervalSeconds ?? 600) / 60)} 分钟 queue 同一检查会话；由智能体按优先级和上限接单 · 连续 ${Number(cfg?.inspector?.recreateAfterHours ?? 24)} 小时投递失败才换会话 · 不受工作时间窗限制`,
       lastAt: state.inspector?.lastAt || "",
       count: Number(state.inspector?.count ?? 0),
       lastResult: state.inspector?.lastResult ?? null,

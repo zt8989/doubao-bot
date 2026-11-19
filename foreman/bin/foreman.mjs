@@ -26,7 +26,7 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman watch rm <会话id|标题> [-c] [--no-service]
   foreman watch poll [-c] [--no-service]
   foreman hand <owner/name>#<N> [--fresh]   --fresh 强制重派这条单的独立编排
-  foreman inspect                          立即 steer 检查智能体巡检一轮
+  foreman inspect                          立即 queue 检查智能体巡检一轮
   foreman issue settle <N> --repo R --note <完成依据>   仅本地完成，不关远端、不清工作区
   foreman pr list [-c] [--no-service]
   foreman pr poll [-c] [--no-service]
@@ -82,7 +82,7 @@ const HELP = `foreman — 接单编排 + 常驻服务
   issue comment|close   评论/关单（可选：用它才会记账，直接 gitea 也行）
   --no-service  跳过自动握手与拉起（逃生口）
 
-run 以编排会话为中心：捞到单先交给编排会话（dws steer），由它调 foreman dispatch 分配工作；
+run 以编排会话为中心：捞到单先交给编排会话（dws msg --mode steer），由它调 foreman dispatch 分配工作；
 工作会话的每次状态更新都 steer 回这条编排会话；失败先由编排归因，原会话可修正时 foreman resume <执行会话id>，
 需要其他智能体协作时补派并登记监听，完成后再 steer 回等待结果的原会话。
 合并关单后由编排调 foreman clean 清 worktree 与会话。--direct 退回老行为（run 自己派活）。

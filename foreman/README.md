@@ -40,7 +40,7 @@ Gitea 侧一律走 REST（`gitea` 包/CLI）。
      发起方会话 id（`--orchestrator <id>`，不传则取 `MCP_VM_CONVERSATION_ID`）直接绑成这张单的编排，
      工作会话的更新都 steer 回那条发起方会话，不会再另起编排会话。
 - **绑定**：`dispatch` 把工作会话写进账本（`agent` / `agentConvId` / `orchestrator`，会话记录 `kind: "worker"`、`parent: <编排 id>`）。
-- **失败先归因**：原会话能修正时，`foreman resume <执行会话id>` 用 `dws steer` 把「接着跑」插进指定会话，命令不收工单号；需要其他智能体时由编排补派并登记监听，完成后再 steer 回等待结果的原会话。
+- **失败先归因**：原会话能修正时，`foreman resume <执行会话id>` 用 `dws msg --mode steer` 把「接着跑」插进指定会话，命令不收工单号；需要其他智能体时由编排补派并登记监听，完成后再 steer 回等待结果的原会话。
   续跑计数与 `lastFailure` 都写账本。
 - **收尾两步**：`pr merge` 合并关单 → `foreman clean <键>` 清残留 worktree / 分支 / 工作会话，并归档**这张单自己的编排会话**（worktree 有未提交改动就保留，不删别人正在写的东西）。
   clean 只认 `book.sessions` 里 `kind: "orchestrator"` 且带这张单 `issueKey` 的会话：全局编排和「用户发起方就是编排」的会话不归档。
@@ -84,7 +84,7 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 
 | 流程 | 干什么 | 并发 | 谁在推进 |
 | --- | --- | --- | --- |
-| **自有工单（own）** | 接单 → 建工作区 → 派活 → 开发 → 出 PR → 合并 → 关单 → 清理 → 归档 → 通知 | **同时最多 2 条在跑**（按 workflow 实例数算） | 检查智能体定时接收 steer，决策后调用 `foreman run` |
+| **自有工单（own）** | 接单 → 建工作区 → 派活 → 开发 → 出 PR → 合并 → 关单 → 清理 → 归档 → 通知 | **同时最多 2 条在跑**（按 workflow 实例数算） | 检查智能体定时接收 queue，决策后调用 `foreman run` |
 | **他人 PR（review）** | 扫到 → 核对/判可合 → 解冲突 → **合并助手直接执行 `foreman pr merge`** → 关单 → 清理 → 归档 → 通知 | 不占接单名额 | 「他人 PR 扫描」定时器 + 合并助手 + `runMergeTask` |
 
 - **合并通道已取消**：没有独立 lane、没有合并定时任务、没有独立并发槽（`src/lanes.mjs` 已删除）。
@@ -193,7 +193,7 @@ foreman status                # 在不在 + 监听明细 + lastPollAt / pollCoun
   - 「定时任务」列出检查智能体巡检（`inspector.enabled`）、他人 PR 扫描（`prWatch.enabled`）、验收邮件（`mail.enabled`）、工作时间窗（`workHours.offUntil` 临时闭嘴）四项，带运行状态、上次时间、下次触发与已跑轮数；
   - 检查智能体、他人 PR 扫描、验收邮件的时间可编辑 **cron 表达式**；对应配置 `inspector.cron` / `prWatch.cron` / `mail.cron`。没配 cron 时兼容 `intervalSeconds`，折成分钟级表达式；
   - 点「开启/停止」或「保存时间」会 `POST /api/schedules`（如 `{"patch":{"inspector":{"enabled":true,"cron":"*/10 * * * *"}}}`）：先校验并改内存 cfg、再写回 `config.json`、然后立刻重排定时器，**不用重启服务**；非法 cron 返回 400，不会落盘；
-  - 检查智能体的「立即巡检」走 `POST /api/schedules/run`，等价于手动 `foreman inspect`；它只是提前 steer，不代替智能体决策。
+  - 检查智能体的「立即巡检」走 `POST /api/schedules/run`，等价于手动 `foreman inspect`；它只是提前 queue，不代替智能体决策。
   - `GET /api/schedules` 返回同一份状态，脚本/CLI 也可用。
 - **「操作日志」页面**：派单、投递编排通知、建/合 PR、合并后清理、执行会话归档都会先记一条「进行中」，结束再更新为「成功 / 失败」；服务重启时未收尾的记录标为「已中断」，不会永远显示正在执行。支持按状态筛选，每 15 秒自动刷新。
   - 数据在同一个 `console.db` 的 `operations` 表；查询接口 `GET /api/operations?limit=100&status=running&action=merge`（后两个参数可省略）。
@@ -311,7 +311,7 @@ UI 改动的 PR 不能直接合。foreman 把 PR 链接发到测试同学邮箱�
 - 收件人：`mail.testers`。**默认是占位符 `<tester-1@example.com>` / `<tester-2@example.com>`**：占位符不发信、也不挡合并；换成真邮箱后自动生效。
 - 轮转：默认 `round-robin` 一次只发一位，按 `mail.rr` 顺序轮；等 `mail.remindMinutes`（默认 120）没回复就给另一位发催办，最多催 `mail.maxReminders`（默认 2）次。`strategy: "all"` 则两个一起发。
 - 收信：服务每 `mail.pollSeconds`（默认 300s）读一次收件箱（**不受工作时间窗限制**），只处理带 `[FM-…]` 且发件人在 `mail.testers` / `mail.allowSenders` 里的邮件；同一封回复按 `message_id` 只处理一次。
-- 注回会话：结论 `dws steer` 到这张单的编排会话（`issues[键].orchestrator`），拿不到就退到全局编排；邮件正文只当数据，不当指令执行。
+- 注回会话：结论 `dws msg --mode steer` 到这张单的编排会话（`issues[键].orchestrator`），拿不到就退到全局编排；邮件正文只当数据，不当指令执行。
 - 合并闸门：请求状态 `waiting` 时 `pr merge` 返回 `acceptance-waiting`；`rejected` 返回 `acceptance-rejected`；没开邮件、不是 UI、没有真收件人时一律放行（沿用人工验收，不卡流程）。验收通过后 foreman 自己 `runMergeTask`，不用人再敲合并。
 - 人工兜底：用户当面验收并明确回了「合并」→ `foreman pr merge <N> --repo R --approved-by <人>`；测试同学在群里说通过 → `foreman mail approve <repo>#<N> --by <人>`。
 
@@ -330,7 +330,7 @@ foreman doctor                        # 开了邮件会顺带查 agently-cli 授
 ## 命令
 
 ```bash
-foreman inspect                   # 立即 steer 检查智能体一轮；不代替它做决策
+foreman inspect                   # 立即 queue 检查智能体一轮；不代替它做决策
 foreman run --dry-run --once     # 只打印会捞哪条、交给谁；零副作用
 foreman run --once               # 跑一轮：捞到单交给编排会话（hand）
 foreman run --direct --once      # 这一轮自己派活（老行为，不交给编排）

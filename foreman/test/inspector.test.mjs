@@ -6,6 +6,7 @@ import path from "node:path"
 import { Book } from "../src/book.mjs"
 import { inspectorOnce } from "../src/inspector.mjs"
 import { handleRequest } from "../src/service.mjs"
+import { DwsDriver } from "../src/dwsdrv.mjs"
 
 function fixture(over = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-inspector-"))
@@ -15,20 +16,48 @@ function fixture(over = {}) {
     ...over,
   }
   const opened = []
-  const steered = []
+  const queued = []
   const dws = {
     async openNew(args) {
       opened.push(args)
       return { convId: `inspector-${opened.length}` }
     },
-    async steer(target, text) {
-      steered.push({ target, text })
+    async queue(target, text) {
+      queued.push({ target, text })
       return { ok: true }
     },
   }
   const state = { inspector: { running: false, count: 0 } }
-  return { dir, cfg, dws, state, opened, steered }
+  return { dir, cfg, dws, state, opened, queued }
 }
+
+test("检查智能体底层投递使用 dws msg --mode queue", async () => {
+  const driver = new DwsDriver()
+  let call = null
+  driver.json = async (args) => {
+    const file = args[args.indexOf("--file") + 1]
+    call = { args, text: fs.readFileSync(file, "utf8") }
+    return { ok: true }
+  }
+  await driver.queue("inspector-1", "本轮飞行检查")
+  assert.equal(call.args[0], "msg")
+  assert.equal(call.args[1], "inspector-1")
+  assert.deepEqual(call.args.slice(-2), ["--mode", "queue"])
+  assert.equal(call.text, "本轮飞行检查")
+})
+
+test("Foreman 不再回退调用已删除的 dws steer 命令", async () => {
+  const driver = new DwsDriver()
+  const calls = []
+  driver.json = async (args) => {
+    calls.push(args)
+    if (args[0] === "msg") throw new Error("dws msg 失败：未知命令")
+    return { ok: true }
+  }
+  await assert.rejects(driver.steer("inspector-1", "继续"), /未知命令/)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0][0], "msg")
+})
 
 test("检查智能体首轮新建，后续巡检复用同一条会话", async () => {
   const f = fixture()
@@ -43,23 +72,23 @@ test("检查智能体首轮新建，后续巡检复用同一条会话", async ()
     const second = await inspectorOnce(f, { now: new Date("2026-11-19T00:10:00Z") })
 
     assert.equal(first.action, "created")
-    assert.equal(second.action, "steered")
+    assert.equal(second.action, "queued")
     assert.equal(f.opened.length, 1)
-    assert.equal(f.steered.length, 1)
-    assert.equal(f.steered[0].target, "inspector-1")
+    assert.equal(f.queued.length, 1)
+    assert.equal(f.queued[0].target, "inspector-1")
     assert.match(f.opened[0].prompt, /只能修正 Foreman 本地账本/)
     assert.match(f.opened[0].prompt, /foreman tasks --json/)
     assert.match(f.opened[0].prompt, /全部在飞工单合计最多/)
     assert.match(f.opened[0].prompt, /dry-run 只用于确认候选优先级/)
     assert.match(f.opened[0].prompt, /handed.*占/)
-    assert.match(f.steered[0].text, /在飞容量：3\/2；还可新接：0/)
-    assert.match(f.steered[0].text, /dry-run 只用于确认候选优先级/)
-    assert.match(f.steered[0].text, /yyzl\/demo#4/)
-    assert.match(f.steered[0].text, /foreman tasks --json/)
-    assert.match(f.steered[0].text, /foreman clean --all/)
-    assert.match(f.steered[0].text, /已收口待清理快照：yyzl\/demo#2\n/)
-    assert.match(f.steered[0].text, /yyzl\/demo#1/)
-    assert.match(f.steered[0].text, /worker-1/)
+    assert.match(f.queued[0].text, /在飞容量：3\/2；还可新接：0/)
+    assert.match(f.queued[0].text, /dry-run 只用于确认候选优先级/)
+    assert.match(f.queued[0].text, /yyzl\/demo#4/)
+    assert.match(f.queued[0].text, /foreman tasks --json/)
+    assert.match(f.queued[0].text, /foreman clean --all/)
+    assert.match(f.queued[0].text, /已收口待清理快照：yyzl\/demo#2\n/)
+    assert.match(f.queued[0].text, /yyzl\/demo#1/)
+    assert.match(f.queued[0].text, /worker-1/)
 
     const saved = new Book(f.cfg.stateFile)
     assert.equal(saved.data.inspector.convId, "inspector-1")
@@ -80,17 +109,17 @@ test("从未成功投递的会话也从首次失败计满24小时才轮换", asy
   b.save()
   let clock = new Date("2026-11-18T00:00:00.000Z").getTime()
   const opens = []
-  const steers = []
+  const queues = []
   const dws = {
     openNew: async (opts) => { opens.push(opts); return { convId: "inspect-replacement" } },
-    steer: async (conv, text) => { steers.push(conv); throw new Error("窗口忙") },
+    queue: async (conv, text) => { queues.push(conv); throw new Error("窗口忙") },
   }
   const cfg = { stateFile, inspector: { enabled: true, intervalSeconds: 600, recreateAfterHours: 24 }, pickup: { maxRunning: 2 } }
   await inspectorOnce({ cfg, dws, log() {} }, { now: new Date(clock) })
   clock += 10 * 60 * 1000
   await inspectorOnce({ cfg, dws, log() {} }, { now: new Date(clock) })
   assert.deepEqual(opens, [], "首次失败后才10分钟，不得新建")
-  assert.deepEqual(steers, ["inspect-never-ok", "inspect-never-ok"])
+  assert.deepEqual(queues, ["inspect-never-ok", "inspect-never-ok"])
   clock = new Date("2026-11-19T00:01:00.000Z").getTime()
   const out = await inspectorOnce({ cfg, dws, log() {} }, { now: new Date(clock) })
   assert.equal(out.ok, true)
@@ -105,7 +134,7 @@ test("投递失败不刷新成功时间，满24小时才重建检查会话", asy
   const f = fixture()
   try {
     await inspectorOnce(f, { now: new Date("2026-11-19T00:00:00Z") })
-    f.dws.steer = async () => { throw new Error("app_unavailable") }
+    f.dws.queue = async () => { throw new Error("app_unavailable") }
 
     const failed = await inspectorOnce(f, { now: new Date("2026-11-19T00:10:00Z") })
     assert.equal(failed.ok, false)
@@ -115,7 +144,7 @@ test("投递失败不刷新成功时间，满24小时才重建检查会话", asy
     assert.equal(early.ok, false)
     assert.equal(f.opened.length, 1)
 
-    f.dws.steer = async () => ({ ok: true })
+    f.dws.queue = async () => ({ ok: true })
     const rotated = await inspectorOnce(f, { now: new Date("2026-11-20T00:00:00Z") })
     assert.equal(rotated.action, "created")
     assert.equal(rotated.reason, "stale-24h")
@@ -133,7 +162,7 @@ test("inspect RPC：立即投递由服务注入的检查智能体入口", async 
     const ctx = {
       cfg: f.cfg,
       state: f.state,
-      inspector: async () => { calls++; return { ok: true, action: "steered", convId: "inspector-rpc" } },
+      inspector: async () => { calls++; return { ok: true, action: "queued", convId: "inspector-rpc" } },
     }
     const out = await handleRequest(ctx, { id: "test", cmd: "inspect" })
     assert.equal(out.ok, true)

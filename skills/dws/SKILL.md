@@ -65,7 +65,7 @@ dws send review "接着改，先跑一下单测"
 - `open` 认新会话靠**侧边栏任务差集**（`--json` 里 `locatedBy: "sidebar"`），不看窗口 URL：豆包单实例只有一个窗口，用户点回自己的任务时读到的是别人的 id。所以「回读 id 与新建前相同」这个结论已经不再作为派活失败的判据；回复没等到但侧边栏确实多出一条时，`open` 返回 `convId` + `replied: false`，别据此重派。
 - 同一时刻别人（用户自己的 agent）也在建任务时，差集会有多条：`open` 会按标题/选中/在跑排序，再回读候选会话的首句认领，认到的那条带 `verified: true`；都对不上时仍返回最可能那条，但别把 `replied: false` 当失败。回复读不到是 `replyUnconfirmed: true`（宁可给空，不给别人的回复）。
 - `stop` 是双击 Esc，没在跑会如实说。
-- 发消息有**两个模式**：`steer` 插进当前这一轮（不排队等这一轮结束），`queue` 排到当前任务之后。键位由配置的默认模式 `messageMode` 决定——默认 `steer`：Enter = steer、Command+Enter = queue；把 `messageMode` 改成 `queue`：Enter = queue、Command+Enter = steer。只确认发出、不等回复；要等回复用 `send`。`dws steer` 是 `dws msg --mode steer` 的旧名字（兼容保留）。
+- 发消息有**两个模式**：`steer` 插进当前这一轮（不排队等这一轮结束），`queue` 排到当前任务之后。键位由配置的默认模式 `messageMode` 决定——默认 `steer`：Enter = steer、Command+Enter = queue；把 `messageMode` 改成 `queue`：Enter = queue、Command+Enter = steer。只确认发出、不等回复；要等回复用 `send`。只保留 `dws msg --mode steer|queue`，旧 `dws steer` 命令已删除。
 - `archive` 把整段对话存到 `archives/` 并收起侧边栏任务。**目标是发出命令的会话自己时会被拒绝**（读 `MCP_VM_CONVERSATION_ID` 等环境变量判定，防止把自己归档掉），确实要动加 `--force`；`stop` 同样有这层保护。
 
 ## 写操作边界
