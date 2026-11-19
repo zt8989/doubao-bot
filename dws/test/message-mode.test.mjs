@@ -40,6 +40,28 @@ test("keyForMode：默认模式占 Enter，另一个占 Command+Enter", () => {
   assert.equal(keyForMode("nope", "queue"), "cmd-enter")
 })
 
+test("message：发送前发现当前页不是目标会话，拒绝填入和按键", async () => {
+  let fills = 0
+  const page = {
+    closed: false,
+    keys: [],
+    key: async () => page.keys.push("Enter"),
+    eval: async (script) => {
+      if (script === READ) return { convId: "38454241420961538", sends: 1, lastSendId: "m-old" }
+      if (script === INPUT_LEN) return 0
+      if (script === RUNNING_STATE) return {}
+      fills += 1
+      return 3
+    },
+  }
+  await assert.rejects(
+    mkClient(page).message("飞行检查", { mode: "queue", expectedConvId: "38454817176894466" }),
+    /目标会话 38454817176894466.*当前 38454241420961538/
+  )
+  assert.equal(fills, 0, "当前页不是目标会话时不得填入巡检正文")
+  assert.equal(page.keys.length, 0, "当前页不是目标会话时不得发送")
+})
+
 test("message：默认 steer 时 Enter 就是 steer，Command+Enter 才是 queue", async () => {
   const p1 = fakePage()
   const r1 = await mkClient(p1, "steer").message("继续改", { mode: "steer" })

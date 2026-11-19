@@ -705,12 +705,20 @@ export class Doubao {
   //   messageMode=steer（默认）→ Enter = steer、Command+Enter = queue
   //   messageMode=queue         → Enter = queue、Command+Enter = steer
   // 只确认发出，不等回复（要等回复的用 send / sendAck）。
-  async message(text, { mode = "steer", defaultMode = this.messageMode, signal } = {}) {
+  async message(text, { mode = "steer", defaultMode = this.messageMode, expectedConvId = "", signal } = {}) {
     const d = defaultMode === "queue" ? "queue" : "steer"
     const m = mode === "queue" ? "queue" : "steer"
     const key = keyForMode(m, d)
     const page = await this.connect(signal)
     const before = await page.eval(READ)
+    const wantConvId = String(expectedConvId ?? "").trim()
+    const actualConvId = String(before?.convId ?? "").trim()
+    if (wantConvId && actualConvId !== wantConvId) {
+      throw new DoubaoError(
+        `发送前会话不匹配：目标会话 ${wantConvId}，当前 ${actualConvId || "未知"}；未发送`,
+        "doubao_wrong_conversation"
+      )
+    }
     // 长会话的消息列表是虚拟列表：新消息进来会挤掉一条，sends 可能一直不变，
     // 只比条数会把「其实已发出」误判成失败（foreman 于是一遍遍重试，编排会话收到重复注入）。
     const baseline = { sends: before?.sends ?? 0, lastSendId: String(before?.lastSendId ?? "") }

@@ -301,10 +301,21 @@ export class SessionManager {
   }
 
   // convMessage 向目标任务发一条消息（steer / queue），只确认发出、不等回复。
-  // 模式与按键的对应关系见 client.message：默认模式用 Enter，另一个用 Command+Enter。
+  // open 与 msg 共用跨进程窗口锁，避免新建会话与切会话并发抢同一个豆包窗口。
+  // 发送前把目标 id 交给 client.message 再核验当前页，防止巡检等内容误入合并会话。
   async convMessage(convId, text, { mode = "steer", signal } = {}) {
-    await this.client.goto(convId, signal)
-    return this.client.message(text, { mode, defaultMode: this.messageMode, signal })
+    const lock = await acquireOpenLock(`${this.book.file}.open.lock`)
+    try {
+      await this.client.goto(convId, signal)
+      return await this.client.message(text, {
+        mode,
+        defaultMode: this.messageMode,
+        expectedConvId: convId,
+        signal,
+      })
+    } finally {
+      lock.release()
+    }
   }
 
   // convSteer 是「发消息 · steer 模式」的旧名字（Command+Enter 的老行为已由 message 统一）。

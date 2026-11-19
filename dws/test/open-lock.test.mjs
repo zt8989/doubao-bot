@@ -58,6 +58,44 @@ test("持有锁的进程异常退出后，后续 open 能回收锁", async () =>
   }
 })
 
+test("SessionManager.open 与 convMessage 共用窗口锁：新建合并会话时巡检不得抢窗", async () => {
+  const f = fixture()
+  try {
+    const events = []
+    const merge = new SessionManager({
+      book: new SessionBook(f.state),
+      doubao: {
+        state: async () => ({ signedIn: true, convId: "99999999" }),
+        openTask: async () => {
+          events.push("start:merge")
+          await sleep(80)
+          events.push("end:merge")
+          return { convId: "38454241420961538", locatedBy: "window" }
+        },
+      },
+    })
+    const inspector = new SessionManager({
+      book: new SessionBook(f.state),
+      doubao: {
+        goto: async () => events.push("goto:inspector"),
+        message: async (_text, options) => {
+          assert.equal(options.expectedConvId, "38454817176894466")
+          events.push("send:inspector")
+        },
+      },
+    })
+    const first = merge.open("merge", { prompt: "merge", noWait: true })
+    while (!events.length) await sleep(5)
+    const second = inspector.convMessage("38454817176894466", "飞行检查", { mode: "queue" })
+    await sleep(30)
+    assert.deepEqual(events, ["start:merge"], "合并会话新建未完成时，巡检不得切入并发送")
+    await Promise.all([first, second])
+    assert.deepEqual(events, ["start:merge", "end:merge", "goto:inspector", "send:inspector"])
+  } finally {
+    f.cleanup()
+  }
+})
+
 test("SessionManager.open：并发新建不串线，等待后的账本也不会覆盖前一条记录", async () => {
   const f = fixture()
   try {
