@@ -773,8 +773,11 @@ export async function createIssueBranch(repo, issueNumber, { name = "", base = "
     body: { new_branch_name: branch, old_branch_name: start },
   }, opts)
   const created = await api(`/api/v1/repos/${enc(r.owner)}/${enc(r.repo)}/branches/${enc(branch)}`, {}, opts)
+  const createdBranch = created.name ?? branch
+  // 分支创建成功后，同步到工单详情页右侧的“分支 / Git 标签”字段。
+  if (issue.ref !== createdBranch) await editIssue(r.full, issueNumber, { ref: createdBranch }, { opts })
   return {
-    branch: created.name ?? branch,
+    branch: createdBranch,
     base: start,
     issueNumber: Number(issueNumber),
     issueTitle,
