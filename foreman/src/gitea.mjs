@@ -55,7 +55,9 @@ export const editLabels = wrap(async (repo, n, { add = "", remove = "" } = {}) =
   return api.editIssueLabels(repo, n, { add: a, remove: d })
 })
 
-export const viewPr = wrap(async (repo, pr) => api.viewPull(repo, pr))
+export const viewPr = wrap(async (repo, pr, { files = false } = {}) => api.viewPull(repo, pr, { files }))
+
+export const assign = wrap(async (repo, n, username) => api.setAssignees(repo, n, { add: [String(username ?? "").trim()] }))
 
 export const listPulls = wrap(async (repo, { state = "open", page = 1 } = {}) =>
   api.listPulls(repo, { state, page }))

@@ -337,6 +337,77 @@ test("服务 PR 扫描固定走检查智能体，即使配置了 deliver 也不�
   }
 })
 
+test("本人 UI PR 只 queue 验收指派候选，不进入他人合并助手链路", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = baseCfg(dir)
+    cfg.prWatch.uiReviewers = [
+      { name: "周晓亮", username: "ywwb1328" },
+      { name: "张振豪", username: "ywwb1797" },
+    ]
+    const inspected = []
+    const gitea = {
+      listPulls: async () => [{ repo: "demo/demo", number: 90, title: "调整页面", author: "233151", url: "http://x/pulls/90" }],
+      viewPr: async () => ({ state: "open", author: "233151", files: [{ name: "src/App.vue" }], assignees: [] }),
+    }
+    const out = await prWatchOnce({
+      cfg, gitea, dws: {}, log: () => {},
+      inspect: async (text) => { inspected.push(text); return { ok: true, convId: "inspector-1" } },
+      deliver: async () => { throw new Error("本人 UI PR 不能创建合并助手") },
+    })
+    assert.equal(out.notified, 1)
+    assert.equal(out.uiNotified, 1)
+    assert.equal(inspected.length, 1)
+    assert.match(inspected[0], /本人 UI PR 待验收指派/)
+    assert.match(inspected[0], /foreman pr ui-assign 90 --repo demo\/demo/)
+    assert.doesNotMatch(inspected[0], /pr assign 90 --repo/)
+    const seen = new Book(cfg.stateFile).prSeen["demo/demo#90"]
+    assert.equal(seen.ui, true)
+    assert.ok(seen.reviewNotifiedAt)
+    assert.equal(seen.reviewAssignedAt, "")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("pr ui-assign：本人 UI PR 在周晓亮和张振豪间轮询指派，重复调用幂等", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = baseCfg(dir)
+    cfg.prWatch.uiReviewers = [
+      { name: "周晓亮", username: "ywwb1328" },
+      { name: "张振豪", username: "ywwb1797" },
+    ]
+    const assigned = []
+    const ctx = {
+      cfg,
+      state: {},
+      gitea: {
+        viewPr: async (_repo, number) => ({
+          repo: "demo/demo", number, title: `页面 ${number}`, author: "233151", state: "open",
+          files: [{ name: "src/App.vue" }], assignees: [],
+        }),
+        assign: async (_repo, number, username) => { assigned.push({ number, username }); return { ok: true } },
+      },
+    }
+    const first = await handleRequest(ctx, { id: "ui-1", cmd: "pr ui-assign", repo: "demo/demo", number: 90 })
+    const second = await handleRequest(ctx, { id: "ui-2", cmd: "pr ui-assign", repo: "demo/demo", number: 91 })
+    const repeat = await handleRequest(ctx, { id: "ui-3", cmd: "pr ui-assign", repo: "demo/demo", number: 90 })
+    assert.deepEqual(assigned, [
+      { number: 90, username: "ywwb1328" },
+      { number: 91, username: "ywwb1797" },
+    ])
+    assert.equal(first.reviewer.username, "ywwb1328")
+    assert.equal(second.reviewer.username, "ywwb1797")
+    assert.equal(repeat.skipped, "already-assigned")
+    const seen = new Book(cfg.stateFile).prSeen
+    assert.equal(seen["demo/demo#90"].reviewer, "ywwb1328")
+    assert.equal(seen["demo/demo#91"].reviewer, "ywwb1797")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("pr assign：只给他人 PR 分配合并助手，自己的和作者不明的拒绝，重复分配幂等", async () => {
   const dir = tmpDir()
   try {

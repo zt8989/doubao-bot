@@ -279,15 +279,17 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 服务里还有一条独立定时器，每 `prWatch.intervalSeconds`（默认 300s）扫一遍 `repos[]` 下各仓库的 open PR：
 
 - 列表走 `gitea pull-list --repo <owner/name> --state open`（REST 列表，带回 `author`/`base`/`head`）。
-- 作者在 `prWatch.ignoreAuthors`（自己的账号，由 `pickup.me` 补齐；当前 `233151`）里的 PR 跳过，只记 `skipped: "self"`，不分配、不合并。作者不明记 `skipped: "unknown-author"`，同样不进入候选。
+- 本人账号（`prWatch.ignoreAuthors`，当前 `233151`）的 PR 不进入他人合并助手链路。本人 PR 若涉及 UI，代码读取 PR 文件列表确认后，另发「本人 UI PR 待验收指派」给检查智能体；非 UI 仍只记 `skipped: "self"`。作者不明记 `skipped: "unknown-author"`，不进入候选。
 - 其余 PR 合成候选消息，通过 `dws msg --mode queue` 复用同一检查会话投递。检查智能体不主动读取 PR 列表，只处理代码送来的候选；决定处理时执行 `foreman pr assign <N> --repo R`，Foreman 再校验作者，确认为他人 PR 后才新建合并会话。
+- 本人 UI 候选由检查智能体执行 `foreman pr ui-assign <N> --repo R`；Foreman 复核 open、本人、UI 和既有指派人后，按 `prWatch.uiReviewers` 顺序轮询指派。当前顺序为周晓亮（`ywwb1328`）→ 张振豪（`ywwb1797`），只改 Gitea 指派人，不建合并助手、不合并；成功后才推进游标，重复执行幂等。
 - 有冲突的 PR 默认过滤（`prWatch.filterConflicts`，查 `pr-view` 的 `mergeNote`），不合也不报。
 - **扫描器不直接建合并助手、不合 PR**：分配入口会拒绝本人或作者不明的 PR，重复分配幂等。合并助手核对归属/基线、解冲突，可合就执行通知里的 `foreman pr merge`，不可合或需要拍板就用普通文字说明原因，不交 RESULT。
-- 去重记在 `state.json` 的 `prWatch` 键（`<repo>#<number>`）：候选发给检查智能体成功才盖 `notifiedAt`；分配后另记 `assignedTo` / `assignedConvId` / `assignedAt`。
+- 去重记在 `state.json` 的 `prWatch` 键（`<repo>#<number>`）：他人候选发给检查智能体成功才盖 `notifiedAt`，分配合并助手后另记 `assignedTo` / `assignedConvId` / `assignedAt`；本人 UI 候选另记 `reviewNotifiedAt`，验收指派后记录 `reviewer` / `reviewAssignedAt`。
 - 起服务 1s 后先扫一遍，之后按间隔跑。
 
 ```bash
 foreman pr poll                  # 立刻扫一轮，只把候选发给检查智能体
+foreman pr ui-assign <N> --repo R # 本人 UI PR 轮询指派周晓亮/张振豪验收（只指派，不合）
 foreman pr assign <N> --repo R   # 检查智能体显式分配一条他人 PR 给合并助手（幂等）
 foreman pr list                  # 看账本里见过/已通知的 PR
 foreman status                   # 带 prWatch.lastPollAt / pollCount / notifiedCount / pending
@@ -348,6 +350,7 @@ foreman clean --all              # 清所有终端态工单的残留（worktree 
 foreman pickup                   # 手动/检查智能体处理一轮候选；没有代码定时器会自动调用它
 foreman tasks                    # 每条工单到哪一步、卡在哪
 foreman pr poll                  # 立刻扫一轮 PR，只把候选交给检查智能体
+foreman pr ui-assign <N> --repo R # 本人 UI PR 轮询指派周晓亮/张振豪验收（只指派，不合）
 foreman pr assign <N> --repo R   # 检查智能体显式分配合并助手；本人/作者不明拒绝，重复分配幂等
 foreman pr list                  # 看 PR 监听账本
 foreman pr open --repo R --head <分支> --title "…" --body "…" --issue N   # 建 PR（唯一入口；--base 省略取配置 repos[].base）
@@ -472,6 +475,10 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
     "state": "open",
     "maxPages": 3,
     "ignoreAuthors": ["<你的 Gitea 用户名>"],
+    "uiReviewers": [
+      { "name": "周晓亮", "username": "ywwb1328" },
+      { "name": "张振豪", "username": "ywwb1797" }
+    ],
     "notifyTarget": "earliest"
   },
   "mail": {

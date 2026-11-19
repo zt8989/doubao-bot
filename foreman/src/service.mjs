@@ -31,7 +31,7 @@ import { WorkflowEngine } from "./workflow/engine.mjs"
 import { NODE_TEARDOWN, runNodeCleanup, resolveIssueKey, issueKeyForPr } from "./workflow/cleaners.mjs"
 import { DoubaoSessionAdapter } from "./workflow/adapters/doubao.mjs"
 import { GiteaTrackerAdapter } from "./workflow/adapters/gitea.mjs"
-import { prWatchOnce, prWatchTarget, mergeFailureReason, prNotifyText, shouldReport, ownedPrKeys, prKey } from "./prwatch.mjs"
+import { prWatchOnce, prWatchTarget, mergeFailureReason, prNotifyText, shouldReport, ownedPrKeys, prKey, uiReviewers, uiReviewersReady, isOwnPr, isUiPrView } from "./prwatch.mjs"
 import { MailDriver, realRecipients } from "./mail.mjs"
 import { acceptanceGate, detectUiChange, mailPollOnce, requestAcceptance } from "./mailflow.mjs"
 import { inflightIssues } from "./planner.mjs"
@@ -981,6 +981,73 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   return { server: consoleHttp.server, close, poll: doPoll, prPoll: doPrPoll, pickup: doPickup, inspector: doInspector, port, portFile: paths.portFile, http: ctx.httpUrl }
 }
 
+// 本人 UI PR 的验收指派：检查智能体显式触发，Foreman 复核本人/UI/open 后按配置顺序轮询。
+// 这里只改 Gitea assignees，不创建合并助手、不合并；指派成功才推进游标。
+export async function prUiAssignOnce(ctx, { repo = "", number = 0 } = {}) {
+  const r = String(repo ?? "").trim()
+  const n = Number(number) || 0
+  if (!r || !n) return { ok: false, error: "bad-request", message: "pr ui-assign 需要 repo 和 PR 编号" }
+  if (!uiReviewersReady(ctx.cfg)) {
+    return { ok: false, error: "reviewer-config", message: "prWatch.uiReviewers 需要完整的 name 和 Gitea username，配置不完整时不指派" }
+  }
+  if (ctx.state.prUiAssignRunning) return { ok: false, error: "busy", message: "另一条 UI 验收指派正在执行，请稍后重试" }
+  ctx.state.prUiAssignRunning = true
+  try {
+    const key = prKey(r, n)
+    const book = new Book(ctx.cfg.stateFile)
+    const seen = book.prSeen[key] ?? null
+    if (seen?.reviewAssignedAt) {
+      return {
+        ok: true, skipped: "already-assigned", repo: r, pr: n,
+        reviewer: { name: seen.reviewerName || seen.reviewer, username: seen.reviewer },
+      }
+    }
+    let view
+    try {
+      view = await ctx.gitea.viewPr(r, n, { files: true })
+    } catch (e) {
+      return { ok: false, error: "gitea-error", message: e.message }
+    }
+    const pr = Array.isArray(view) ? view[0] : view
+    if (String(pr?.state ?? "open") !== "open") return { ok: false, error: "not-open", message: `${key} 不是 open 状态，不能指派验收` }
+    if (!isOwnPr({ ...pr, repo: r, number: n }, ctx.cfg, book)) {
+      return { ok: false, error: "not-own-pr", message: `${key} 不是本人 PR；他人 PR 只能走 pr assign 分配合并助手` }
+    }
+    if (!isUiPrView(view, ctx.cfg, { key, book, seen })) {
+      return { ok: false, error: "not-ui-pr", message: `${key} 未确认涉及 UI，不做测试验收指派` }
+    }
+
+    const reviewers = uiReviewers(ctx.cfg)
+    const assignees = (Array.isArray(pr?.assignees) ? pr.assignees : []).map((x) => String(x ?? "").trim()).filter(Boolean)
+    const existing = reviewers.find((x) => assignees.includes(x.username))
+    if (existing) {
+      const b = new Book(ctx.cfg.stateFile)
+      b.markPrSeen(key, { ...pr, repo: r, number: n, skipped: "self", ui: true, reviewer: existing.username, reviewerName: existing.name, reviewAssignedAt: nowIso() })
+      b.setPrReviewRr(reviewers.indexOf(existing) + 1)
+      return { ok: true, skipped: "already-assigned", repo: r, pr: n, reviewer: existing }
+    }
+    if (assignees.length) {
+      return { ok: true, skipped: "assigned-to-other", repo: r, pr: n, assignees, message: `已有其他指派人：${assignees.join("、")}，未改动` }
+    }
+
+    const idx = book.prReviewRr % reviewers.length
+    const reviewer = reviewers[idx]
+    try {
+      await ctx.gitea.assign(r, n, reviewer.username)
+    } catch (e) {
+      return { ok: false, error: "gitea-error", message: `指派 ${reviewer.name}（${reviewer.username}）失败：${e.message}` }
+    }
+    const b = new Book(ctx.cfg.stateFile)
+    b.markPrSeen(key, { ...pr, repo: r, number: n, skipped: "self", ui: true, reviewer: reviewer.username, reviewerName: reviewer.name, reviewAssignedAt: nowIso() })
+    b.setPrReviewRr(idx + 1)
+    ctx.consoleStore?.event({ kind: "pr_ui_assign", key, repo: r, number: n, to: reviewer.username, detail: `本人 UI PR 验收指派给 ${reviewer.name}` })
+    ctx.log?.(`本人 UI PR ${key} 已指派 ${reviewer.name}（${reviewer.username}）验收；下一位轮询`)
+    return { ok: true, repo: r, pr: n, reviewer, assignees: [...assignees, reviewer.username] }
+  } finally {
+    ctx.state.prUiAssignRunning = false
+  }
+}
+
 // 检查智能体显式分配一条他人 PR：这里才创建合并助手；本人或作者不明一律拒绝。
 export async function prAssignOnce(ctx, { repo = "", number = 0 } = {}) {
   const repoName = String(repo ?? "").trim()
@@ -1903,6 +1970,7 @@ export async function handleRequest(ctx, req) {  const id = req?.id
       ui = det.ui === true
     }
     let acceptance = null
+    b.markPrSeen(`${repo}#${number}`, { repo, number, ui })
     if (ui) {
       if (acceptKey) b.setIssue(acceptKey, { ui: true })
       acceptance = await requestAcceptance(ctx, {
@@ -2607,6 +2675,10 @@ export async function handleRequest(ctx, req) {  const id = req?.id
   if (cmd === "poll") {
     const r = await ctx.poll()
     return ok(r)
+  }
+
+  if (cmd === "pr ui-assign") {
+    return prUiAssignOnce(ctx, { repo: String(req.repo ?? "").trim(), number: Number(req.number ?? 0) || 0 })
   }
 
   if (cmd === "pr assign") {

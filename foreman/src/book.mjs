@@ -52,6 +52,12 @@ export class Book {
       notifiedAt: pr.notifiedTo ? nowIso() : prev.notifiedAt ?? "",
       // 投递通道：inspector（候选交检查智能体）或 merge-assistant（已分配合并助手）等。
       via: pr.via ?? prev.via ?? "",
+      ui: pr.ui ?? prev.ui ?? false,
+      reviewNotifiedTo: pr.reviewNotifiedTo ?? prev.reviewNotifiedTo ?? "",
+      reviewNotifiedAt: pr.reviewNotifiedTo ? nowIso() : prev.reviewNotifiedAt ?? "",
+      reviewer: pr.reviewer ?? prev.reviewer ?? "",
+      reviewerName: pr.reviewerName ?? prev.reviewerName ?? "",
+      reviewAssignedAt: pr.reviewAssignedAt ?? prev.reviewAssignedAt ?? "",
       assignedTo: pr.assignedTo ?? prev.assignedTo ?? "",
       assignedConvId: pr.assignedConvId ?? prev.assignedConvId ?? "",
       assignedAt: pr.assignedAt ?? prev.assignedAt ?? "",
@@ -60,6 +66,18 @@ export class Book {
     }
     this.save()
     return this.prSeen[key]
+  }
+
+  // 本人 UI PR 验收指派游标；只有 Gitea 指派成功才推进。
+  get prReviewRr() {
+    return Math.max(0, Number(this.data.prReviewRr ?? 0) || 0)
+  }
+
+  setPrReviewRr(next) {
+    this.reload()
+    this.data.prReviewRr = Math.max(0, Number(next ?? 0) || 0)
+    this.save()
+    return this.data.prReviewRr
   }
 
   // 续接提醒去重：{ lastKey, at }，同一个 (会话#指纹) 只提醒一次。

@@ -1,7 +1,8 @@
-// PR 监听：定时扫配置里各仓库的 open PR，过滤本人与作者不明的 PR，把候选 queue 给检查智能体。
-// 检查智能体通过 pr assign 显式分配后，才新建合并助手；扫描器自身不建合并会话、不合 PR。
+// PR 监听：定时扫 open PR；他人候选走 pr assign 合并助手，本人 UI 候选走 pr ui-assign 验收指派。
+// 两类候选都只 queue 给检查智能体；扫描器自身不指派、不建合并会话、不合 PR。
 import { nowIso } from "./util.mjs"
 import { Book } from "./book.mjs"
+import { uiFilesChanged, uiPatterns } from "./mailflow.mjs"
 
 // 「第一个调用方」：账本 sessions 里按登记顺序第一个带 convId 的会话（JSON 保持插入序）。
 export function earliestCaller(book) {
@@ -46,6 +47,52 @@ export function ownedPrKeys(book) {
   return keys
 }
 
+// 自有工单里已确认涉及 UI 的 PR；用于列表作者为空或 PR 文件接口暂时不可用时兜底。
+export function ownedUiPrKeys(book) {
+  const keys = new Set()
+  for (const [issueKey, rec] of Object.entries(book?.issues ?? {})) {
+    if (rec?.ui !== true) continue
+    const repo = String(issueKey).split("#")[0]
+    const pr = Number(rec?.pr ?? 0)
+    if (repo && pr) keys.add(prKey(repo, pr))
+    for (const w of Array.isArray(rec?.prs) ? rec.prs : []) {
+      const r = String(w?.repo ?? "").trim()
+      const n = Number(w?.pr ?? 0)
+      if (r && n) keys.add(prKey(r, n))
+    }
+  }
+  return keys
+}
+
+export function uiReviewers(cfg) {
+  const raw = Array.isArray(cfg?.prWatch?.uiReviewers) ? cfg.prWatch.uiReviewers : []
+  return raw.map((x) => typeof x === "string"
+    ? { name: x.trim(), username: x.trim() }
+    : { name: String(x?.name ?? x?.username ?? "").trim(), username: String(x?.username ?? "").trim() })
+    .filter((x) => x.name || x.username)
+}
+
+export function uiReviewersReady(cfg) {
+  const list = uiReviewers(cfg)
+  return list.length > 0 && list.every((x) => x.username)
+}
+
+export function isOwnPr(pr, cfg, book) {
+  const key = prKey(pr?.repo, pr?.number)
+  const seen = book?.prSeen?.[key]
+  if (String(seen?.skipped ?? "") === "self" || ownedPrKeys(book).has(key)) return true
+  const author = String(pr?.author ?? "").trim()
+  const ignore = new Set((cfg?.prWatch?.ignoreAuthors ?? []).map((x) => String(x).trim()).filter(Boolean))
+  return Boolean(author && ignore.has(author))
+}
+
+export function isUiPrView(view, cfg, { key = "", book = null, seen = null } = {}) {
+  if (seen?.ui === true || (key && ownedUiPrKeys(book).has(key))) return true
+  const v = Array.isArray(view) ? view[0] : view
+  const files = (Array.isArray(v?.files) ? v.files : []).map((f) => String(f?.name ?? f?.filename ?? "").trim()).filter(Boolean)
+  return uiFilesChanged(files, uiPatterns(cfg)).length > 0
+}
+
 // 这条 PR 要不要报：必须能确认作者不在忽略名单里；作者缺失不能证明是他人 PR，先跳过。
 export function shouldReport(pr, cfg) {
   if (!pr?.number || !pr?.repo) return false
@@ -84,19 +131,35 @@ export function prNotifyText(prs = []) {
 }
 
 // 扫描器交给检查智能体的候选：只给分配命令，不让它主动扫 PR，也不让它直接合并。
-export function prInspectorText(prs = [], cfg = {}) {
+export function prInspectorText(prs = [], cfg = {}, uiPrs = []) {
   const me = String(cfg?.pickup?.me ?? cfg?.prWatch?.ignoreAuthors?.[0] ?? "").trim() || "本人"
-  const lines = [
-    "【Foreman · 检查智能体 · 他人 PR 待分配】",
-    "代码已完成 open PR 扫描、作者过滤和冲突检查。你不需要主动读取 PR 列表；请核对下面的候选，决定是否分配合并助手。",
-    `本人账号 ${me} 创建的 PR 不分配、不合并；作者不明的 PR 也不分配。你只通过 pr assign 分配，不要直接执行 foreman pr merge。`,
-  ]
+  const lines = []
+  if (prs.length) {
+    lines.push(
+      "【Foreman · 检查智能体 · 他人 PR 待分配】",
+      "代码已完成 open PR 扫描、作者过滤和冲突检查。你不需要主动读取 PR 列表；请核对下面的候选，决定是否分配合并助手。",
+      `本人账号 ${me} 创建的 PR 不分配、不合并；作者不明的 PR 也不分配。你只通过 pr assign 分配，不要直接执行 foreman pr merge。`,
+    )
+  }
   for (const pr of prs) {
     lines.push("")
     lines.push(`· ${pr.repo}#${pr.number} ${pr.title ?? ""}`.trim())
     lines.push(`  作者：${pr.author}`)
     if (pr.url) lines.push(`  链接：${pr.url}`)
     lines.push(`  分配：foreman pr assign ${pr.number} --repo ${pr.repo}`)
+  }
+  if (uiPrs.length) {
+    if (lines.length) lines.push("")
+    lines.push(
+      "【Foreman · 检查智能体 · 本人 UI PR 待验收指派】",
+      "代码已确认下列 PR 是本人创建且涉及 UI。请逐条执行 pr ui-assign，由 Foreman 在周晓亮、张振豪之间轮询指派一位验收人；不要自行指定人、不要分配合并助手、不要合并。",
+    )
+    for (const pr of uiPrs) {
+      lines.push("")
+      lines.push(`· ${pr.repo}#${pr.number} ${pr.title ?? ""}`.trim())
+      if (pr.url) lines.push(`  链接：${pr.url}`)
+      lines.push(`  验收指派：foreman pr ui-assign ${pr.number} --repo ${pr.repo}`)
+    }
   }
   return lines.join("\n")
 }
@@ -122,11 +185,11 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
   const book = new Book(cfg.stateFile)
   // 调用方（服务层）可以显式给目标；没给就按配置/账本自己算。
   const target = String(overrideTarget ?? prWatchTarget(cfg, book) ?? "").trim()
-  const owned = ownedPrKeys(book)
   const stateFilter = String(pw.state ?? "open")
   const maxPages = Number(pw.maxPages ?? 3) || 3
 
   const fresh = []
+  const uiFresh = []
   let checked = 0
   for (const repoCfg of cfg.repos ?? []) {
     for (let page = 1; page <= maxPages; page++) {
@@ -140,21 +203,41 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
       if (!list.length) break
       for (const pr of list) {
         checked++
-        const key = prKey(pr.repo || repoCfg.repo, pr.number)
+        const repo = pr.repo || repoCfg.repo
+        const key = prKey(repo, pr.number)
         const seen = book.prSeen[key]
-        if (seen?.notifiedAt) continue
-        // 账本里已判过「自家 PR」（foreman pr open 时登记的 skipped=self）就不再按 author 重判：
-        // Gitea 列表返回的 author 常为空，shouldReport 又是 fail-open，会被重新报成「别人家的 PR」。
-        if (String(seen?.skipped ?? "") === "self") continue
-        // 账本 issues 里已经挂着这条 PR（foreman pr open 建的），就是自家单，跳过。
-        if (owned.has(key)) continue
-        if (!shouldReport({ ...pr, repo: pr.repo || repoCfg.repo }, cfg)) {
-          const author = String(pr?.author ?? "").trim()
-          // 本人 PR 永久跳过；作者不明只暂停本轮，后续作者补全后仍可重新检查。
-          book.markPrSeen(key, { ...pr, skipped: author ? "self" : "unknown-author" })
+        const item = { ...pr, repo, key, seen }
+        if (isOwnPr(item, cfg, book)) {
+          // 本人 PR 不走合并助手；只有确认涉及 UI 时才交检查智能体做验收指派。
+          if (seen?.reviewNotifiedAt || seen?.reviewAssignedAt) continue
+          if (!uiReviewersReady(cfg)) {
+            if (seen?.skipped === "self" || ownedPrKeys(book).has(key)) continue
+            book.markPrSeen(key, { ...item, skipped: "self" })
+            continue
+          }
+          let view = null
+          const knownUi = seen?.ui === true || ownedUiPrKeys(book).has(key)
+          if (!knownUi) {
+            try { view = await gitea.viewPr(repo, pr.number, { files: true }) } catch (e) {
+              log(`本人 PR UI 检查 ${key} 失败，下轮重试：${e.message}`)
+              continue
+            }
+          }
+          if (!knownUi && !isUiPrView(view, cfg, { key, book, seen })) {
+            book.markPrSeen(key, { ...item, skipped: "self", ui: false })
+            continue
+          }
+          uiFresh.push({ ...item, ui: true })
           continue
         }
-        fresh.push({ ...pr, repo: pr.repo || repoCfg.repo, key, seen })
+        if (seen?.notifiedAt) continue
+        if (!shouldReport(item, cfg)) {
+          const author = String(pr?.author ?? "").trim()
+          // 作者不明只暂停本轮，后续作者补全后仍可重新检查。
+          book.markPrSeen(key, { ...item, skipped: author ? "self" : "unknown-author" })
+          continue
+        }
+        fresh.push(item)
       }
       if (list.length < 20) break // 列表页到底（Gitea 默认每页 20 条左右）
     }
@@ -181,10 +264,13 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
     fresh.push(...keep)
   }
 
-  if (!fresh.length) return { ok: true, checked, notified: 0, conflicting, target }
   const useInspect = typeof inspect === "function"
   const usePush = !useInspect && typeof push === "function"
   const useNew = !useInspect && !usePush && typeof deliver === "function"
+  const uiToSend = useInspect ? uiFresh : []
+  if (!fresh.length && !uiToSend.length) {
+    return { ok: true, checked, notified: 0, uiNotified: 0, conflicting, target, pending: uiFresh.length }
+  }
   if (!useInspect && !usePush && !useNew && !target) {
     log("PR 扫描：有候选但找不到通知目标（账本里没有调用方会话），这轮不发，等有了再报")
     return { ok: true, checked, notified: 0, target: "", pending: fresh.length }
@@ -194,7 +280,7 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
   let convId = ""
   try {
     if (useInspect) {
-      const out = await inspect(prInspectorText(fresh, cfg))
+      const out = await inspect(prInspectorText(fresh, cfg, uiToSend))
       if (out?.ok === false || out?.skipped) throw new Error(out.error || `检查智能体接收 PR 候选失败：${out.skipped}`)
       sentTo = String(out?.convId ?? out?.session ?? "").trim() || "检查智能体"
       convId = String(out?.convId ?? "").trim()
@@ -212,19 +298,26 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
     }
   } catch (e) {
     log(`PR 扫描：通知 ${sentTo || "新会话"} 失败，下轮补发：${e.message}`)
-    return { ok: true, checked, notified: 0, conflicting, target, failedNotify: true, pending: fresh.length }
+    return { ok: true, checked, notified: 0, uiNotified: 0, conflicting, target, failedNotify: true, pending: fresh.length + uiToSend.length }
   }
   const via = useInspect ? "inspector" : usePush ? "steer-orchestrator" : useNew ? "new-session" : "existing"
   const book2 = new Book(cfg.stateFile)
   for (const pr of fresh) book2.markPrSeen(pr.key, { ...pr, notifiedTo: sentTo, via })
+  for (const pr of uiToSend) {
+    book2.markPrSeen(pr.key, { ...pr, skipped: "self", ui: true, reviewNotifiedTo: sentTo, via: "inspector-ui" })
+  }
   // 新建的投递会话登记进 notices：它报过的 PR 全合完之后由服务自动归档，
   // 不然这些「PR待合并」会话会一条条留在侧边栏里（既没人读、也没人收）。
   // steer 进编排会话不新建会话，不登记 notices。
   if (useNew && sentTo) {
     book2.markNotice(sentTo, { name: sentTo, convId, kind: "PR待合并", prs: fresh.map((p) => p.key) })
   }
+  const inspectedPrs = [...fresh, ...uiToSend]
   log(useInspect
-    ? `PR 扫描：${fresh.length} 条候选已交给检查智能体 ${sentTo} 分配（${fresh.map((p) => `${p.repo}#${p.number}`).join("、")}）`
+    ? `PR 扫描：${inspectedPrs.length} 条候选已交给检查智能体 ${sentTo} 处理（${inspectedPrs.map((p) => `${p.repo}#${p.number}`).join("、")}）`
     : `PR 扫描：${fresh.length} 条新 PR 已交给 ${sentTo || "编排会话"} 合并（${fresh.map((p) => `${p.repo}#${p.number}`).join("、")}）`)
-  return { ok: true, checked, notified: fresh.length, conflicting, target: sentTo || target, via, prs: fresh.map((p) => p.key), at: nowIso() }
+  return {
+    ok: true, checked, notified: inspectedPrs.length, uiNotified: uiToSend.length, conflicting,
+    target: sentTo || target, via, prs: inspectedPrs.map((p) => p.key), at: nowIso(),
+  }
 }

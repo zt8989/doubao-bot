@@ -90,8 +90,8 @@ export const DEFAULTS = {
     maxAttempts: 2,
     events: ["done", "pr-open", "needs-human", "blocked", "escalated", "failed"],
   },
-  // PR 监听：每 intervalSeconds 扫一遍各仓库 open PR，过滤自己的、作者不明的与冲突 PR。
-  // 候选只 queue 给检查智能体；它显式 pr assign 后才新建合并会话，扫描器不直接建会话。
+  // PR 监听：每 intervalSeconds 扫一遍各仓库 open PR；他人候选走合并助手分配，本人 UI 候选走验收指派。
+  // 两类候选都只 queue 给检查智能体；显式 pr assign / pr ui-assign 后才执行对应写操作。
   prWatch: {
     enabled: true,
     intervalSeconds: 300,
@@ -99,6 +99,9 @@ export const DEFAULTS = {
     maxPages: 3,
     // 自己的账号也在这里（跳过自己的 PR），loadConfig 会用 pickup.me 补齐。
     ignoreAuthors: [],
+    // 本人 UI PR 的验收指派人：检查智能体执行 pr ui-assign 后按数组顺序轮询。
+    // 每项 { name, username }；username 必须是真实 Gitea 登录名，配置不完整时不派。
+    uiReviewers: [],
     notifyTarget: "earliest",
     // 默认过滤有冲突的 PR（合不了，报了没用）；设 false 则照报。
     filterConflicts: true,
@@ -299,6 +302,11 @@ export function loadConfig(explicit) {
   const pwState = String(cfg.prWatch.state ?? "open")
   if (!["open", "closed", "all"].includes(pwState)) throw new Error(`配置项 prWatch.state 只能是 open/closed/all，现在是：${pwState}`)
   cfg.prWatch.state = pwState
+  cfg.prWatch.uiReviewers = (Array.isArray(cfg.prWatch.uiReviewers) ? cfg.prWatch.uiReviewers : [])
+    .map((x) => typeof x === "string"
+      ? { name: x.trim(), username: x.trim() }
+      : { name: String(x?.name ?? x?.username ?? "").trim(), username: String(x?.username ?? "").trim() })
+    .filter((x) => x.name || x.username)
 
   // 邮件验收：占位符（<tester-1@example.com>）允许留在配置里；数值与策略写错直接报错。
   cfg.mail = cfg.mail && typeof cfg.mail === "object" ? cfg.mail : {}
