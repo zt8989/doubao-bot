@@ -118,14 +118,14 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 
 ## 常驻服务与router agent
 
-常驻服务在同一个 Node 进程里运行 **Schedule / 任务观察 → SQLite Inbox → 单 Worker**，保留三类持久 Schedule：router agent巡检、他人 PR 扫描、验收邮件；`watch poll` 另外把已登记执行会话的 `running/gone/finished/settled` 状态写成 `task.update`。执行会话收工轮询和自动接单定时器已删除，收口后的代码自动补单也已删除。
+常驻服务在同一个 Node 进程里运行 **Schedule 执行 script/agent → 结果写 SQLite Inbox → 单 Worker**，保留三类持久 Schedule：router agent巡检、他人 PR 扫描、验收邮件；`watch poll` 另外把已登记执行会话的 `running/gone/finished/settled` 状态写成 `task.update`。执行会话收工轮询和自动接单定时器已删除，收口后的代码自动补单也已删除。
 
-- Schedule 到期只推进 `next_at` 并写 `agent_inbox`，**不直接给 Agent 发消息**；推进 Schedule 与写事件在同一 SQLite 事务里完成。PR 扫描和邮件轮询是 Worker 执行的代码任务，扫描发现候选后再写 `router.notice`。
+- Schedule 到期先推进 `next_at`，再按类型直接执行 script（PR 扫描、邮件轮询）或调用 agent（路由巡检），最后把成功/失败结果写成 `schedule.result` 注入 `agent_inbox`。先推进时间可避免执行或结果入箱失败导致同一轮业务重复运行；PR 扫描发现候选后另写 `router.notice`。
 - `agent_inbox` 是投递事实源：相同来源的活跃事件去重；同一 Schedule 未开始的旧事件被新事件替换；同一任务的 pending 状态合并为最新状态；过期 pending 直接丢弃；处理失败 30 秒后重试，重启通过租约恢复 processing。
 - `task.update` 按工单绑定的 `orchestrator` 路由，补派任务其次取 `parent` / 显式通知目标，完全没有归属的旧任务才回退router agent。完成状态携带普通最终回复原文；Worker 成功 queue 后才写 `notified` 与 `idle`，只入箱不算已消费。不同任务的事件逐条完成，避免一条失败导致另一条已送达任务被重投。
-- Worker 收到同进程写入后直接 `wake()`，1 秒轮询只负责漏唤醒与重启恢复。巡检和多条 PR 通知合并成一次router agent运行；首次 `openNew` 创建，后续复用同一条会话，底层仍是 `dws msg --mode queue`。
-- 以最后一次成功投递为轮换基准；从未成功时从首次失败计时，连续 `router.recreateAfterHours`（默认 24 小时）未成功才新建路由会话。Inbox 的 done 只表示 Worker 已成功交给 dws，不表示 Agent 已处理完。
-- Schedule 不读取工单状态自行派单，Worker 也不替router agent做业务决策。router agent负责健康检查、必要时 `hand --fresh` 重派独立编排、用 `issue settle` 修复本地完成状态。每轮先读 `foreman tasks --json`：主体是 `sessions` 父子树，节点 `state=running/idle/gone/unknown` 为会话状态，`issueKey/issueState` 仅作归属与容量元数据；在飞数取 `summary.unresolvedIssues`，PR 数取 `summary.prOpenIssues`，真实编码运行数只数编码节点 `state=running`。每轮执行 `foreman clean --all` 幂等清理 `done/cleaned` 残留。全部未收口合计最多 `pickup.maxRunning`（默认 2），`handed` 占槽，不是每轮新增 2 张；dry-run 只看候选优先级，满额禁止 `run/pickup/hand/orch start/dispatch`，每次接单后重新计数。
+- Worker 收到普通消息写入后直接 `wake()`，1 秒轮询只负责漏唤醒与重启恢复。多条 PR 通知合并成一次router agent运行；首次 `openNew` 创建，后续复用同一条会话，底层仍是 `dws msg --mode queue`。`schedule.result` 由 Worker 直接确认，不再执行定时业务。
+- 以最后一次成功投递为轮换基准；从未成功时从首次失败计时，连续 `router.recreateAfterHours`（默认 24 小时）未成功才新建路由会话。普通 Inbox 消息的 done 只表示 Worker 已成功交给 dws，`schedule.result` 的 done 只表示结果已确认，都不表示 Agent 已处理完。
+- Schedule 不读取工单状态自行派单，Worker 也不替router agent做业务决策。router agent负责健康检查、必要时 `hand --fresh` 重派独立编排、用 `issue settle` 修复本地完成状态。每轮先读 `foreman tasks --json`：主体是 `sessions` 父子树，节点 `state=running/idle/gone/unknown` 为会话状态，`issueKey/issueState` 仅作归属与容量元数据；在飞数取 `summary.unresolvedIssues`，PR 数取 `summary.prOpenIssues`，真实编码运行数只数编码节点 `state=running`。每轮执行 `foreman clean --all` 幂等清理 `done/cleaned` 残留。全部未收口合计最多 `pickup.maxRunning`（默认 2），`handed` 占槽，不是每轮新增 2 张；dry-run 只看候选优先级，满额禁止 `run/pickup/hand/orch start/dispatch`，每次接单后重新计数。每轮先读 `foreman tasks --json`：主体是 `sessions` 父子树，节点 `state=running/idle/gone/unknown` 为会话状态，`issueKey/issueState` 仅作归属与容量元数据；在飞数取 `summary.unresolvedIssues`，PR 数取 `summary.prOpenIssues`，真实编码运行数只数编码节点 `state=running`。每轮执行 `foreman clean --all` 幂等清理 `done/cleaned` 残留。全部未收口合计最多 `pickup.maxRunning`（默认 2），`handed` 占槽，不是每轮新增 2 张；dry-run 只看候选优先级，满额禁止 `run/pickup/hand/orch start/dispatch`，每次接单后重新计数。
 - `watch poll` 保留为router agent/人工按需入口：观察已登记执行会话，把状态变化与最终回复写入 `task.update`，由 Worker queue 给所属编排。它不解析 RESULT、不自动 push/开 PR、不推进工单业务状态。
 - **notify 节点不再承担执行会话投递**：其暂停状态仍会阻止任务事件入箱；成功投递以 Inbox done、Worker 日志和账本 `steers/notified` 为准，业务结论由编排判断。
 
@@ -369,7 +369,7 @@ foreman doctor                        # 开了邮件会顺带查 agently-cli 授
 ## 命令
 
 ```bash
-foreman route                   # 立即写router agent Inbox，由 Worker 投递；不代替它做决策
+foreman route                   # 立即调用router agent并写执行结果；不代替它做决策
 foreman run --dry-run --once     # 只打印会捞哪条、交给谁；零副作用
 foreman run --once               # 跑一轮：捞到单交给编排会话（hand）
 foreman run --direct --once      # 这一轮自己派活（老行为，不交给编排）

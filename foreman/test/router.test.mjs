@@ -186,7 +186,7 @@ test("投递失败不刷新成功时间，满24小时才重建路由会话", asy
   }
 })
 
-test("inspect RPC：立即写入router agent Inbox", async () => {
+test("inspect RPC：直接调用 router agent 并返回执行结果", async () => {
   const f = fixture()
   try {
     let calls = 0
@@ -204,7 +204,7 @@ test("inspect RPC：立即写入router agent Inbox", async () => {
   }
 })
 
-test("服务 Schedule 只写 Inbox，Worker 消费后才唤醒路由会话", async () => {
+test("服务 Schedule 直接唤醒路由 Agent，Worker 只确认执行结果", async () => {
   const f = fixture()
   Object.assign(f.cfg, {
     router: { enabled: true, intervalSeconds: 600, recreateAfterHours: 24 },
@@ -227,9 +227,10 @@ test("服务 Schedule 只写 Inbox，Worker 消费后才唤醒路由会话", asy
     server = await startServer({ cfg: f.cfg, dws: f.dws, log() {} })
     assert.equal(f.opened.length, 0, "Schedule 同步时不得直接调用 Agent")
     assert.equal(f.queued.length, 0)
-    server.schedules.tick(new Date())
+    await server.schedules.tick(new Date())
+    assert.equal(f.opened.length, 1, "Schedule 的 agent 执行器直接创建路由会话")
+    assert.equal(server.inbox.list()[0].kind, "schedule.result")
     await server.worker.idle()
-    assert.equal(f.opened.length, 1, "Worker 消费后才创建路由会话")
     assert.equal(server.inbox.counts().done, 1)
   } finally {
     if (server) await server.close()

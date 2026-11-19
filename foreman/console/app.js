@@ -879,6 +879,7 @@ class FmSchedules extends LitElement {
                 <span class=${"dot " + (s.enabled ? "on" : "off")}></span>
                 <span class="sched-name">${s.label}</span>
                 <span class=${"badge " + (s.enabled ? "notified" : "self")}>${s.enabled ? "运行中" : "已停止"}</span>
+                ${s.executor ? html`<span class="badge self">${s.executor === "agent" ? "Agent" : "脚本"}</span>` : ""}
                 <span class="sched-detail">${s.detail || ""}</span>
               </div>
               <div class="sched-meta">

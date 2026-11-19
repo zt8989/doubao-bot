@@ -1,6 +1,6 @@
 ---
 name: foreman
-description: 接单编排 CLI（项目 foreman，命令 foreman）：**以工单绑定的编排会话为中心**——持久 Schedule 每 10 分钟写 SQLite Inbox，由同进程单 Worker 复用同一条router agent，24 小时未成功投递才换会话；router agent负责健康检查、按现有优先级和 `pickup.maxRunning` 上限接单、必要时重派独立编排与修复本地完成状态，代码不再自动接单或定时轮询执行收工。捞到工单用 `foreman hand` steer 给它；它再调 `foreman dispatch` 分配工作（建一工程一工作区 + 开工作会话，会话 id 绑回本单编排）。PR 扫描把他人候选和本人 UI 候选写入router agent Inbox：他人 PR 由它 `pr assign` 分配合并助手，本人 UI PR 由它 `pr ui-assign` 在周晓亮、张振豪之间轮询指派验收并附 PR 链接。**工作会话不认识 foreman**：它只读工单、改工作区、跑测试、commit 并给普通最终回复（不 push、不开 PR、不碰工单、不输出 RESULT）；router agent或人工按需 `watch poll`，把任务状态写成 `task.update` 事件，Worker 再 queue 给任务所属编排。是否开 PR、续跑、合并、修改工单业务状态与收尾全部由编排判断；push/建 PR 用 `foreman pr open`，合并走 `foreman pr merge`，合完 `foreman clean` 清 worktree 与会话。Gitea 的读、建单/改单/评论/关单、dws 会话、herdr 一律直连。**全链路异步**：`hand`/`dispatch`/`resume` 是投递动作，发出去就返回（秒级），工作会话常跑 30–60 分钟（实测 50 分钟）才 commit 收工——**派完就走，别等回复、别轮询会话、别重派**。当用户说自动接单、接工单、把工单派给豆包、看某条工单处理到哪、把卡住的单放回队列，或提到 foreman 时报 app_busy / locked / pr-open 时使用。**一工程一工作区**：跨工程的工单每个工程各建一个 worktree、各一条 PR，缺工程用 `foreman ws add` 现开。
+description: 接单编排 CLI（项目 foreman，命令 foreman）：**以工单绑定的编排会话为中心**——持久 Schedule 每 10 分钟直接调用同一条router agent并把执行结果写入 SQLite Inbox，Worker 只负责消息投递与结果确认，24 小时未成功投递才换会话；router agent负责健康检查、按现有优先级和 `pickup.maxRunning` 上限接单、必要时重派独立编排与修复本地完成状态，代码不再自动接单或定时轮询执行收工。捞到工单用 `foreman hand` steer 给它；它再调 `foreman dispatch` 分配工作（建一工程一工作区 + 开工作会话，会话 id 绑回本单编排）。PR 扫描把他人候选和本人 UI 候选写入router agent Inbox：他人 PR 由它 `pr assign` 分配合并助手，本人 UI PR 由它 `pr ui-assign` 在周晓亮、张振豪之间轮询指派验收并附 PR 链接。**工作会话不认识 foreman**：它只读工单、改工作区、跑测试、commit 并给普通最终回复（不 push、不开 PR、不碰工单、不输出 RESULT）；router agent或人工按需 `watch poll`，把任务状态写成 `task.update` 事件，Worker 再 queue 给任务所属编排。是否开 PR、续跑、合并、修改工单业务状态与收尾全部由编排判断；push/建 PR 用 `foreman pr open`，合并走 `foreman pr merge`，合完 `foreman clean` 清 worktree 与会话。Gitea 的读、建单/改单/评论/关单、dws 会话、herdr 一律直连。**全链路异步**：`hand`/`dispatch`/`resume` 是投递动作，发出去就返回（秒级），工作会话常跑 30–60 分钟（实测 50 分钟）才 commit 收工——**派完就走，别等回复、别轮询会话、别重派**。当用户说自动接单、接工单、把工单派给豆包、看某条工单处理到哪、把卡住的单放回队列，或提到 foreman 时报 app_busy / locked / pr-open 时使用。**一工程一工作区**：跨工程的工单每个工程各建一个 worktree、各一条 PR，缺工程用 `foreman ws add` 现开。
 ---
 
 # foreman：接单编排
@@ -106,9 +106,9 @@ foreman ws add --repo <工程名|owner/name> --issue <owner/name>#<单号> [--ba
 foreman ws list --issue <owner/name>#<单号>                                            # 这条单已经开了哪几个工程
 ```
 
-## 常驻服务（Schedule → Inbox → Worker；Outbox → Dispatcher）
+## 常驻服务（Schedule 执行 script/agent → 结果写 Inbox → Worker；Outbox → Dispatcher）
 
-foreman 是「CLI + 一个常驻服务」。持久 Schedule、SQLite Inbox 和单 Worker 同在 `foreman serve` 进程：Schedule 到期只写 `~/.foreman/console.db` 的 `agent_inbox`，Worker 收到写入后直接唤醒并复用同一条路由会话，1 秒轮询负责漏唤醒与重启恢复；24 小时未成功投递才新建路由会话。**Schedule 不直接给 Agent 发消息，Worker 不自行派单**。事件按来源去重、同类 pending 合并替换、过期丢弃、失败重试；Inbox done 只表示已成功交给 dws，不表示 Agent 已完成工作。
+foreman 是「CLI + 一个常驻服务」。持久 Schedule、SQLite Inbox 和单 Worker 同在 `foreman serve` 进程：Schedule 到期按定义直接运行 script（PR 扫描、邮件轮询）或调用 agent（路由巡检），再把成功/失败结果写成 `schedule.result` 注入 `~/.foreman/console.db` 的 `agent_inbox`。Worker 只投递普通消息、确认执行结果，不再运行这些定时业务；1 秒轮询负责漏唤醒与重启恢复，24 小时未成功投递才新建路由会话。事件按来源去重、同类 pending 合并替换、过期丢弃、失败重试；`schedule.result` 的 done 只表示结果已确认，普通消息的 done 只表示已交给 dws，都不表示 Agent 已完成工作。
 
 router agent负责健康检查、按优先级/容量接单、重派失联编排、本地修账，以及每轮用 `foreman tasks --json` 复核并通过 `foreman clean --all` 清理 `done/cleaned` 残留。执行收工不再有代码定时轮询，`watch poll` 由router agent或人工按需执行；任务状态与最终回复经 `task.update` 由 Worker queue 给所属编排。
 
@@ -116,7 +116,7 @@ router agent负责健康检查、按优先级/容量接单、重派失联编排�
 foreman serve [--daemon]         # 起服务：前台跑（--daemon 后台，输出进 service.log）
 foreman ping                     # 在不在：pid / 版本 / uptime / 在听几条
 foreman status                   # 服务 + router 会话/投递 + 监听明细
-foreman route                  # 立即写router agent Inbox，由 Worker 投递（不代替它决策）
+foreman route                  # 立即调用router agent，并把执行结果写入 Inbox（不代替它决策）
 foreman inbox list [--limit 100] # 看事件、Schedule、pending/done/dropped 与丢弃原因
 foreman worker run               # 排障时手动消费一轮；正常由 wake/轮询驱动
 foreman send --type mail --to <邮箱> --subject <主题> [--body <正文>] [--session-id <会话ID>]
@@ -133,7 +133,7 @@ foreman watch poll               # 立刻跑一轮（checked / settled / enqueue
 - **普通邮件回复**：邮件主题自动带 `[FM-SID:<会话ID>]`，ID 取 `--session-id` 或当前 `MCP_VM_CONVERSATION_ID`。非验收回复先写 `mail.reply` Inbox，Worker 命中会话后 steer；无 ID 或会话不存在时交 router agent。`[FM-xxxxxxxx]` 验收回复仍走原白名单与验收流程。旧 `inspector` 配置/账本/事件仅兼容读取。
 - **派单通道**：`pickup.maxRunning`（默认 2）限制router agent `foreman run` 或人工 `foreman pickup` 的并行单数，优先级沿用 `pickup.priority` 等既有配置；agent 主动 `dispatch` 不限上限，派活动作串行并抢 `run.lock`。自动合并通道已取消，PR 由 `foreman pr merge` 幂等收口；UI PR 仍需两名测试同学验收，未获验收不会自动合并。
 
-- **router agent**：每 `router.intervalSeconds`（默认 600s）由 Schedule 写巡检事件；Worker 合并同批 PR 通知，queue 同一路由会话，24 小时未成功才轮换。每轮先读 `foreman tasks --json`：主体是 `sessions` 父子树，节点 `state=running/idle/gone/unknown` 为真实会话状态，`issueKey/issueState` 仅作归属、容量与清理元数据。在飞数取 `summary.unresolvedIssues`，PR 数取 `summary.prOpenIssues`，真实编码运行只数编码节点 `state=running`。全部未收口合计最多 `pickup.maxRunning`（默认 2），`handed` 占槽；满额禁止 `run/pickup/hand/orch start/dispatch`，dry-run 只看候选优先级。发现执行会话收工才 `watch poll`；每轮 `foreman clean --all` 幂等清理 `done/cleaned` 残留，非终态不得清理。确认原编排失联才 `hand --fresh`；只修本地完成状态用 `issue settle <N> --repo R --note "依据"`。旧 `pickup.auto` / `kickAfterDone` 不再生效，`run --every` 已拒绝执行。
+- **router agent**：每 `router.intervalSeconds`（默认 600s）由 Schedule 的 agent 执行器直接 queue 同一路由会话，并把投递结果写回 Inbox；Worker 只确认结果。每轮先读 `foreman tasks --json`：主体是 `sessions` 父子树，节点 `state=running/idle/gone/unknown` 为真实会话状态，`issueKey/issueState` 仅作归属、容量与清理元数据。在飞数取 `summary.unresolvedIssues`，PR 数取 `summary.prOpenIssues`，真实编码运行只数编码节点 `state=running`。全部未收口合计最多 `pickup.maxRunning`（默认 2），`handed` 占槽；满额禁止 `run/pickup/hand/orch start/dispatch`，dry-run 只看候选优先级。发现执行会话收工才 `watch poll`；每轮 `foreman clean --all` 幂等清理 `done/cleaned` 残留，非终态不得清理。确认原编排失联才 `hand --fresh`；只修本地完成状态用 `issue settle <N> --repo R --note "依据"`。旧 `pickup.auto` / `kickAfterDone` 不再生效，`run --every` 已拒绝执行。
 
 - **CLI 启动即握手**（除 `serve` / `help`）：任意子命令起来先读端口文件 `~/.foreman/service.port`（服务写的纯数字），拿它去 `GET /api/ping`；通了直接跑，不通就自动拉起服务、等服务把端口写进文件再连（上限 `handshakeTimeoutMs`，默认 5s）。**CLI 与服务的通信全程 HTTP，没有 unix socket。** 起不来非零退出，打印 `✗ foreman 服务没起来：<原因>` + 两条可执行提示（`foreman serve`、`cat ~/.foreman/service.log`），照做，别手动猜。
 - 逃生开关 `--no-service`：跳过握手与自动拉起，只跑这一条命令（测试与排障用）；配置 `service.enabled: false` 等价于一直带它。
@@ -179,7 +179,7 @@ planner 不再有服务定时器，也不参与通知投递。候选顺序与容
 ## 命令
 
 ```bash
-foreman route                        # 立即写router agent Inbox，由 Worker 投递；不代替它做决策
+foreman route                        # 立即调用router agent并写执行结果；不代替它做决策
 foreman run --dry-run --once          # 只看计划（会交给谁 / 建在哪 / 发什么）
 foreman run --once                    # 跑一轮：捞到单交给编排会话（hand）
 foreman run --direct --once           # 这一轮自己派活（老行为，不交给编排）
@@ -240,7 +240,7 @@ foreman doctor [--start]              # --start 才真的连豆包窗口读状�
 
 - **基线写在配置 `repos[].base`**（配了 `products` 就是 `products[].repos[].base`；本工程当前是 `sit-20261126`），代码和命令都不写死；分支从 `origin/<base>` 拉，验收按 `origin/<base>..HEAD` 算。
 - **产品分组 `products[]`**：一个产品 = 一套自己的项目群（`repos[]`）+ `projectDir`（派单/合并两份提示词默认用代码内置的 `src/builtin/dispatch-prompt.md` / `merge-prompt.md`，想单独换一份才写 `promptFile` / `mergePromptFile`）。配了 `products` 就以它为准（顶层 `repos` 只在没有 products 时用），捞单/PR 扫描/投递都按产品走；产品没写 `promptFile`/`mergePromptFile`/`projectDir` 时回落顶层 `deliver` 同名配置（`mergePromptFile` 再回落 `promptFile`），全空就用内置。**加新产品只改配置**：加一段 products（提示词可不写），重启服务，不动代码。
-- **router agent `router`**：`enabled` 默认 true，`intervalSeconds` 默认 600，`recreateAfterHours` 默认 24。持久 Schedule 只写 Inbox，Worker 再 queue 同一路由会话；接单由router agent按 `pickup.priority` 和 `maxRunning` 决策。旧 `pickup.auto` / `kickAfterDone` 不再生效，代码没有 pickup cron、收口补单或执行收工定时轮询。
+- **router agent `router`**：`enabled` 默认 true，`intervalSeconds` 默认 600，`recreateAfterHours` 默认 24。持久 Schedule 直接调用 agent 并把结果写 Inbox，Worker 只确认结果；接单由router agent按 `pickup.priority` 和 `maxRunning` 决策。旧 `pickup.auto` / `kickAfterDone` 不再生效，代码没有 pickup cron、收口补单或执行收工定时轮询。
 - **Outbox / Lark**：`outbox.pollMs` 默认 1000、`retrySeconds` 30、`leaseSeconds` 120、`maxAttempts` 8；`lark.bin` 默认 `lark-cli`，`lark.as` 默认 `user`（可配 `bot`）。外发状态用 `foreman outbox list` 查，不凭入队返回宣称已送达。
 - **`pickup.labelIds` 必须是数字 id**：REST 的 `labels` 参数只认名字，foreman 内部按 `label-list` 把 id 翻成名字、再按 id 精确过滤；id 写错会直接报 `not_found`。查 id 用 `label-list`（`ready-for-agent` = 5）。
 - **合并只走 `foreman pr merge`**：自动合并通道与 merge 定时器已取消。非 UI 单由编排核对后显式合并；UI 单还要两名测试同学回复「验收通过」，router agent不得绕过。

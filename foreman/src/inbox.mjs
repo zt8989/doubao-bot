@@ -1,5 +1,5 @@
-// Always-on 原语：SQLite Schedule → durable Inbox → 单 Worker。
-// Schedule 只产生事件；Worker 在同一 Node 进程被直接唤醒，轮询仅作漏唤醒与重启恢复兜底。
+// Always-on 原语：SQLite Schedule 执行 script/agent → 结果写 durable Inbox → 单 Worker。
+// Worker 只投递消息或确认执行结果；轮询仅作漏唤醒与重启恢复兜底。
 import { randomUUID } from "node:crypto"
 import { nextCronTime } from "./cron.mjs"
 
@@ -208,13 +208,15 @@ export class InboxStore {
 }
 
 export class ScheduleRunner {
-  constructor({ store, allow = () => true, onChange = null, onError = null }) {
+  constructor({ store, executors = {}, allow = () => true, onChange = null, onError = null }) {
     this.store = store
+    this.executors = executors
     this.allow = allow
     this.onChange = onChange
     this.onError = onError
     this.timer = null
     this.closed = false
+    this.runPromise = null
   }
 
   sync(definitions, now = new Date()) {
@@ -225,60 +227,98 @@ export class ScheduleRunner {
         const enabled = definition.enabled === true
         let nextAt = enabled ? previous?.next_at || at : null
         if (enabled && (!previous || previous.cron !== definition.cron)) nextAt = at
+        const executor = definition.executor || this.executors[definition.id]?.type || "script"
+        const payload = { ...definition.payload, executor }
         this.store.db.prepare(`
           INSERT INTO agent_schedules (id, kind, cron, enabled, next_at, payload, updated_at)
           VALUES (?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, cron = excluded.cron,
             enabled = excluded.enabled, next_at = excluded.next_at, payload = excluded.payload, updated_at = excluded.updated_at
         `).run(definition.id, definition.kind, definition.cron, enabled ? 1 : 0, nextAt,
-          JSON.stringify(definition.payload || {}), at)
+          JSON.stringify(payload), at)
       }
     })
     this.onChange?.(this.store.schedules())
     return this.store.schedules()
   }
 
-  tick(now = new Date()) {
+  async execute(schedule, { dueAt = schedule.nextAt, nextAt = "", manual = false, now = new Date() } = {}) {
+    const executor = this.executors[schedule.id]
+    const executorType = executor?.type || schedule.payload.executor || "script"
+    let result
+    try {
+      if (!executor || typeof executor.run !== "function") throw new Error(`Schedule ${schedule.id} 没有 ${executorType} 执行器`)
+      result = await executor.run(schedule, { manual })
+    } catch (error) {
+      result = { ok: false, error: error.message }
+    }
+    const failed = result?.ok === false
+    const action = executorType === "agent" ? "Agent 调用" : "脚本执行"
+    const event = this.store.enqueue({
+      kind: "schedule.result",
+      text: failed
+        ? `${schedule.id} ${action}失败：${result?.error || "未知错误"}`
+        : `${schedule.id} ${action}完成`,
+      payload: { scheduleId: schedule.id, executor: executorType, dueAt, result: result ?? { ok: true } },
+      dedupeKey: `schedule-result:${schedule.id}:${dueAt}`,
+      coalesceKey: `schedule:${schedule.id}`,
+      expiresAt: manual ? "" : nextAt,
+    }, now)
+    return { ...event, kind: "schedule.result", scheduleId: schedule.id, executor: executorType, result }
+  }
+
+  async executeDue(now) {
     const at = iso(now)
-    const fired = []
     const due = this.store.tx(() => {
       const rows = this.store.db.prepare("SELECT * FROM agent_schedules WHERE enabled = 1 AND next_at IS NOT NULL AND next_at <= ? ORDER BY next_at, id").all(at)
       for (const row of rows) {
-        const schedule = scheduleOf(row)
         const next = nextCronTime(row.cron, new Date(at))
+        // 先推进 cron 再执行，避免脚本失败或结果入箱失败导致同一业务重复运行。
         this.store.db.prepare("UPDATE agent_schedules SET next_at = ?, updated_at = ? WHERE id = ?")
           .run(next ? next.toISOString() : null, at, row.id)
-        if (!this.allow(schedule)) continue
-        const event = this.store._enqueue({
-          kind: schedule.kind,
-          payload: { ...schedule.payload, scheduleId: schedule.id, dueAt: schedule.nextAt },
-          dedupeKey: `schedule:${schedule.id}:${schedule.nextAt}`,
-          coalesceKey: `schedule:${schedule.id}`,
-          expiresAt: next ? next.toISOString() : "",
-        }, now)
-        fired.push({ ...event, kind: schedule.kind })
       }
       return rows.map(scheduleOf)
     })
-    // 同一批 Schedule 全部落库后只唤醒一次，让 Worker 能合并消费。
-    if (fired.some((event) => event.status === "pending")) this.store.onChange?.({ batch: fired })
     if (due.length) this.onChange?.(this.store.schedules())
+    const fired = []
+    for (const schedule of due) {
+      if (!this.allow(schedule)) continue
+      const nextAt = this.store.schedules().find((item) => item.id === schedule.id)?.nextAt || ""
+      fired.push(await this.execute(schedule, { nextAt, now }))
+    }
     return fired
+  }
+
+  tick(now = new Date()) {
+    if (this.closed) return Promise.resolve([])
+    if (this.runPromise) return this.runPromise
+    this.runPromise = this.executeDue(now).finally(() => { this.runPromise = null })
+    return this.runPromise
+  }
+
+  async runNow(id) {
+    if (this.runPromise) await this.runPromise
+    const schedule = this.store.schedules().find((item) => item.id === id)
+    if (!schedule) throw new Error(`Schedule ${id} 不存在`)
+    const dueAt = `manual:${new Date().toISOString()}`
+    return this.execute(schedule, { dueAt, manual: true })
   }
 
   start(intervalMs = 1000) {
     this.closed = false
     if (this.timer) clearInterval(this.timer)
     this.timer = setInterval(() => {
-      try { this.tick() } catch (error) { this.onError?.(error) }
+      this.tick().catch((error) => this.onError?.(error))
     }, Math.max(100, Number(intervalMs) || 1000))
     this.timer.unref?.()
   }
 
-  stop() {
+  async stop() {
     this.closed = true
     if (this.timer) clearInterval(this.timer)
     this.timer = null
+    const pending = this.runPromise
+    if (pending) await pending
   }
 }
 
@@ -365,7 +405,8 @@ export class AgentWorker {
         const ids = batch.map((event) => event.id)
         try {
           const handler = kind === "router" ? this.handlers.router ?? this.handlers.inspector : this.handlers[kind]
-          if (typeof handler !== "function") throw new Error(`Worker 没有 ${kind} 处理器`)
+          // 定时业务已在 Schedule 的 script/agent 执行器中完成，结果消息只确认，不再交给 Worker 执行。
+          if (kind !== "schedule.result" && typeof handler !== "function") throw new Error(`Worker 没有 ${kind} 处理器`)
           const input = kind === "router"
             ? {
                 events: batch,
@@ -373,7 +414,7 @@ export class AgentWorker {
                 notices: batch.filter((event) => ["router.notice", "inspector.notice"].includes(event.kind)).map((event) => event.text).filter(Boolean),
               }
             : kind === "mail.reply" ? batch[0] : batch
-          const result = await handler(input)
+          const result = kind === "schedule.result" ? { ok: true } : await handler(input)
           if (result?.ok === false) throw new Error(result.error || `${kind} 处理失败`)
           this.store.complete(ids, now)
           completed += ids.length

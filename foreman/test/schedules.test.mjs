@@ -24,9 +24,12 @@ test("listSchedules：保留 PR/邮件，router agent取代自动接单与执行
   assert.equal(router.enabled, true)
   assert.equal(router.cron, "*/10 * * * *")
   assert.equal(router.runLabel, "立即巡检")
-  assert.match(router.detail, /queue 同一路由会话/)
+  assert.equal(router.executor, "agent")
+  assert.match(router.detail, /直接调用同一路由 Agent/)
+  assert.match(router.detail, /结果写回 Inbox/)
   assert.match(router.detail, /24/)
   assert.equal(rows.find((r) => r.id === "prWatch").enabled, true)
+  assert.equal(rows.find((r) => r.id === "prWatch").executor, "script")
   assert.equal(rows.find((r) => r.id === "prWatch").cron, "*/5 * * * *")
   // 验收邮件默认关（testers 还是占位符），cron 用 mail.pollSeconds。
   const mailRow = rows.find((r) => r.id === "mail")
