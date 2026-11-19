@@ -54,7 +54,7 @@ description: 接单编排 CLI（项目 foreman，命令 foreman）：**以工单
 | 清尾 | `foreman clean <owner/name>#N`（或 `--all`） | 清 worktree、本地分支、工作会话、监听与这张单的编排会话（幂等；编排会话在正跑时留给服务下一轮收） |
 
 - 上表里 `hand` / `dispatch` / `resume` **全是异步投递**：命令返回（`handed` / `dispatched`）就等于这一步做完了，别接着等；从投递到普通最终回复回来常 30–60 分钟（见上面「异步」节）。
-- 工作会话的**任何状态更新**都先写成 `task.update` 持久事件，由 Worker `dws msg --mode queue` 投给**这张单绑的编排会话**；不再新建会话、不再 `dws notify`，也不直接 steer。用户自主发起的单就投回发起方会话。
+- 工作会话的**任何状态更新**都先写成 `task.update` 持久事件，由 Worker `dws msg --mode queue` 投给**这张单绑的编排会话**；不再新建会话、不再 `dws notify`，也不直接 steer。用户自主发起的单就投回发起方会话。若 dws 明确报「侧边栏里没有任务」，Worker 将同一事件附上原目标不可达的说明兜底交router agent；其他 queue 异常继续重试。
 - 失败/卡住先由编排归因：原会话能修正才 `resume <执行会话id>`；需要其他智能体就新派并 `watch add` 登记，完成后由 Worker queue 回等待结果的原会话；不要一律续跑，也不要为同一职责重复开会话。
 - PR 监听把他人候选与本人 UI 候选写入router agent Inbox；Worker 复用同一路由会话。他人 PR 由它 `pr assign` 显式分配后才新建合并会话，本人 UI PR 由它 `pr ui-assign` 轮询指派周晓亮/张振豪验收，扫描器不直接建会话、不指派。
 - 降级：配置 `sessionFlow.enabled: false` 或 `foreman run --direct` 退回老的多会话模型。
