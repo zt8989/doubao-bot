@@ -787,133 +787,250 @@ const WEEK_DAYS = [
 ]
 
 class FmSchedules extends LitElement {
-  static properties = { schedules: { attribute: false }, workHours: { attribute: false }, busy: { type: String }, error: { type: String }, note: { type: String } }
+  static properties = {
+    schedules: { attribute: false },
+    workHours: { attribute: false },
+    busy: { type: String },
+    error: { type: String },
+    note: { type: String },
+    screen: { type: String },
+    selectedId: { type: String },
+    formError: { type: String },
+  }
+  constructor() {
+    super()
+    this.screen = "list"
+    this.selectedId = ""
+    this.formError = ""
+  }
   createRenderRoot() {
     return this
   }
-  saveWorkHours() {
-    const start = this.querySelector('input[data-work-hours="start"]')?.value || ""
-    const end = this.querySelector('input[data-work-hours="end"]')?.value || ""
-    const days = [...this.querySelectorAll("input[data-work-days]:checked")].map((input) => Number(input.value))
-    emit(this, "work-hours-save", { days, start, end })
+  selected() {
+    return (this.schedules || []).find((item) => item.id === this.selectedId) || null
   }
-  saveCron(id) {
-    const input = this.querySelector(`input[data-cron="${id}"]`)
-    if (input) emit(this, "schedule-save", { id, cron: input.value.trim() })
+  showList() {
+    this.screen = "list"
+    this.selectedId = ""
+    this.formError = ""
   }
-  render() {
-    const allRows = this.schedules || []
-    const workWindow = allRows.find((s) => s.id === "workHours")
-    const rows = allRows.filter((s) => s.id !== "workHours")
+  showDetail(id) {
+    this.selectedId = id
+    this.screen = "detail"
+    this.formError = ""
+  }
+  showEdit(id) {
+    this.selectedId = id
+    this.screen = "edit"
+    this.formError = ""
+  }
+  save() {
+    const schedule = this.selected()
+    if (!schedule) return
+    const value = (name) => this.querySelector(`[data-schedule-field="${name}"]`)
+    const patch = { enabled: Boolean(value("enabled")?.checked) }
+    if (schedule.id === "workHours") {
+      patch.days = [...this.querySelectorAll("[data-work-days]:checked")].map((input) => Number(input.value))
+      patch.start = value("start")?.value || ""
+      patch.end = value("end")?.value || ""
+    } else {
+      patch.cron = value("cron")?.value.trim() || ""
+    }
+    if (schedule.script) {
+      let args
+      try {
+        args = JSON.parse(value("args")?.value || "{}")
+      } catch (error) {
+        this.formError = `脚本参数不是合法 JSON：${error.message}`
+        return
+      }
+      if (!args || typeof args !== "object" || Array.isArray(args)) {
+        this.formError = "脚本参数必须是 JSON 对象"
+        return
+      }
+      patch.script = {
+        path: value("script-path")?.value.trim() || "",
+        exportName: value("script-export")?.value.trim() || "",
+        args,
+      }
+    }
+    if (schedule.agent) patch.agent = { prompt: value("agent-prompt")?.value ?? "" }
+    this.formError = ""
+    emit(this, "schedule-save", { id: schedule.id, patch: { [schedule.id]: patch } })
+  }
+  status(schedule) {
+    return html`<span class=${"badge " + (schedule.enabled ? "notified" : "self")}>${schedule.enabled ? "运行中" : "已停止"}</span>`
+  }
+  executorBadge(schedule) {
+    if (!schedule.executor) return html`<span class="badge self">条件</span>`
+    return html`<span class="badge self">${schedule.executor === "agent" ? "Agent" : "脚本"}</span>`
+  }
+  messages() {
     return html`
-      <section class="panel work-hours-panel">
-        <div class="panel-head">
-          <h2>工作时间</h2>
-          <div class="panel-side">
-            ${workWindow ? html`
-              <span class=${"badge " + (workWindow.enabled ? "notified" : "self")}>${workWindow.enabled ? "运行中" : "已停止"}</span>
-              <button
-                class=${workWindow.enabled ? "ghost danger" : "ghost"}
-                ?disabled=${this.busy === workWindow.id}
-                @click=${() => emit(this, "schedule-toggle", { id: workWindow.id, enabled: !workWindow.enabled })}
-              >${this.busy === workWindow.id ? "…" : workWindow.enabled ? "停止" : "开启"}</button>
-            ` : ""}
-            <span class="hint">保存后立即生效，无需重启服务</span>
-          </div>
-        </div>
-        <div class="work-hours-body">
-          <div class="work-days-editor">
-            <span class="work-days-label">工作日</span>
-            <div class="work-day-options">
-              ${WEEK_DAYS.map((day) => html`
-                <label class="work-day-option">
-                  <input
-                    type="checkbox"
-                    data-work-days
-                    value=${day.value}
-                    .checked=${(this.workHours?.days ?? [1, 2, 3, 4, 5]).includes(day.value)}
-                  />
-                  <span>${day.label}</span>
-                </label>
-              `)}
-            </div>
-          </div>
-          <div class="work-hours-form">
-            <label class="time-field">
-              <span>开始时间</span>
-              <input type="time" data-work-hours="start" required step="60" value=${this.workHours?.start || "08:30"} @keydown=${(e) => { if (e.key === "Enter") this.saveWorkHours() }} />
-            </label>
-            <span class="time-separator">至</span>
-            <label class="time-field">
-              <span>结束时间</span>
-              <input type="time" data-work-hours="end" required step="60" value=${this.workHours?.end || "18:30"} @keydown=${(e) => { if (e.key === "Enter") this.saveWorkHours() }} />
-            </label>
-            <button class="ghost work-hours-save" ?disabled=${this.busy !== ""} @click=${() => this.saveWorkHours()}>
-              ${this.busy === "work-hours" ? "保存中…" : "保存工作时间"}
-            </button>
-          </div>
-          ${this.note ? html`<div class="sched-note">${this.note}</div>` : ""}
-        </div>
-      </section>
+      ${this.error || this.formError ? html`<div class="sched-error">${this.formError || this.error}</div>` : ""}
+      ${this.note ? html`<div class="sched-note schedule-message">${this.note}</div>` : ""}
+    `
+  }
+  renderList(rows) {
+    return html`
       <section class="panel">
         <div class="panel-head">
-          <h2>定时任务</h2>
-          <div class="panel-side">
-            <span class="hint">cron 格式：分 时 日 月 周；也支持第 6 段秒</span>
-            <span class="hint">「立即执行」不看时间与开关，只跑一轮</span>
-          </div>
+          <h2>设置</h2>
+          <div class="panel-side"><span class="hint">列表只读；进入详情或编辑后管理任务</span></div>
         </div>
-        ${this.error ? html`<div class="sched-error">${this.error}</div>` : ""}
+        ${this.messages()}
         <ul class="sched-list">
           ${rows.map((s) => html`
             <li class="sched">
               <div class="sched-main">
                 <span class=${"dot " + (s.enabled ? "on" : "off")}></span>
                 <span class="sched-name">${s.label}</span>
-                <span class=${"badge " + (s.enabled ? "notified" : "self")}>${s.enabled ? "运行中" : "已停止"}</span>
-                ${s.executor ? html`<span class="badge self">${s.executor === "agent" ? "Agent" : "脚本"}</span>` : ""}
+                ${this.status(s)}
+                ${this.executorBadge(s)}
                 <span class="sched-detail">${s.detail || ""}</span>
               </div>
               <div class="sched-meta">
+                ${s.cron !== undefined ? html`<span class="pr-note">cron ${s.cron}</span>` : ""}
+                ${s.nextAt ? html`<span class="pr-note">下次 ${s.nextAt}</span>` : ""}
                 ${s.lastAt ? html`<span class="pr-note">上次 ${s.lastAt}</span>` : ""}
                 ${s.count ? html`<span class="pr-note">已跑 ${s.count} 轮</span>` : ""}
-                ${s.lastResult ? html`<span class="pr-note">${resultText(s.lastResult)}</span>` : ""}
               </div>
               <div class="sched-acts">
-                ${s.runnable
-                  ? html`<button
-                      class="ghost"
-                      ?disabled=${this.busy === `run-${s.id}` || this.busy !== "" || s.running}
-                      @click=${() => emit(this, "schedule-run", { id: s.id })}
-                    >${this.busy === `run-${s.id}` ? "执行中…" : s.runLabel || "立即执行"}</button>`
-                  : ""}
-                <button
-                  class=${s.enabled ? "ghost danger" : "ghost"}
-                  ?disabled=${this.busy === s.id}
-                  @click=${() => emit(this, "schedule-toggle", { id: s.id, enabled: !s.enabled })}
-                >${this.busy === s.id ? "…" : s.enabled ? "停止" : "开启"}</button>
+                <button class="ghost" @click=${() => this.showDetail(s.id)}>详情</button>
+                <button class="ghost" @click=${() => this.showEdit(s.id)}>编辑</button>
               </div>
-              ${s.cron !== undefined
-                ? html`<div class="sched-cron">
-                    <span class="cron-label">cron</span>
-                    <input
-                      class="cron-input"
-                      data-cron=${s.id}
-                      value=${s.cron || ""}
-                      spellcheck="false"
-                      placeholder="*/30 * * * *"
-                      @keydown=${(e) => { if (e.key === "Enter") this.saveCron(s.id) }}
-                    />
-                    <button class="ghost" ?disabled=${this.busy === `cron-${s.id}`} @click=${() => this.saveCron(s.id)}>
-                      ${this.busy === `cron-${s.id}` ? "保存中…" : "保存时间"}
-                    </button>
-                    <span class="pr-note">${s.nextAt ? `下次 ${s.nextAt}` : s.enabled ? "等待排期" : "开启后生效"}</span>
-                  </div>`
-                : ""}
             </li>`)}
-          ${rows.length ? "" : html`<li class="empty"><div class="empty-title">暂时取不到开关状态</div></li>`}
+          ${rows.length ? "" : html`<li class="empty"><div class="empty-title">暂时取不到设置项</div></li>`}
         </ul>
       </section>`
+  }
+  renderScript(script, editing) {
+    if (editing) {
+      return html`
+        <section class="schedule-config-section">
+          <h3>脚本配置</h3>
+          <label class="schedule-field">
+            <span>脚本路径</span>
+            <input data-schedule-field="script-path" required spellcheck="false" .value=${script.path} />
+            <small>相对 Foreman 包目录，或填写绝对路径</small>
+          </label>
+          <label class="schedule-field">
+            <span>导出函数</span>
+            <input data-schedule-field="script-export" required spellcheck="false" .value=${script.exportName} />
+          </label>
+          <label class="schedule-field">
+            <span>脚本参数（JSON 对象）</span>
+            <textarea data-schedule-field="args" rows="7" spellcheck="false" .value=${JSON.stringify(script.args || {}, null, 2)}></textarea>
+          </label>
+        </section>`
+    }
+    return html`
+      <section class="schedule-config-section">
+        <h3>脚本配置</h3>
+        <dl class="schedule-definition">
+          <div><dt>脚本路径</dt><dd><code>${script.path}</code></dd></div>
+          <div><dt>导出函数</dt><dd><code>${script.exportName}</code></dd></div>
+        </dl>
+        <span class="schedule-field-label">脚本参数</span>
+        <pre class="schedule-prompt">${JSON.stringify(script.args || {}, null, 2)}</pre>
+      </section>`
+  }
+  renderAgent(agent, editing) {
+    return html`
+      <section class="schedule-config-section">
+        <h3>Agent 提示词</h3>
+        <p class="hint">${agent.custom ? "当前使用自定义提示词；清空后保存可恢复内置提示词。" : "当前使用内置提示词。"} 提示词在新建路由 Agent 会话时使用。</p>
+        ${editing
+          ? html`<textarea class="schedule-agent-input" data-schedule-field="agent-prompt" rows="20" spellcheck="false" .value=${agent.prompt}></textarea>`
+          : html`<pre class="schedule-prompt">${agent.prompt}</pre>`}
+      </section>`
+  }
+  renderDetail(schedule) {
+    const result = resultText(schedule.lastResult) || (schedule.lastResult && typeof schedule.lastResult === "object" ? JSON.stringify(schedule.lastResult) : "")
+    return html`
+      <section class="panel">
+        <div class="panel-head">
+          <div class="schedule-title">
+            <button class="ghost" @click=${() => this.showList()}>← 返回列表</button>
+            <h2>${schedule.label} · 详情</h2>
+            ${this.status(schedule)}${this.executorBadge(schedule)}
+          </div>
+          <div class="panel-side">
+            ${schedule.runnable ? html`<button class="ghost" ?disabled=${this.busy !== "" || schedule.running} @click=${() => emit(this, "schedule-run", { id: schedule.id })}>${this.busy === `run-${schedule.id}` ? "执行中…" : schedule.runLabel || "立即执行"}</button>` : ""}
+            <button class="ghost" @click=${() => this.showEdit(schedule.id)}>编辑</button>
+          </div>
+        </div>
+        ${this.messages()}
+        <div class="schedule-detail-body">
+          <p class="schedule-description">${schedule.detail || ""}</p>
+          <dl class="schedule-definition">
+            <div><dt>任务 ID</dt><dd><code>${schedule.id}</code></dd></div>
+            ${schedule.cron !== undefined ? html`<div><dt>Cron</dt><dd><code>${schedule.cron}</code></dd></div>` : ""}
+            <div><dt>下次执行</dt><dd>${schedule.nextAt || "未排期"}</dd></div>
+            <div><dt>上次执行</dt><dd>${schedule.lastAt || "暂无"}</dd></div>
+            <div><dt>执行次数</dt><dd>${Number(schedule.count || 0)}</dd></div>
+            ${result ? html`<div><dt>最近结果</dt><dd>${result}</dd></div>` : ""}
+          </dl>
+          ${schedule.script ? this.renderScript(schedule.script, false) : ""}
+          ${schedule.agent ? this.renderAgent(schedule.agent, false) : ""}
+        </div>
+      </section>`
+  }
+  renderEdit(schedule) {
+    return html`
+      <section class="panel">
+        <div class="panel-head">
+          <div class="schedule-title">
+            <button class="ghost" @click=${() => this.showDetail(schedule.id)}>← 返回详情</button>
+            <h2>${schedule.label} · 编辑</h2>
+            ${this.executorBadge(schedule)}
+          </div>
+        </div>
+        ${this.messages()}
+        <form class="schedule-edit-form" @submit=${(event) => { event.preventDefault(); this.save() }}>
+          <label class="schedule-enabled">
+            <input type="checkbox" data-schedule-field="enabled" .checked=${schedule.enabled} />
+            <span>启用这项设置</span>
+          </label>
+          ${schedule.id === "workHours" ? html`
+            <section class="schedule-config-section">
+              <h3>工作时间</h3>
+              <div class="work-days-editor">
+                <span class="work-days-label">工作日</span>
+                <div class="work-day-options">
+                  ${WEEK_DAYS.map((day) => html`
+                    <label class="work-day-option">
+                      <input type="checkbox" data-work-days value=${day.value} .checked=${(this.workHours?.days ?? [1, 2, 3, 4, 5]).includes(day.value)} />
+                      <span>${day.label}</span>
+                    </label>`)}
+                </div>
+              </div>
+              <div class="work-hours-form">
+                <label class="time-field"><span>开始时间</span><input type="time" data-schedule-field="start" required step="60" .value=${this.workHours?.start || "08:30"} /></label>
+                <span class="time-separator">至</span>
+                <label class="time-field"><span>结束时间</span><input type="time" data-schedule-field="end" required step="60" .value=${this.workHours?.end || "18:30"} /></label>
+              </div>
+            </section>` : html`
+            <label class="schedule-field">
+              <span>Cron</span>
+              <input class="cron-input" data-schedule-field="cron" required spellcheck="false" .value=${schedule.cron || ""} placeholder="*/30 * * * *" />
+              <small>格式：分 时 日 月 周；也支持第 6 段秒</small>
+            </label>`}
+          ${schedule.script ? this.renderScript(schedule.script, true) : ""}
+          ${schedule.agent ? this.renderAgent(schedule.agent, true) : ""}
+          <div class="schedule-form-actions">
+            <button type="button" class="ghost" @click=${() => this.showDetail(schedule.id)}>取消</button>
+            <button type="submit" class="ghost" ?disabled=${this.busy !== ""}>${this.busy === schedule.id ? "保存中…" : "保存"}</button>
+          </div>
+        </form>
+      </section>`
+  }
+  render() {
+    const rows = this.schedules || []
+    const selected = this.selected()
+    if (this.screen === "detail" && selected) return this.renderDetail(selected)
+    if (this.screen === "edit" && selected) return this.renderEdit(selected)
+    return this.renderList(rows)
   }
 }
 
@@ -1143,15 +1260,13 @@ class FmConsole extends LitElement {
       if (this.view === "schedules") this.loadSchedules()
       if (this.view === "operations") this.loadOperations()
     }
-    this._onSchedToggle = (e) => this.toggleSchedule(e.detail.id, e.detail.enabled)
     this._onSidebarToggle = () => {
       this.sidebarCollapsed = !this.sidebarCollapsed
       try {
         localStorage.setItem(SIDEBAR_KEY, this.sidebarCollapsed ? "1" : "0")
       } catch {}
     }
-    this._onSchedSave = (e) => this.saveScheduleCron(e.detail.id, e.detail.cron)
-    this._onWorkHoursSave = (e) => this.saveWorkHours(e.detail)
+    this._onSchedSave = (e) => this.saveSchedule(e.detail.id, e.detail.patch)
     this._onScheduleRun = (e) => this.runScheduleNow(e.detail.id)
     this._onOpFilter = (e) => {
       this.opFilter = e.detail.filter
@@ -1179,9 +1294,7 @@ class FmConsole extends LitElement {
     this.addEventListener("refresh", this._onRefresh)
     this.addEventListener("view-set", this._onView)
     this.addEventListener("sidebar-toggle", this._onSidebarToggle)
-    this.addEventListener("schedule-toggle", this._onSchedToggle)
     this.addEventListener("schedule-save", this._onSchedSave)
-    this.addEventListener("work-hours-save", this._onWorkHoursSave)
     this.addEventListener("schedule-run", this._onScheduleRun)
     this._onNodeToggle = (e) => this.toggleNode(e.detail)
     this.addEventListener("node-toggle", this._onNodeToggle)
@@ -1243,9 +1356,7 @@ class FmConsole extends LitElement {
     this.removeEventListener("refresh", this._onRefresh)
     this.removeEventListener("view-set", this._onView)
     this.removeEventListener("sidebar-toggle", this._onSidebarToggle)
-    this.removeEventListener("schedule-toggle", this._onSchedToggle)
     this.removeEventListener("schedule-save", this._onSchedSave)
-    this.removeEventListener("work-hours-save", this._onWorkHoursSave)
     this.removeEventListener("schedule-run", this._onScheduleRun)
     this.removeEventListener("node-toggle", this._onNodeToggle)
     this.removeEventListener("operation-filter", this._onOpFilter)
@@ -1459,77 +1570,40 @@ class FmConsole extends LitElement {
     }
   }
 
-  async toggleSchedule(id, enabled) {
-    if (this.schedBusy) return
-    this.schedBusy = id
-    this.schedError = ""
-    try {
-      const res = await fetch("/api/schedules", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ patch: { [id]: enabled } }),
-      })
-      const body = await res.json()
-      if (!res.ok || body.ok === false) throw new Error(body.message || `HTTP ${res.status}`)
-      await this.loadSchedules()
-    } catch (e) {
-      this.schedError = `开关失败：${e.message}`
-    } finally {
-      this.schedBusy = ""
-    }
-  }
-
-  async saveScheduleCron(id, cron) {
-    if (this.schedBusy) return
-    this.schedBusy = `cron-${id}`
-    this.schedError = ""
-    try {
-      const res = await fetch("/api/schedules", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ patch: { [id]: { cron } } }),
-      })
-      const body = await res.json()
-      if (!res.ok || body.ok === false) throw new Error(body.message || `HTTP ${res.status}`)
-      this.schedules = body.schedules || []
-    } catch (e) {
-      this.schedError = `保存失败：${e.message}`
-    } finally {
-      this.schedBusy = ""
-    }
-  }
-
-  async saveWorkHours({ days = [], start, end } = {}) {
-    if (this.schedBusy) return
+  async saveSchedule(id, patch) {
+    if (this.schedBusy || !patch) return
     this.schedError = ""
     this.schedNote = ""
-    if (!Array.isArray(days) || days.length === 0) {
-      this.schedError = "请至少选择一个工作日"
-      return
+    if (id === "workHours") {
+      const hours = patch.workHours || {}
+      if (!Array.isArray(hours.days) || hours.days.length === 0) {
+        this.schedError = "请至少选择一个工作日"
+        return
+      }
+      if (!hours.start || !hours.end) {
+        this.schedError = "请选择开始时间和结束时间"
+        return
+      }
+      if (hours.start >= hours.end) {
+        this.schedError = "开始时间必须早于结束时间"
+        return
+      }
     }
-    if (!start || !end) {
-      this.schedError = "请选择开始时间和结束时间"
-      return
-    }
-    if (start >= end) {
-      this.schedError = "开始时间必须早于结束时间"
-      return
-    }
-    this.schedBusy = "work-hours"
+    this.schedBusy = id
     try {
       const res = await fetch("/api/schedules", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ patch: { workHours: { days, start, end } } }),
+        body: JSON.stringify({ patch }),
       })
       const body = await res.json()
       if (!res.ok || body.ok === false) throw new Error(body.message || `HTTP ${res.status}`)
       this.schedules = body.schedules || []
-      this.workHours = body.workHours || { days, start, end }
-      this.schedNote = `工作日与工作时间已保存：${start}–${end}，已立即生效`
+      if (body.workHours) this.workHours = body.workHours
+      this.schedNote = `${this.schedules.find((item) => item.id === id)?.label || id}已保存并立即生效`
       await this.load()
     } catch (e) {
-      this.schedError = `保存工作时间失败：${e.message}`
+      this.schedError = `保存失败：${e.message}`
     } finally {
       this.schedBusy = ""
     }

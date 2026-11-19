@@ -40,6 +40,7 @@ import { OutboxStore, OutboxDispatcher } from "./outbox.mjs"
 import { enqueueOutbound } from "./outbound.mjs"
 import { LarkDriver } from "./lark.mjs"
 import { listSchedules, applySchedules, persistSchedules, cronOf } from "./schedules.mjs"
+import { runConfiguredScript } from "./executors.mjs"
 import { startOperation, finishOperation } from "./operations.mjs"
 import { startConsoleHttp } from "./consolehttp.mjs"
 import { fileURLToPath } from "node:url"
@@ -840,11 +841,11 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   ctx.notifyInspector = ctx.notifyRouter
   // 验收邮件轮询：读收件箱，按主题里的 [FM-…] 把回复认回 PR 并注回会话。
   // 回复可能在半夜到，所以这条定时器**不受工作时间窗限制**（只读收件箱，不打扰谁）。
-  const doMailPoll = async () => {
+  const recordMailPoll = async (run) => {
     if (state.mail.polling) return { ok: true, skipped: "busy" }
     state.mail.polling = true
     try {
-      const r = await mailPollOnce(ctx)
+      const r = await run()
       if (r?.ok !== false) {
         state.mail.lastPollAt = nowIso()
         state.mail.pollCount++
@@ -856,6 +857,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
       state.mail.polling = false
     }
   }
+  const doMailPoll = async () => recordMailPoll(() => mailPollOnce(ctx))
   ctx.mailPollNow = doMailPoll
   // 控制台「待分配任务」：列候选（只读，带 45s 缓存）与手动接单（只派点中的那一条）。
   ctx.candidates = (opts) => candidatesOnce(ctx, opts)
@@ -918,8 +920,8 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   scheduler = new ScheduleRunner({
     store: inbox,
     executors: {
-      prWatch: { type: "script", run: (_, { manual }) => prPollOnce(ctx, { force: manual }) },
-      mail: { type: "script", run: () => doMailPoll() },
+      prWatch: { type: "script", run: (_, { manual }) => runConfiguredScript(ctx, "prWatch", { manual }) },
+      mail: { type: "script", run: () => recordMailPoll(() => runConfiguredScript(ctx, "mail")) },
       router: { type: "agent", run: () => routerOnce(ctx, { force: true, scheduled: true }) },
     },
     allow: (schedule) => schedule.id !== "prWatch" || inWorkHours(cfg),

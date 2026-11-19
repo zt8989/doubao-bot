@@ -799,6 +799,57 @@ html[data-theme="dark"] .date-pick { color-scheme: dark; }
 
 .sched-error { margin: 10px 18px 0; color: var(--red, #ef4444); font-size: 12px; }
 
+.schedule-message { margin: 10px 18px 0; }
+.schedule-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.schedule-title h2 { margin: 0; }
+.schedule-detail-body,
+.schedule-edit-form { padding: 18px; border-top: 1px solid var(--line-soft); }
+.schedule-description { margin: 0 0 16px; color: var(--dim); font-size: 12.5px; line-height: 1.7; }
+.schedule-definition { display: grid; gap: 10px; margin: 0; }
+.schedule-definition > div { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 14px; align-items: start; }
+.schedule-definition dt { color: var(--dimmer); font-size: 12px; }
+.schedule-definition dd { margin: 0; color: var(--text); font-size: 12.5px; overflow-wrap: anywhere; }
+.schedule-definition code { font: 12px var(--mono); }
+.schedule-config-section { display: grid; gap: 12px; margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line-soft); }
+.schedule-config-section h3 { margin: 0; font-size: 13px; }
+.schedule-config-section .hint { line-height: 1.6; }
+.schedule-field { display: grid; gap: 7px; color: var(--dim); font-size: 12px; }
+.schedule-field small { color: var(--dimmer); }
+.schedule-field input,
+.schedule-field textarea,
+.schedule-agent-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: 12px/1.6 var(--mono);
+  padding: 9px 11px;
+  outline: none;
+  resize: vertical;
+}
+.schedule-field input:focus,
+.schedule-field textarea:focus,
+.schedule-agent-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 12%, transparent); }
+.schedule-field-label { color: var(--dim); font-size: 12px; }
+.schedule-prompt {
+  max-height: 460px;
+  margin: 0;
+  padding: 13px;
+  overflow: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: 11.5px/1.65 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.schedule-enabled { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; }
+.schedule-enabled input { accent-color: var(--accent); }
+.schedule-form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
+
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dimmer); flex: none; }
 
 .dot.on { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
