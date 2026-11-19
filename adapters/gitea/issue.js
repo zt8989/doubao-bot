@@ -18,7 +18,7 @@ cli({
     { name: 'assignee', type: 'string', default: '', help: '指派人，用户名，逗号分隔多个' },
     { name: 'milestone', type: 'string', default: '', help: '里程碑，名称或 id' },
     { name: 'label', type: 'string', default: '', help: '标签，名称或 id，逗号分隔多个' },
-    { name: 'project', type: 'string', default: '', help: '项目，名称或 id，逗号分隔多个（仓库级/组织级均可）' },
+    { name: 'project', type: 'string', default: '', help: 'Gitea「项目」看板（Projects）的名称或 id，逗号分隔多个；仓库级/组织级均可，注意不是仓库' },
     { name: 'ref', type: 'string', default: '', help: '引用分支 / Git 标签，如 main' },
   ],
   columns: ['issueNumber', 'title', 'url'],

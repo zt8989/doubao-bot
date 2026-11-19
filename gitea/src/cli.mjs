@@ -391,7 +391,7 @@ const USAGE = `gitea — 内网 Gitea REST API 客户端（替代 opencli 浏览
   gitea explore issues|pulls|milestones|repos [query] [--state ...] [--page N]
 
 写：
-  gitea issue --repo R --title T [--body MD] [--label a,b] [--assignee u] [--milestone M] [--project name|id] [--due YYYY-MM-DD] [--ref branch] [--image p1,p2]
+  gitea issue --repo R --title T [--body MD] [--label a,b] [--assignee u] [--milestone M] [--project 「项目」看板名|id] [--due YYYY-MM-DD] [--ref branch] [--image p1,p2]
   gitea issue-comment <n> <body> --repo R
   gitea issue-edit <n> --repo R [--title T] [--body MD] [--append] [--label-add a,b] [--label-remove a,b] [--set-labels a,b]
   gitea close|reopen <n> --repo R
@@ -399,7 +399,7 @@ const USAGE = `gitea — 内网 Gitea REST API 客户端（替代 opencli 浏览
   gitea due <n> <YYYY-MM-DD|clear> --repo R
   gitea milestone-set <n> [milestone] --repo R [--remove]
   gitea branch <issue> [name] --repo R [--base B]
-  gitea pr --repo R --base B --head H --title T [--body MD] [--draft] [--label a,b] [--assignee u] [--reviewer u] [--milestone M] [--project name|id] [--image p]
+  gitea pr --repo R --base B --head H --title T [--body MD] [--draft] [--label a,b] [--assignee u] [--reviewer u] [--milestone M] [--project 「项目」看板名|id] [--image p]
   gitea pr-edit <n> --repo R [--title T] [--body MD] [--append]
   gitea pr-merge <n> --repo R [--style merge|rebase|rebase-merge|squash|fast-forward-only] [--title T] [--message M] [--delete-branch] [--force]
   gitea label-create <name> [--color #rrggbb] [--description D] (--repo R | --org O)
@@ -407,7 +407,8 @@ const USAGE = `gitea — 内网 Gitea REST API 客户端（替代 opencli 浏览
   gitea milestone-close <id|name> --repo R [--reopen]
   gitea milestone-delete <id|name> --repo R
 
-鉴权：GITEA_TOKEN / ~/.foreman/gitea-token / config gitea.token；站点 GITEA_BASE_URL。`
+鉴权：GITEA_TOKEN / ~/.foreman/gitea-token / config gitea.token；站点 GITEA_BASE_URL。
+术语：仓库/工程=repo（--repo 必填）；「项目」=Gitea Projects 看板（--project），与仓库不是一回事。`
 
 export async function main(argv) {
   const { flags, positionals } = parseArgs(argv)

@@ -62,6 +62,7 @@ foreman tasks / retry <仓库> <单号>
 # gitea（REST）
 gitea issue-view 255 --repo yyzl/win-ai-harness
 gitea label-list --repo yyzl/win-ai-harness
+# 术语按 Gitea：仓库/工程=repo（--repo）；「项目」=Projects 看板（--project），两者不是一回事
 
 # 测试（两个包各跑一遍）
 npm test
