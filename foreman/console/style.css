@@ -991,11 +991,14 @@ footer {
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .pr-title { flex-basis: 100%; }
 
-  /* 表格：固定列宽会把中文压成竖排，小屏改成按内容排 + 更小的内边距 */
-  table.tasks { table-layout: auto; }
-  table.tasks th, table.tasks td { padding: 8px 8px; }
+  /* 表格：收窄状态/详情列，剩下宽度给会话名；单元格允许折行，避免整表横拉 */
+  table.tasks { table-layout: fixed; }
+  table.tasks th, table.tasks td { padding: 8px 6px; }
   table.tasks th { letter-spacing: 0; }
   table.tasks td { font-size: 12.5px; }
+  table.tasks th.col-state, table.tasks td.col-state { width: 92px; }
+  table.tasks th.col-detail, table.tasks td.col-detail { width: 52px; }
+  table.tasks td, table.tasks th { white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
   table.tasks th.col-try, table.tasks td:nth-child(5) { display: none; }
   table.tasks th.col-issue-state, table.tasks td.col-issue-state { display: none; }
   .session-cell, .session-name { min-width: 0; }
