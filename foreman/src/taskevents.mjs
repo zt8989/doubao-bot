@@ -110,7 +110,9 @@ export async function deliverTaskUpdate(ctx, event) {
   const book = ctx.book ?? ctx.bookFactory?.() ?? new Book(ctx.cfg.stateFile)
   if (book) {
     book.clearIdle(p.taskId)
-    book.clearGone(p.taskId)
+    // gone 本身就是持续状态的去重标记；送达后不能清掉，否则下一轮 poll 会重新入队。
+    // 会话重新出现或恢复 running 时，仍由 pollOnce 负责清 gone。
+    if (p.phase !== "gone") book.clearGone(p.taskId)
     if (typeof book.markSteer === "function") {
       book.markSteer(deliveredTarget, { kind: `task:${p.phase || "update"}`, chars: String(event.text ?? "").length })
     }

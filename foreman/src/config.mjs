@@ -67,7 +67,7 @@ export const DEFAULTS = {
   // router agent 只处理按需通知；24 小时连续未成功投递才新建路由会话。
   router: {
     enabled: true,
-    intervalSeconds: 600,
+    intervalSeconds: 60,
     recreateAfterHours: 24,
     projectDir: "",
   },

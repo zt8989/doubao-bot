@@ -118,7 +118,7 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 
 ## 常驻服务与router agent
 
-常驻服务在同一个 Node 进程里运行 **Schedule 执行 script/agent → 有效信息写 SQLite Inbox → 单 Worker**，保留四类持久 Schedule：执行会话代码轮询、他人 PR 扫描、验收邮件、每日记忆 dreaming；`watch poll` 把已登记执行会话的 `running/gone/finished/settled` 状态写成 `task.update`。代码每 10 分钟轮询执行收工，但不自动接单；router Agent 只处理手动路由、PR 候选、邮件异常及 Worker 无法识别的事件。
+常驻服务在同一个 Node 进程里运行 **Schedule 执行 script/agent → 有效信息写 SQLite Inbox → 单 Worker**，保留四类持久 Schedule：执行会话代码轮询、他人 PR 扫描、验收邮件、每日记忆 dreaming；`watch poll` 把已登记执行会话的 `running/gone/finished/settled` 状态写成 `task.update`。代码每 1 分钟轮询执行收工，但不自动接单；router Agent 只处理手动路由、PR 候选、邮件异常及 Worker 无法识别的事件。
 
 - Schedule 到期先推进 `next_at`，再按定义直接执行 script 或调用 agent。执行会话轮询调用 `src/service.mjs#pollOnce`，PR 扫描和邮件轮询沿用原脚本，每日记忆 dreaming 新建独立 Agent。只有失败、实际业务活动或脚本显式声明的 `{type,text,json}` 才写成 `schedule.event`；普通“执行完成 / queued / checked”回执直接跳过。PR 候选另写带 `pr.candidates` 与 PR 列表 JSON 的 `router.notice`，不重复写扫描摘要。
 - `agent_inbox` 是投递事实源：相同来源的活跃事件去重；支持按 `coalesceKey` 合并尚未开始的 pending；同一任务的 pending 状态合并为最新状态；过期 pending 直接丢弃；处理失败 30 秒后重试，重启通过租约恢复 processing。
@@ -126,7 +126,7 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 - Worker 收到普通消息写入后直接 `wake()`，1 秒轮询只负责漏唤醒与重启恢复。对 `schedule.event` 先按 `payload.type` 找直接处理器，找不到或无法识别的内容连同 text/JSON 交router agent判断；多条路由通知合并成一次运行。旧 `schedule.result` 只标记 `non-actionable` 丢弃，不再确认或转发。
 - 以最后一次成功投递为轮换基准；从未成功时从首次失败计时，连续 `router.recreateAfterHours`（默认 24 小时）未成功才新建路由会话。普通 Inbox 消息的 done 只表示 Worker 已成功交给处理器或 dws，不表示 Agent 已处理完。
 - Schedule 不读取工单状态自行派单，Worker 也不替router agent做业务决策。router agent负责健康检查、必要时 `hand --fresh` 重派独立编排、用 `issue settle` 修复本地完成状态。每轮先读 `foreman tasks --json`：主体是 `sessions` 父子树，节点 `state=running/idle/gone/unknown` 为会话状态，`issueKey/issueState` 仅作归属与容量元数据；在飞数取 `summary.unresolvedIssues`，PR 数取 `summary.prOpenIssues`，真实编码运行数只数编码节点 `state=running`。每轮执行 `foreman clean --all` 幂等清理 `done/cleaned` 残留。全部未收口合计最多 `pickup.maxRunning`（默认 2），`handed` 占槽，不是每轮新增 2 张；dry-run 只看候选优先级，满额禁止 `run/pickup/hand/orch start/dispatch`，每次接单后重新计数。每轮先读 `foreman tasks --json`：主体是 `sessions` 父子树，节点 `state=running/idle/gone/unknown` 为会话状态，`issueKey/issueState` 仅作归属与容量元数据；在飞数取 `summary.unresolvedIssues`，PR 数取 `summary.prOpenIssues`，真实编码运行数只数编码节点 `state=running`。每轮执行 `foreman clean --all` 幂等清理 `done/cleaned` 残留。全部未收口合计最多 `pickup.maxRunning`（默认 2），`handed` 占槽，不是每轮新增 2 张；dry-run 只看候选优先级，满额禁止 `run/pickup/hand/orch start/dispatch`，每次接单后重新计数。
-- `watch poll` 由 router Schedule 每 10 分钟执行，也保留人工/router agent按需补跑入口：观察已登记执行会话，把状态变化与最终回复写入 `task.update`，由 Worker queue 给所属编排。它不解析 RESULT、不自动 push/开 PR、不推进工单业务状态。
+- `watch poll` 由 router Schedule 每 1 分钟执行，也保留人工/router agent按需补跑入口：观察已登记执行会话，把状态变化与最终回复写入 `task.update`，由 Worker queue 给所属编排。它不解析 RESULT、不自动 push/开 PR、不推进工单业务状态。
 - **notify 节点不再承担执行会话投递**：其暂停状态仍会阻止任务事件入箱；成功投递以 Inbox done、Worker 日志和账本 `steers/notified` 为准，业务结论由编排判断。
 
 ### Always-on 持久记忆
@@ -484,7 +484,7 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 
 `pickup.auto` / `pickup.kickAfterDone` 已成为不再生效的历史配置。代码不会按 pickup cron 或工单收口自动接单，`run --every` 也已拒绝执行。
 
-- `router.enabled` 默认 `true`；起服务 1 秒后执行首轮代码轮询，之后每 `router.intervalSeconds`（默认 600 秒）运行 `src/service.mjs#pollOnce`；
+- `router.enabled` 默认 `true`；起服务 1 秒后执行首轮代码轮询，之后每 `router.intervalSeconds`（默认 60 秒）运行 `src/service.mjs#pollOnce`；
 - 脚本路径、导出函数和参数在设置页可查看与编辑，默认 `src/service.mjs` / `pollOnce` / `{}`；普通检查完成不写 Inbox，真实状态变化写 `task.update`；
 - 连续 `router.recreateAfterHours`（默认 24）小时未成功投递才新建路由会话；这只适用于按需 Agent 投递，不影响代码轮询；
 - 手动 `foreman route`、PR 候选、邮件异常和 Worker 未识别事件仍调用 router Agent。Agent 被调用时先 `run --dry-run --once` 核对候选，再决定是否 `run --once`；优先级仍由 `pickup.priority` 等配置决定，容量为 `pickup.maxRunning`；
@@ -524,7 +524,7 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
     "maxPerRound": 2,
     "pauseWhileRunning": false
   },
-  "router": { "enabled": true, "intervalSeconds": 600, "recreateAfterHours": 24, "projectDir": "" },
+  "router": { "enabled": true, "intervalSeconds": 60, "recreateAfterHours": 24, "projectDir": "" },
   "memory": { "dir": "memory", "maxEntryChars": 240, "memoryMaxBytes": 4000, "userMaxBytes": 2000 },
   "workHours": { "enabled": true, "days": [1, 2, 3, 4, 5], "start": "08:30", "end": "17:30", "offUntil": "" },
   "merge": { "enabled": false, "style": "merge", "deleteBranch": true, "concurrency": 1, "intervalSeconds": 60 },

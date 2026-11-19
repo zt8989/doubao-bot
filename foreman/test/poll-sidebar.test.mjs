@@ -210,6 +210,26 @@ test("侧边栏里没有这条、也从没通知过：只记 gone，不读 statu
   }
 })
 
+test("gone 投递成功后保持去重，后续轮询不重复通知", async () => {
+  const { ctx, calls, dir, drain } = mkCtx({
+    runningMap: async () => ({ "conv-b": { running: false, title: "别的会话" } }),
+    status: async () => { throw new Error("不在侧边栏的会话不该读 status") },
+  })
+  try {
+    await pollOnce(ctx)
+    await drain()
+    assert.equal(calls.queued.length, 1)
+    assert.equal(new Book(ctx.cfg.stateFile).notified["conv-a"].gone, true)
+
+    await pollOnce(ctx)
+    await drain()
+    assert.equal(calls.queued.length, 1, "同一会话持续 gone 时只能投递一次")
+    assert.equal(new Book(ctx.cfg.stateFile).notified["conv-a"].gone, true)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("gone 之后又出现在侧边栏：清 gone 并重新判一轮", async () => {
   let present = false
   const { ctx, calls, dir, drain } = mkCtx({
