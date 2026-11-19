@@ -852,14 +852,6 @@ class FmSchedules extends LitElement {
               ${this.busy === "work-hours" ? "保存中…" : "保存工作时间"}
             </button>
           </div>
-          ${workWindow ? html`
-            <div class="work-hours-status">
-              <span class=${"dot " + (workWindow.enabled ? "on" : "off")}></span>
-              <span>${workWindow.detail}</span>
-              ${workWindow.lastResult ? html`<span class="pr-note">${workWindow.lastResult}</span>` : ""}
-            </div>
-          ` : ""}
-          <div class="hint">至少选择一天；适用于所选日期的自动派单与相关定时任务，开始时间需早于结束时间。</div>
           ${this.note ? html`<div class="sched-note">${this.note}</div>` : ""}
         </div>
       </section>
