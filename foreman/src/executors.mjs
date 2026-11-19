@@ -6,6 +6,7 @@ import { builtinPrompt } from "./builtin-prompts.mjs"
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 
 const SCRIPT_DEFAULTS = {
+  pickup: { path: "src/service.mjs", exportName: "pickupPollOnce", args: {} },
   prWatch: { path: "src/service.mjs", exportName: "prPollOnce", args: {} },
   mail: { path: "src/mailflow.mjs", exportName: "mailPollOnce", args: {} },
   router: { path: "src/service.mjs", exportName: "pollOnce", args: {} },
@@ -67,6 +68,6 @@ export async function runConfiguredScript(ctx, id, { manual = false } = {}) {
   if (typeof run !== "function") {
     throw new Error(`定时脚本 ${definition.path} 没有导出函数 ${definition.exportName}`)
   }
-  const args = id === "prWatch" ? { ...definition.args, force: manual } : { ...definition.args }
+  const args = ["prWatch", "pickup"].includes(id) ? { ...definition.args, force: manual } : { ...definition.args }
   return run(ctx, args)
 }

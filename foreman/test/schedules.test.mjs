@@ -10,16 +10,24 @@ import { inWorkHours } from "../src/util.mjs"
 import { startConsoleHttp } from "../src/consolehttp.mjs"
 
 const baseCfg = () => ({
-  pickup: { auto: false, intervalSeconds: 1800, maxPerRound: 1 },
+  pickup: { auto: true, me: "233151", labelIds: [5], intervalSeconds: 1800, maxPerRound: 1 },
   prWatch: { enabled: true, intervalSeconds: 300 },
-  router: { enabled: true, intervalSeconds: 600, recreateAfterHours: 24 },
+  router: { enabled: true, intervalSeconds: 60, recreateAfterHours: 24 },
   workHours: { enabled: true, days: [1, 2, 3, 4, 5], start: "08:30", end: "17:30", offUntil: "" },
 })
 
-test("listSchedules：router 每十分钟运行代码轮询", () => {
+test("listSchedules：我的工单扫描与执行会话轮询都是持久脚本任务", () => {
   const cfg = baseCfg()
   const rows = listSchedules(cfg)
-  assert.deepEqual(rows.map((r) => r.id), ["prWatch", "mail", "router", "dreaming", "workHours"])
+  assert.deepEqual(rows.map((r) => r.id), ["pickup", "prWatch", "mail", "router", "dreaming", "workHours"])
+  const pickup = rows.find((r) => r.id === "pickup")
+  assert.equal(pickup.enabled, true)
+  assert.equal(pickup.cron, "*/30 * * * *")
+  assert.equal(pickup.executor, "script")
+  assert.deepEqual(pickup.script, { path: "src/service.mjs", exportName: "pickupPollOnce", args: {} })
+  assert.match(pickup.detail, /指派给 233151/)
+  assert.match(pickup.detail, /ready-for-agent/)
+  assert.match(pickup.detail, /router agent/)
   const dreaming = rows.find((r) => r.id === "dreaming")
   assert.equal(dreaming.enabled, true)
   assert.equal(dreaming.cron, "0 3 * * *")
@@ -28,7 +36,7 @@ test("listSchedules：router 每十分钟运行代码轮询", () => {
   assert.match(dreaming.detail, /前一日|每日记忆/)
   const router = rows.find((r) => r.id === "router")
   assert.equal(router.enabled, true)
-  assert.equal(router.cron, "*/10 * * * *")
+  assert.equal(router.cron, "* * * * *")
   assert.equal(router.runLabel, "立即轮询")
   assert.equal(router.executor, "script")
   assert.deepEqual(router.script, { path: "src/service.mjs", exportName: "pollOnce", args: {} })
@@ -46,8 +54,8 @@ test("listSchedules：router 每十分钟运行代码轮询", () => {
   assert.equal(mailRow.cron, "*/5 * * * *")
   assert.match(mailRow.detail, /[FM-…]/)
   assert.deepEqual(mailRow.script, { path: "src/mailflow.mjs", exportName: "mailPollOnce", args: {} })
-  assert.equal(rows.some((r) => ["merge", "pickup", "planner"].includes(r.id)), false)
-  assert.deepEqual(rows.filter((r) => r.runnable).map((r) => r.id), ["prWatch", "mail", "router", "dreaming"])
+  assert.equal(rows.some((r) => ["merge", "planner"].includes(r.id)), false)
+  assert.deepEqual(rows.filter((r) => r.runnable).map((r) => r.id), ["pickup", "prWatch", "mail", "router", "dreaming"])
   assert.equal(rows.find((r) => r.id === "workHours").runnable, false)
   assert.equal(mailRow.runLabel, "立即收信")
   const inside = applySchedules(cfg, {})
@@ -62,7 +70,7 @@ test("cron：校验表达式、计算下一次，配置优先于 intervalSeconds
   assert.equal(next.getHours(), 10)
   assert.equal(next.getMinutes(), 15)
   const cfg = baseCfg()
-  assert.equal(cronOf(cfg, "router"), "*/10 * * * *")
+  assert.equal(cronOf(cfg, "router"), "* * * * *")
   assert.equal(cronOf({ router: { cron: "0 9 * * 1-5", intervalSeconds: 600 } }, "router"), "0 9 * * 1-5")
 })
 
@@ -124,10 +132,13 @@ test("applySchedules：PR 与代码轮询的脚本路径、参数可编辑并持
   assert.throws(() => applySchedules(cfg, { prWatch: { agent: { prompt: "x" } } }), /不是 Agent 执行器/)
 })
 
-test("applySchedules：翻转 prWatch / router，旧 pickup 不再成为定时任务", () => {
+test("applySchedules：pickup 使用 auto 开关，prWatch / router 独立翻转", () => {
   const cfg = baseCfg()
-  const rows = applySchedules(cfg, { pickup: true, prWatch: false, router: false })
-  assert.equal(cfg.pickup.auto, false, "旧 pickup.auto 不能被控制台重新打开")
+  const rows = applySchedules(cfg, { pickup: { enabled: false, cron: "*/5 * * * *" }, prWatch: false, router: false })
+  assert.equal(cfg.pickup.auto, false)
+  assert.equal(cfg.pickup.cron, "*/5 * * * *")
+  assert.equal(rows.find((r) => r.id === "pickup").enabled, false)
+  assert.equal(rows.find((r) => r.id === "pickup").cron, "*/5 * * * *")
   assert.equal(cfg.prWatch.enabled, false)
   assert.equal(cfg.router.enabled, false)
   assert.equal(rows.find((r) => r.id === "router").enabled, false)
@@ -217,13 +228,13 @@ test("persistSchedules：只改开关字段，其余配置原样保留", () => {
     )
   )
   const cfg = baseCfg()
-  applySchedules(cfg, { router: false, workHours: false })
-  assert.equal(persistSchedules(file, { router: false, workHours: false }, cfg), true)
+  applySchedules(cfg, { pickup: true, router: false, workHours: false })
+  assert.equal(persistSchedules(file, { pickup: true, router: false, workHours: false }, cfg), true)
 
   const raw = JSON.parse(fs.readFileSync(file, "utf8"))
   assert.equal(raw.router.enabled, false)
   assert.equal(raw.router.intervalSeconds, 600)
-  assert.equal(raw.pickup.auto, false, "旧自动接单开关不再被调度接口修改")
+  assert.equal(raw.pickup.auto, true, "自动接单开关写回 pickup.auto")
   assert.equal(raw.pickup.me, "233151", "同段别的字段要留着")
   assert.equal(raw.prWatch.ignoreAuthors[0], "233151")
   assert.equal(raw.workHours.offUntil, cfg.workHours.offUntil)

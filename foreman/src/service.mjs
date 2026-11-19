@@ -29,6 +29,7 @@ import { NODE_TEARDOWN, runNodeCleanup, resolveIssueKey, issueKeyForPr } from ".
 import { DoubaoSessionAdapter } from "./workflow/adapters/doubao.mjs"
 import { GiteaTrackerAdapter } from "./workflow/adapters/gitea.mjs"
 import { prWatchOnce, prWatchTarget, mergeFailureReason, prNotifyText, shouldReport, ownedPrKeys, prKey, uiReviewers, uiReviewersReady, isOwnPr, isUiPrView } from "./prwatch.mjs"
+import { pickupWatchOnce } from "./pickupwatch.mjs"
 import { MailDriver, realRecipients } from "./mail.mjs"
 import { acceptanceGate, detectUiChange, mailPollOnce, requestAcceptance, mailAcceptanceSent, mailAcceptanceFailed, deliverMailReply } from "./mailflow.mjs"
 import { inflightIssues } from "./planner.mjs"
@@ -817,7 +818,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   )
   log(`服务已起：pid=${process.pid} http=${ctx.httpUrl} portFile=${paths.portFile}`)
 
-  // 执行收工由 router Schedule 每 10 分钟直接运行这段代码，也保留手动轮询入口。
+  // 执行收工由 router Schedule 每 1 分钟直接运行这段代码，也保留手动轮询入口。
   const doPoll = async () => pollOnce(ctx)
 
   const doPrPoll = async () => prPollOnce(ctx)
@@ -874,8 +875,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   // 页面上的「立即执行」：不看开关和 cron 现在是什么状态，立刻跑一轮这类任务。
   // 只 bypass「没开 / 不在工作时间」；容量、busy、锁、节点暂停这些保护仍然生效。
   ctx.runSchedule = async (id) => {
-    if (id === "pickup") return pickupOnce(ctx, { force: true })
-    if (["prWatch", "mail", "router", "inspector", "dreaming"].includes(id)) return scheduler.runNow(id === "inspector" ? "router" : id)
+    if (["pickup", "prWatch", "mail", "router", "inspector", "dreaming"].includes(id)) return scheduler.runNow(id === "inspector" ? "router" : id)
     throw Object.assign(new Error(`${id} 没有可以立即执行的动作`), { code: "schedule_not_runnable" })
   }
   // 合并不再有定时任务（合并通道已取消）：`foreman pr merge` 当场执行，合完直接返回。
@@ -936,7 +936,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     }
   }
   const syncScheduleState = (items) => {
-    const ids = { prWatch: "pr", mail: "mail", router: "router", dreaming: "dreaming" }
+    const ids = { pickup: "pickup", prWatch: "pr", mail: "mail", router: "router", dreaming: "dreaming" }
     for (const [id, key] of Object.entries(ids)) {
       state[key].nextAt = items.find((item) => item.id === id)?.nextAt || ""
     }
@@ -944,18 +944,20 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   scheduler = new ScheduleRunner({
     store: inbox,
     executors: {
+      pickup: { type: "script", run: (_, { manual }) => runConfiguredScript(ctx, "pickup", { manual }) },
       prWatch: { type: "script", run: (_, { manual }) => runConfiguredScript(ctx, "prWatch", { manual }) },
       mail: { type: "script", run: () => recordMailPoll(() => runConfiguredScript(ctx, "mail")) },
       router: { type: "script", run: () => runConfiguredScript(ctx, "router") },
       dreaming: { type: "agent", run: recordDream },
     },
-    allow: (schedule) => schedule.id !== "prWatch" || inWorkHours(cfg),
+    allow: (schedule) => !["prWatch", "pickup"].includes(schedule.id) || inWorkHours(cfg),
     onChange: syncScheduleState,
     onError: (error) => log(`Schedule 异常：${error.message}`),
   })
   ctx.inboxSchedules = scheduler
   const armSchedules = () => {
     scheduler.sync([
+      { id: "pickup", kind: "pickup", executor: "script", cron: cronOf(cfg, "pickup"), enabled: cfg.pickup?.auto === true },
       { id: "prWatch", kind: "prWatch", executor: "script", cron: cronOf(cfg, "prWatch"), enabled: cfg.prWatch?.enabled === true },
       { id: "mail", kind: "mail", executor: "script", cron: cronOf(cfg, "mail"), enabled: cfg.mail?.enabled === true },
       { id: "router", kind: "router", executor: "script", cron: cronOf(cfg, "router"), enabled: (cfg.router ?? cfg.inspector)?.enabled === true },
@@ -1143,6 +1145,31 @@ export async function prAssignOnce(ctx, { repo = "", number = 0 } = {}) {
     return { ok: true, action: "assigned", repo: repoName, number: prNumber, session, convId, assignedAt }
   } catch (e) {
     return { ok: false, error: "pr-assign-failed", message: e.message }
+  }
+}
+
+// 我的工单扫描一轮：只把「指派给我 + ready-for-agent」候选写入 router agent Inbox。
+// 不接单、不调用旧 pickupOnce；容量与 hand/dispatch 决策归 router agent 和工单编排。
+export async function pickupPollOnce(ctx, { force = false } = {}) {
+  const { state, cfg, gitea, log } = ctx
+  if (cfg.pickup?.auto !== true && !force) return { ok: true, skipped: "disabled" }
+  if (state.pickup.polling) return { ok: true, skipped: "busy" }
+  if (ctx.engine?.paused?.("pickup")) return { ok: true, skipped: "node-paused" }
+  state.pickup.polling = true
+  try {
+    const notifyRouter = ctx.notifyRouter ?? ctx.notifyInspector ?? (async (text) => routerOnce(ctx, { force: true, notice: text }))
+    const out = await pickupWatchOnce({ cfg, gitea, log, inspect: notifyRouter })
+    state.pickup.lastPollAt = nowIso()
+    state.pickup.pollCount = Number(state.pickup.pollCount ?? 0) + 1
+    state.pickup.notifiedCount = Number(state.pickup.notifiedCount ?? 0) + Number(out.notified ?? 0)
+    state.pickup.pending = Number(out.pending ?? 0)
+    state.pickup.lastScanResult = `检查 ${Number(out.checked ?? 0)} 条 · 入箱 ${Number(out.notified ?? 0)} 条 · 待重试 ${Number(out.pending ?? 0)} 条`
+    return out
+  } catch (error) {
+    log(`我的工单扫描失败：${error.message}`)
+    return { ok: false, error: error.message }
+  } finally {
+    state.pickup.polling = false
   }
 }
 

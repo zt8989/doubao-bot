@@ -1,4 +1,4 @@
-// 定时任务开关：prWatch.enabled / mail.enabled / router.enabled / workHours.offUntil
+// 定时任务开关：pickup.auto / prWatch.enabled / mail.enabled / router.enabled / workHours.offUntil
 // 页面上一键启停，写回 config.json 并立刻重排服务里的定时器（不用重启）。
 import fs from "node:fs"
 import { inWorkHours } from "./util.mjs"
@@ -7,7 +7,7 @@ import { normalizeScriptExecutor, scriptExecutor } from "./executors.mjs"
 
 const pad = (n) => String(n).padStart(2, "0")
 
-export const SCHEDULE_IDS = ["prWatch", "mail", "router", "dreaming", "workHours"]
+export const SCHEDULE_IDS = ["pickup", "prWatch", "mail", "router", "dreaming", "workHours"]
 
 // 临时闭嘴恢复的时刻：今天还没到开始时间且今天是工作日就今天，否则下一个工作日。
 export function nextWorkdayStart(cfg, at = new Date()) {
@@ -38,7 +38,7 @@ export function cronOf(cfg, id) {
   if (id === "dreaming") return "0 3 * * *"
   const seconds = Number(
     section.intervalSeconds ??
-      (id === "pickup" ? 1800 : id === "router" ? 600 : id === "mail" ? cfg?.mail?.pollSeconds ?? 300 : 300)
+      (id === "pickup" ? 1800 : id === "router" ? 60 : id === "mail" ? cfg?.mail?.pollSeconds ?? 300 : 300)
   )
   const minutes = Math.max(1, Math.round(seconds / 60))
   return minutes === 1 ? "* * * * *" : `*/${minutes} * * * *`
@@ -51,6 +51,24 @@ export function listSchedules(cfg, state = {}) {
   const prw = cfg?.prWatch ?? {}
   const r = cfg?.router ?? cfg?.inspector ?? {}
   return [
+    {
+      id: "pickup",
+      label: "我的工单自动接单",
+      enabled: cfg?.pickup?.auto === true,
+      cron: cronOf(cfg, "pickup"),
+      executor: "script",
+      script: scriptExecutor(cfg, "pickup"),
+      nextAt: state.pickup?.nextAt || "",
+      intervalSeconds: Number(cfg?.pickup?.intervalSeconds ?? 1800),
+      detail: `筛选 open、指派给 ${cfg?.pickup?.me ?? "pickup.me"} 且带 ready-for-agent 的工单；候选写 Inbox，由 router agent 分配编码智能体`,
+      lastAt: state.pickup?.lastPollAt || "",
+      count: Number(state.pickup?.pollCount ?? 0),
+      lastResult: state.pickup?.lastScanResult
+        ?? (Number(state.pickup?.notifiedCount ?? 0) ? `累计入箱 ${Number(state.pickup.notifiedCount)} 条候选` : ""),
+      runnable: true,
+      runLabel: "立即扫描",
+      running: state.pickup?.polling === true,
+    },
     {
       id: "prWatch",
       label: "他人 PR 扫描",
@@ -95,8 +113,8 @@ export function listSchedules(cfg, state = {}) {
       executor: "script",
       script: scriptExecutor(cfg, "router"),
       nextAt: state.router?.nextAt || "",
-      intervalSeconds: Number(r.intervalSeconds ?? 600),
-      detail: `每 ${Math.round(Number(r.intervalSeconds ?? 600) / 60)} 分钟由代码轮询已登记执行会话；状态变化写 task.update，普通检查完成不写 Inbox · 不定时调用 Agent，不自动接单 · 不受工作时间窗限制`,
+      intervalSeconds: Number(r.intervalSeconds ?? 60),
+      detail: `每 ${Math.round(Number(r.intervalSeconds ?? 60) / 60)} 分钟由代码轮询已登记执行会话；状态变化写 task.update，普通检查完成不写 Inbox · 不定时调用 Agent，不自动接单 · 不受工作时间窗限制`,
       lastAt: state.lastPollAt || "",
       count: Number(state.pollCount ?? 0),
       lastResult: state.lastPollResult ?? null,
@@ -174,7 +192,7 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
     if (!(id in patch)) continue
     const raw = patch[id]
     const obj = raw && typeof raw === "object" ? raw : { enabled: raw === true || raw === "true" }
-    if ("cron" in obj && !["prWatch", "mail", "router", "dreaming"].includes(id)) throw new Error(`${id} 不是独立定时任务，没有 cron 可改`)
+    if ("cron" in obj && !["pickup", "prWatch", "mail", "router", "dreaming"].includes(id)) throw new Error(`${id} 不是独立定时任务，没有 cron 可改`)
     const next = {}
     if ("enabled" in obj) next.enabled = obj.enabled === true || obj.enabled === "true"
     if ("cron" in obj) {
@@ -182,10 +200,15 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
       if (!v.ok) throw new Error(`${id} 的 cron 不合法：${v.error}`)
       next.cron = v.expression
     }
-    if ("script" in obj && !["prWatch", "mail", "router"].includes(id)) throw new Error(`${id} 不是脚本执行器`)
+    if ("script" in obj && !["pickup", "prWatch", "mail", "router"].includes(id)) throw new Error(`${id} 不是脚本执行器`)
     if ("agent" in obj) throw new Error(`${id} 不是 Agent 执行器`)
     if ("script" in obj) next.script = normalizeScriptExecutor(obj.script, cfg, id)
-    if (id === "prWatch") {
+    if (id === "pickup") {
+      cfg.pickup = { ...(cfg.pickup ?? {}) }
+      if ("enabled" in next) cfg.pickup.auto = next.enabled
+      if ("cron" in next) cfg.pickup.cron = next.cron
+      if ("script" in next) cfg.pickup.script = next.script
+    } else if (id === "prWatch") {
       cfg.prWatch = { ...(cfg.prWatch ?? {}) }
       if ("enabled" in next) cfg.prWatch.enabled = next.enabled
       if ("cron" in next) cfg.prWatch.cron = next.cron
@@ -214,11 +237,11 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
   return listSchedules(cfg)
 }
 
-/** 开关对应的配置键名（这几个节点都是 enabled）。 */
-const FLAG_KEY = { prWatch: "enabled", mail: "enabled", router: "enabled", dreaming: "enabled" }
+/** 开关对应的配置键名（pickup 沿用历史配置 auto，其余节点是 enabled）。 */
+const FLAG_KEY = { pickup: "auto", prWatch: "enabled", mail: "enabled", router: "enabled", dreaming: "enabled" }
 
 /**
- * 写回配置文件：只改上面这四个开关，其余字段（含用户手写的格式/注释式排版）原样保留。
+ * 写回配置文件：只改定时任务开关/cron/script，其余字段（含用户手写的格式/注释式排版）原样保留。
  * 文件不存在就跳过——纯 CLI 跑的时候没有配置文件，开关只活在内存里。
  */
 export function persistSchedules(file, patch = {}, cfg = {}) {

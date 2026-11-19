@@ -63,6 +63,13 @@ export function scheduleEnvelope(schedule, executor, result) {
       json: { checked: Number(result.checked ?? 0), pending: Number(result.pending) },
     }
   }
+  if (schedule.id === "pickup" && result?.failedNotify) {
+    return {
+      type: "pickup.notify_failed",
+      text: `我的工单候选入箱失败，下轮重试；待处理 ${Number(result.pending ?? 0)} 条`,
+      json: { checked: Number(result.checked ?? 0), pending: Number(result.pending ?? 0) },
+    }
+  }
   if (schedule.id === "mail") return mailEnvelope(result)
   return null
 }
