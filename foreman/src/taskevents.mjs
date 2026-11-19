@@ -67,27 +67,52 @@ export function enqueueTaskUpdate(ctx, { watcher, phase, fingerprint = "", final
   return { ...outcome, ok: true, owner, text }
 }
 
-// Worker 的唯一 task.update handler：只 queue 给所属 Agent；送达后才完成任务指纹账本。
+const SESSION_GONE = /侧边栏里没有任务/
+
+async function routeTaskUpdate(ctx, event, { fallbackFrom = "" } = {}) {
+  const text = fallbackFrom
+    ? [
+        "【Foreman · 任务更新路由兜底】",
+        `原归属 Agent ${fallbackFrom} 不在 dws 侧边栏，无法 queue。请接管以下任务更新，核对原编排是否已归档或失联，再决定重派、续跑或其他后续动作。`,
+        String(event.text ?? ""),
+      ].join("\n\n")
+    : event.text
+  const delivered = await routerOnce(ctx, { force: true, scheduled: false, notices: [text] })
+  if (!delivered?.ok || delivered.skipped) {
+    throw new Error(delivered?.error || `router agent 未接收 task.update：${delivered?.skipped || "unknown"}`)
+  }
+  return delivered
+}
+
+// Worker 的唯一 task.update handler：优先 queue 给所属 Agent；原会话已从侧边栏消失时兜底交路由。
 export async function deliverTaskUpdate(ctx, event) {
   const p = event.payload ?? {}
   const target = String(p.owner ?? "").trim()
   if (!target) throw new Error("task.update 缺少归属 Agent")
   if (target === String(p.taskId ?? "")) throw new Error("task.update 不能投递给被监听任务自己")
+  let deliveredTarget = target
+  let fallback = false
   if (p.viaRouter || p.viaInspector) {
-    const delivered = await routerOnce(ctx, { force: true, scheduled: false, notices: [event.text] })
-    if (!delivered?.ok || delivered.skipped) {
-      throw new Error(delivered?.error || `router agent 未接收 task.update：${delivered?.skipped || "unknown"}`)
-    }
+    const delivered = await routeTaskUpdate(ctx, event)
+    deliveredTarget = delivered.convId || target
   } else {
     if (typeof ctx.dws?.queue !== "function") throw new Error("dws.queue 不可用")
-    await ctx.dws.queue(target, event.text)
+    try {
+      await ctx.dws.queue(target, event.text)
+    } catch (error) {
+      if (!SESSION_GONE.test(String(error?.message ?? error))) throw error
+      const delivered = await routeTaskUpdate(ctx, event, { fallbackFrom: target })
+      deliveredTarget = delivered.convId || target
+      fallback = true
+      ctx.log?.(`task.update 原归属会话不在侧边栏，已兜底投递 router agent：${target}`)
+    }
   }
   const book = ctx.book ?? ctx.bookFactory?.() ?? new Book(ctx.cfg.stateFile)
   if (book) {
     book.clearIdle(p.taskId)
     book.clearGone(p.taskId)
     if (typeof book.markSteer === "function") {
-      book.markSteer(target, { kind: `task:${p.phase || "update"}`, chars: String(event.text ?? "").length })
+      book.markSteer(deliveredTarget, { kind: `task:${p.phase || "update"}`, chars: String(event.text ?? "").length })
     }
     book.markTaskObserved(p.taskId, p.phase, { fingerprint: p.fingerprint })
     if (["finished", "settled"].includes(p.phase)) {
@@ -95,5 +120,5 @@ export async function deliverTaskUpdate(ctx, event) {
       book.markIdle(p.taskId, { fingerprint: p.fingerprint })
     }
   }
-  return { ok: true, target, taskId: p.taskId, phase: p.phase }
+  return { ok: true, target: deliveredTarget, originalTarget: target, fallback, taskId: p.taskId, phase: p.phase }
 }

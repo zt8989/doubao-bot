@@ -124,3 +124,84 @@ test("回退router agent投递失败必须抛错，不能消费任务更新", as
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("原编排不在侧边栏：task.update 兜底交 router agent，接收后才消费指纹", async () => {
+  const { dir, cfg, book, inbox } = setup()
+  try {
+    book.data.router = { convId: "conv-router", name: "router" }
+    book.data.inspector = book.data.router
+    book.record("router", { convId: "conv-router", name: "router", kind: "router" })
+    book.save()
+    const queued = []
+    const ctx = {
+      cfg,
+      book,
+      inbox,
+      state: {},
+      dws: {
+        queue: async (target, text) => {
+          if (target === "conv-orch") throw new Error(`dws msg ${target} 失败：\n✗ 切换任务失败：侧边栏里没有任务 ${target}`)
+          queued.push({ target, text })
+        },
+        openNew: async () => { throw new Error("已有 router，不应新建") },
+      },
+    }
+    const event = {
+      id: "task-fallback",
+      text: "【Foreman · 工作会话状态变化】\n最终回复原文：\n普通最终回复",
+      payload: {
+        taskId: "conv-worker",
+        taskName: "worker",
+        owner: "conv-orch",
+        phase: "finished",
+        fingerprint: "final-fallback",
+        finalText: "普通最终回复",
+      },
+    }
+    const result = await deliverTaskUpdate(ctx, event)
+    assert.equal(result.ok, true)
+    assert.equal(result.fallback, true)
+    assert.equal(result.originalTarget, "conv-orch")
+    assert.equal(result.target, "conv-router")
+    assert.equal(queued.length, 1)
+    assert.equal(queued[0].target, "conv-router")
+    assert.match(queued[0].text, /任务更新路由兜底/)
+    assert.match(queued[0].text, /普通最终回复/)
+    const after = new Book(cfg.stateFile).notified["conv-worker"]
+    assert.equal(after.fingerprint, "final-fallback")
+    assert.equal(after.idle, true)
+  } finally {
+    inbox.db.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("其他 queue 异常不兜底路由，保留原错误并重试", async () => {
+  const { dir, cfg, book, inbox } = setup()
+  try {
+    book.data.router = { convId: "conv-router", name: "router" }
+    book.save()
+    let calls = 0
+    const ctx = {
+      cfg,
+      book,
+      inbox,
+      state: {},
+      dws: {
+        queue: async () => { calls++; throw new Error("temporary queue failure") },
+        openNew: async () => { throw new Error("不应新建") },
+      },
+    }
+    const event = {
+      id: "task-retry",
+      text: "任务更新",
+      payload: { taskId: "conv-worker", owner: "conv-orch", phase: "finished", fingerprint: "final-retry" },
+    }
+    await assert.rejects(deliverTaskUpdate(ctx, event), /temporary queue failure/)
+    assert.equal(calls, 1)
+    assert.equal(book.notified["conv-worker"], undefined)
+  } finally {
+    inbox.db.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
