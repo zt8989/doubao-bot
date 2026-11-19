@@ -134,12 +134,20 @@ export class InboxStore {
     return eventOf(this.db.prepare("SELECT * FROM agent_inbox WHERE id = ?").get(id))
   }
 
-  list({ limit = 100, status = "" } = {}) {
+  list({ limit = 100, offset = 0, status = "" } = {}) {
     const n = Math.max(1, Math.min(1000, Number(limit) || 100))
+    const skip = Math.max(0, Math.floor(Number(offset) || 0))
     const rows = status
-      ? this.db.prepare("SELECT * FROM agent_inbox WHERE status = ? ORDER BY id DESC LIMIT ?").all(status, n)
-      : this.db.prepare("SELECT * FROM agent_inbox ORDER BY id DESC LIMIT ?").all(n)
+      ? this.db.prepare("SELECT * FROM agent_inbox WHERE status = ? ORDER BY id DESC LIMIT ? OFFSET ?").all(status, n, skip)
+      : this.db.prepare("SELECT * FROM agent_inbox ORDER BY id DESC LIMIT ? OFFSET ?").all(n, skip)
     return rows.map(eventOf)
+  }
+
+  count({ status = "" } = {}) {
+    const row = status
+      ? this.db.prepare("SELECT COUNT(*) AS count FROM agent_inbox WHERE status = ?").get(status)
+      : this.db.prepare("SELECT COUNT(*) AS count FROM agent_inbox").get()
+    return Number(row.count)
   }
 
   counts() {

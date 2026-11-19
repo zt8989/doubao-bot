@@ -21,6 +21,18 @@ test("Inbox 活跃事件按来源去重，重复写入留 dropped 记录", () =>
   assert.equal(store.counts().dropped, 1)
 })
 
+test("Inbox 列表按筛选条件分页并返回准确总数", () => {
+  const { store } = fixture()
+  for (let i = 1; i <= 5; i++) store.enqueue({ kind: "inspector", text: `event-${i}` })
+  store.enqueue({ kind: "inspector.notice", text: "duplicate", dedupeKey: "pr:demo#1" })
+  store.enqueue({ kind: "inspector.notice", text: "duplicate", dedupeKey: "pr:demo#1" })
+  assert.deepEqual(store.list({ limit: 2, offset: 2 }).map((event) => event.text), ["event-5", "event-4"])
+  assert.equal(store.count(), 7)
+  assert.equal(store.count({ status: "pending" }), 6)
+  assert.equal(store.count({ status: "dropped" }), 1)
+  assert.equal(store.list({ limit: 2, offset: 0, status: "dropped" }).length, 1)
+})
+
 test("同一 Schedule 连续到期只保留最新事件，旧事件标记 superseded", () => {
   const { store } = fixture()
   const oldEvent = store.enqueue({ kind: "inspector", text: "old", coalesceKey: "schedule:inspector" })

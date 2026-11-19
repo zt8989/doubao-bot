@@ -88,14 +88,24 @@ export class OutboxStore {
     return messageOf(this.db.prepare("SELECT * FROM agent_outbox WHERE id = ?").get(id))
   }
 
-  list({ limit = 100, status = "", channel = "" } = {}) {
+  list({ limit = 100, offset = 0, status = "", channel = "" } = {}) {
     const n = Math.max(1, Math.min(1000, Number(limit) || 100))
+    const skip = Math.max(0, Math.floor(Number(offset) || 0))
     const where = []
     const args = []
     if (status) { where.push("status = ?"); args.push(status) }
     if (channel) { where.push("channel = ?"); args.push(channel) }
-    const sql = `SELECT * FROM agent_outbox${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY id DESC LIMIT ?`
-    return this.db.prepare(sql).all(...args, n).map(messageOf)
+    const sql = `SELECT * FROM agent_outbox${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY id DESC LIMIT ? OFFSET ?`
+    return this.db.prepare(sql).all(...args, n, skip).map(messageOf)
+  }
+
+  count({ status = "", channel = "" } = {}) {
+    const where = []
+    const args = []
+    if (status) { where.push("status = ?"); args.push(status) }
+    if (channel) { where.push("channel = ?"); args.push(channel) }
+    const sql = `SELECT COUNT(*) AS count FROM agent_outbox${where.length ? ` WHERE ${where.join(" AND ")}` : ""}`
+    return Number(this.db.prepare(sql).get(...args).count)
   }
 
   counts() {
