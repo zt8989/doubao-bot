@@ -131,7 +131,11 @@ function normalizeWorkHours(value, cfg) {
   const startAt = clockMinutes(start, "开始时间")
   const endAt = clockMinutes(end, "结束时间")
   if (startAt >= endAt) throw new Error("开始时间必须早于结束时间")
-  return { start, end }
+  const inputDays = value.days ?? cfg.workHours?.days ?? [1, 2, 3, 4, 5]
+  if (!Array.isArray(inputDays) || inputDays.length === 0) throw new Error("工作日至少选择一天")
+  const days = [...new Set(inputDays.map(Number))].sort((a, b) => a - b)
+  if (days.some((day) => !Number.isInteger(day) || day < 1 || day > 7)) throw new Error("星期必须是 1（周一）到 7（周日）")
+  return { days, start, end }
 }
 
 /**
@@ -168,7 +172,7 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
       if ("enabled" in next) cfg.router.enabled = next.enabled
       if ("cron" in next) cfg.router.cron = next.cron
     } else if (id === "workHours") {
-      if ("start" in obj || "end" in obj) cfg.workHours = { ...(cfg.workHours ?? {}), ...normalizeWorkHours(obj, cfg) }
+      if ("days" in obj || "start" in obj || "end" in obj) cfg.workHours = { ...(cfg.workHours ?? {}), ...normalizeWorkHours(obj, cfg) }
       if ("enabled" in next) cfg.workHours = { ...(cfg.workHours ?? {}), offUntil: next.enabled ? "" : localIso(nextWorkdayStart(cfg, at)) }
     }
   }
@@ -193,7 +197,7 @@ export function persistSchedules(file, patch = {}, cfg = {}) {
     const obj = value && typeof value === "object" ? value : { enabled: value === true || value === "true" }
     const section = { ...(raw[id] ?? {}) }
     if (id === "workHours") {
-      if ("start" in obj || "end" in obj) Object.assign(section, normalizeWorkHours(obj, cfg))
+      if ("days" in obj || "start" in obj || "end" in obj) Object.assign(section, normalizeWorkHours(obj, cfg))
       if ("enabled" in obj) section.offUntil = String(cfg?.workHours?.offUntil ?? "")
     } else {
       if ("enabled" in obj) section[FLAG_KEY[id]] = obj.enabled === true || obj.enabled === "true"

@@ -267,6 +267,7 @@ export function startConsoleHttp({ store, ctx, dir, host = "127.0.0.1", port = 7
 
       if (pathname === "/api/schedules") {
         const workHours = () => ctx.workHours?.() ?? {
+          days: [...(ctx.cfg?.workHours?.days ?? [1, 2, 3, 4, 5])],
           start: String(ctx.cfg?.workHours?.start ?? "08:30"),
           end: String(ctx.cfg?.workHours?.end ?? "18:30"),
         }

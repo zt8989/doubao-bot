@@ -948,6 +948,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   // 页面上启停定时任务：改内存 cfg → 落盘 config.json → 立刻重排定时器。
   const schedulesView = () => listSchedules(cfg, state)
   const workHoursView = () => ({
+    days: [...(cfg.workHours?.days ?? [1, 2, 3, 4, 5])],
     start: String(cfg.workHours?.start ?? "08:30"),
     end: String(cfg.workHours?.end ?? "18:30"),
   })

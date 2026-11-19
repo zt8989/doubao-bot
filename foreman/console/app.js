@@ -776,6 +776,16 @@ const SKIP_LABEL = {
   "window-busy": "被监听的会话还在跑",
 }
 
+const WEEK_DAYS = [
+  { value: 1, label: "周一" },
+  { value: 2, label: "周二" },
+  { value: 3, label: "周三" },
+  { value: 4, label: "周四" },
+  { value: 5, label: "周五" },
+  { value: 6, label: "周六" },
+  { value: 7, label: "周日" },
+]
+
 class FmSchedules extends LitElement {
   static properties = { schedules: { attribute: false }, workHours: { attribute: false }, busy: { type: String }, error: { type: String }, note: { type: String } }
   createRenderRoot() {
@@ -784,7 +794,8 @@ class FmSchedules extends LitElement {
   saveWorkHours() {
     const start = this.querySelector('input[data-work-hours="start"]')?.value || ""
     const end = this.querySelector('input[data-work-hours="end"]')?.value || ""
-    emit(this, "work-hours-save", { start, end })
+    const days = [...this.querySelectorAll("input[data-work-days]:checked")].map((input) => Number(input.value))
+    emit(this, "work-hours-save", { days, start, end })
   }
   saveCron(id) {
     const input = this.querySelector(`input[data-cron="${id}"]`)
@@ -811,6 +822,22 @@ class FmSchedules extends LitElement {
           </div>
         </div>
         <div class="work-hours-body">
+          <div class="work-days-editor">
+            <span class="work-days-label">工作日</span>
+            <div class="work-day-options">
+              ${WEEK_DAYS.map((day) => html`
+                <label class="work-day-option">
+                  <input
+                    type="checkbox"
+                    data-work-days
+                    value=${day.value}
+                    .checked=${(this.workHours?.days ?? [1, 2, 3, 4, 5]).includes(day.value)}
+                  />
+                  <span>${day.label}</span>
+                </label>
+              `)}
+            </div>
+          </div>
           <div class="work-hours-form">
             <label class="time-field">
               <span>开始时间</span>
@@ -832,7 +859,7 @@ class FmSchedules extends LitElement {
               ${workWindow.lastResult ? html`<span class="pr-note">${workWindow.lastResult}</span>` : ""}
             </div>
           ` : ""}
-          <div class="hint">适用于工作日自动派单与相关定时任务；开始时间需早于结束时间。</div>
+          <div class="hint">至少选择一天；适用于所选日期的自动派单与相关定时任务，开始时间需早于结束时间。</div>
           ${this.note ? html`<div class="sched-note">${this.note}</div>` : ""}
         </div>
       </section>
@@ -1040,7 +1067,7 @@ class FmConsole extends LitElement {
       this.sidebarCollapsed = false
     }
     this.schedules = []
-    this.workHours = { start: "08:30", end: "18:30" }
+    this.workHours = { days: [1, 2, 3, 4, 5], start: "08:30", end: "18:30" }
     this.operations = []
     this.inboxData = { events: [], counts: {} }
     this.outboxData = { messages: [], counts: {} }
@@ -1479,10 +1506,14 @@ class FmConsole extends LitElement {
     }
   }
 
-  async saveWorkHours({ start, end } = {}) {
+  async saveWorkHours({ days = [], start, end } = {}) {
     if (this.schedBusy) return
     this.schedError = ""
     this.schedNote = ""
+    if (!Array.isArray(days) || days.length === 0) {
+      this.schedError = "请至少选择一个工作日"
+      return
+    }
     if (!start || !end) {
       this.schedError = "请选择开始时间和结束时间"
       return
@@ -1496,13 +1527,13 @@ class FmConsole extends LitElement {
       const res = await fetch("/api/schedules", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ patch: { workHours: { start, end } } }),
+        body: JSON.stringify({ patch: { workHours: { days, start, end } } }),
       })
       const body = await res.json()
       if (!res.ok || body.ok === false) throw new Error(body.message || `HTTP ${res.status}`)
       this.schedules = body.schedules || []
-      this.workHours = body.workHours || { start, end }
-      this.schedNote = `工作时间已保存：${start}–${end}，已立即生效`
+      this.workHours = body.workHours || { days, start, end }
+      this.schedNote = `工作日与工作时间已保存：${start}–${end}，已立即生效`
       await this.load()
     } catch (e) {
       this.schedError = `保存工作时间失败：${e.message}`
