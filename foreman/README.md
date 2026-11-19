@@ -125,7 +125,7 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 - `task.update` 按工单绑定的 `orchestrator` 路由，补派任务其次取 `parent` / 显式通知目标，完全没有归属的旧任务才回退router agent。完成状态携带普通最终回复原文；Worker 成功 queue 后才写 `notified` 与 `idle`，只入箱不算已消费。不同任务的事件逐条完成，避免一条失败导致另一条已送达任务被重投。
 - Worker 收到同进程写入后直接 `wake()`，1 秒轮询只负责漏唤醒与重启恢复。巡检和多条 PR 通知合并成一次router agent运行；首次 `openNew` 创建，后续复用同一条会话，底层仍是 `dws msg --mode queue`。
 - 以最后一次成功投递为轮换基准；从未成功时从首次失败计时，连续 `router.recreateAfterHours`（默认 24 小时）未成功才新建路由会话。Inbox 的 done 只表示 Worker 已成功交给 dws，不表示 Agent 已处理完。
-- Schedule 不读取工单状态自行派单，Worker 也不替router agent做业务决策。router agent负责健康检查、必要时 `hand --fresh` 重派独立编排、用 `issue settle` 修复本地完成状态，以及每轮通过 `foreman tasks --json` 找出 `done/cleaned` 残留并执行 `foreman clean --all`。接单前必须独立统计全部在飞工单：`planned/handed/working/pr-open/needs-human/blocked/failed/escalated` 都占槽，合计最多 `pickup.maxRunning`（默认 2），不是每轮新增 2 张；dry-run 只看候选优先级，不能作为空余容量依据。达到上限后禁止用 `run/pickup/hand/orch start/dispatch` 接新单，每次接单后重新计数。
+- Schedule 不读取工单状态自行派单，Worker 也不替router agent做业务决策。router agent负责健康检查、必要时 `hand --fresh` 重派独立编排、用 `issue settle` 修复本地完成状态。每轮先读 `foreman tasks --json`：主体是 `sessions` 父子树，节点 `state=running/idle/gone/unknown` 为会话状态，`issueKey/issueState` 仅作归属与容量元数据；在飞数取 `summary.unresolvedIssues`，PR 数取 `summary.prOpenIssues`，真实编码运行数只数编码节点 `state=running`。每轮执行 `foreman clean --all` 幂等清理 `done/cleaned` 残留。全部未收口合计最多 `pickup.maxRunning`（默认 2），`handed` 占槽，不是每轮新增 2 张；dry-run 只看候选优先级，满额禁止 `run/pickup/hand/orch start/dispatch`，每次接单后重新计数。
 - `watch poll` 保留为router agent/人工按需入口：观察已登记执行会话，把状态变化与最终回复写入 `task.update`，由 Worker queue 给所属编排。它不解析 RESULT、不自动 push/开 PR、不推进工单业务状态。
 - **notify 节点不再承担执行会话投递**：其暂停状态仍会阻止任务事件入箱；成功投递以 Inbox done、Worker 日志和账本 `steers/notified` 为准，业务结论由编排判断。
 
@@ -388,7 +388,7 @@ foreman resume <执行会话id>   # 原会话可修正时：按会话 id steer �
 foreman clean <owner/name>#N     # 合并关单后清 worktree / 分支 / 工作会话（幂等）
 foreman clean --all              # 清所有终端态工单的残留（worktree / 分支 / 会话）
 foreman pickup                   # 手动/router agent处理一轮候选；没有代码定时器会自动调用它
-foreman tasks                    # 每条工单到哪一步、卡在哪
+foreman tasks                    # 已分配会话的实时状态与父子树；工单仅作节点元数据
 foreman pr poll                  # 立刻扫一轮 PR，只把候选交给router agent
 foreman pr ui-assign <N> --repo R # 本人 UI PR 轮询指派周晓亮/张振豪验收（只指派，不合）
 foreman pr assign <N> --repo R   # router agent显式分配合并助手；本人/作者不明拒绝，重复分配幂等
@@ -459,7 +459,7 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 - `router.enabled` 默认 `true`；起服务 1 秒后投递首轮，之后每 `router.intervalSeconds`（默认 600 秒）steer 同一路由会话；
 - 连续 `router.recreateAfterHours`（默认 24）小时未成功投递才新建会话；失败本身不会刷新 `lastSentAt`；
 - router agent先 `run --dry-run --once` 核对候选，再决定 `run --once`；优先级仍由 `pickup.priority` 等配置决定，容量为 `pickup.maxRunning`；
-- 每轮巡检快照附带已收口待清理任务；router agent必须用 `foreman tasks --json` 复核，只对 `done/cleaned` 执行 `foreman clean --all`，不得清理 `working/pr-open` 等非终态；
+- 周期消息不附历史工单或会话快照；router agent每轮以 `foreman tasks --json` 的实时 `sessions` 树和 `summary` 为准，只对 `done/cleaned` 执行 `foreman clean --all`，不得清理 `working/pr-open` 等非终态；
 - 显式 `foreman pickup` 会绕过旧 auto 开关与工作时间窗，但保留容量、`run.lock`、节点暂停和账本去重；
 - 执行会话收工由router agent或人工 `watch poll` 按需处理，不再有 20 秒代码轮询；
 - `foreman status` 的 `router` 段查看会话 id、最近成功/失败投递和下一次时间。

@@ -9,9 +9,9 @@ function stamp(date) {
 // 保留旧导出名作内部兼容；周期消息只含巡检指令，不再读取账本或注入历史清单。
 export async function inspectionSnapshot() {
   return [
-    "本轮先执行 `foreman tasks --json`，只使用这次实时结果，不沿用此前轮次的数据或清单。状态处理由你决策，不机械重派。",
-    "分别统计：未收口 X=planned/handed/working/pr-open/needs-human/blocked/failed/escalated（handed 占槽，合计上限 2）；真实运行 N=working 且执行会话有当前运行证据；PR 待验收/合并 P=pr-open。8/2 不是 8 个正在运行。满额禁止 run/pickup/hand/orch start/dispatch；dry-run 仅看候选优先级。",
-    "已收口仅指 done/cleaned，不代表工作区或会话已清理。clean --all 只对终态做幂等检查，working/pr-open/failed 等非终态不得清理；cleaned/keys 是候选数，不是实际清理数。无 notes 删除或归档证据时只报“终态清理检查完成，未误清理非终态任务”。",
+    "本轮先执行 `foreman tasks --json`，只使用这次 sessions 树与 summary 的实时结果，不沿用此前轮次的数据或清单。节点 state 是会话 running/idle/gone/unknown，issueState 仅作归属、容量和清理元数据。状态处理由你决策，不机械重派。",
+    "分别统计：未收口 X=summary.unresolvedIssues（合计上限 2，handed 占槽）；真实运行 N=编码节点 state=running，工单号取节点 issueKey，编排/router 不算编码执行；PR 待验收/合并 P=summary.prOpenIssues。8/2 不是 8 个正在运行，unknown 不得猜测。满额禁止 run/pickup/hand/orch start/dispatch；dry-run 仅看候选优先级。",
+    "已收口仅指 issueState=done/cleaned，不代表工作区或会话已清理。clean --all 只对终态做幂等检查，working/pr-open/failed 等非终态不得清理；cleaned/keys 是候选数，不是实际清理数。无 notes 删除或归档证据时只报“终态清理检查完成，未误清理非终态任务”。",
     "汇报仅写：在飞 X/2（其中 PR 待验收/合并 P 个）、真实运行 N 个及工单号、本轮状态变化/实际动作、异常；无变化用一句话，不复述历史清单和规则。",
   ].join("\n")
 }

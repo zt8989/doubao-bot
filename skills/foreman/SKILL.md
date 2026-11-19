@@ -133,7 +133,7 @@ foreman watch poll               # 立刻跑一轮（checked / settled / enqueue
 - **普通邮件回复**：邮件主题自动带 `[FM-SID:<会话ID>]`，ID 取 `--session-id` 或当前 `MCP_VM_CONVERSATION_ID`。非验收回复先写 `mail.reply` Inbox，Worker 命中会话后 steer；无 ID 或会话不存在时交 router agent。`[FM-xxxxxxxx]` 验收回复仍走原白名单与验收流程。旧 `inspector` 配置/账本/事件仅兼容读取。
 - **派单通道**：`pickup.maxRunning`（默认 2）限制router agent `foreman run` 或人工 `foreman pickup` 的并行单数，优先级沿用 `pickup.priority` 等既有配置；agent 主动 `dispatch` 不限上限，派活动作串行并抢 `run.lock`。自动合并通道已取消，PR 由 `foreman pr merge` 幂等收口；UI PR 仍需两名测试同学验收，未获验收不会自动合并。
 
-- **router agent**：每 `router.intervalSeconds`（默认 600s）由 Schedule 写一条巡检事件；Worker 将巡检与同批 PR 通知合并，复用同一 `kind: router` 会话，底层 `dws msg --mode queue`。`lastSentAt` 只在成功时刷新，连续 `router.recreateAfterHours`（默认 24h）未成功才轮换。它每轮先用 `tasks --json` 独立统计全部在飞工单，`planned/handed/working/pr-open/needs-human/blocked/failed/escalated` 都占槽；合计最多 `pickup.maxRunning`（默认 2），不是每轮新增 2 张。dry-run 只看候选优先级，不能作为空余容量依据；达到上限后禁止用 `run/pickup/hand/orch start/dispatch` 接新单，每次接单后重新计数。发现执行会话收工才 `watch poll`；每轮用 `foreman tasks --json` 找出 `done/cleaned` 残留并 `foreman clean --all`，不得清理 `working/pr-open`；确认原编排失联才 `hand --fresh`；只修本地完成状态用 `issue settle <N> --repo R --note "依据"`，它不关远端 Gitea、不清 worktree、不合 PR。旧 `pickup.auto` / `kickAfterDone` 不再生效，`run --every` 已拒绝执行。
+- **router agent**：每 `router.intervalSeconds`（默认 600s）由 Schedule 写巡检事件；Worker 合并同批 PR 通知，queue 同一路由会话，24 小时未成功才轮换。每轮先读 `foreman tasks --json`：主体是 `sessions` 父子树，节点 `state=running/idle/gone/unknown` 为真实会话状态，`issueKey/issueState` 仅作归属、容量与清理元数据。在飞数取 `summary.unresolvedIssues`，PR 数取 `summary.prOpenIssues`，真实编码运行只数编码节点 `state=running`。全部未收口合计最多 `pickup.maxRunning`（默认 2），`handed` 占槽；满额禁止 `run/pickup/hand/orch start/dispatch`，dry-run 只看候选优先级。发现执行会话收工才 `watch poll`；每轮 `foreman clean --all` 幂等清理 `done/cleaned` 残留，非终态不得清理。确认原编排失联才 `hand --fresh`；只修本地完成状态用 `issue settle <N> --repo R --note "依据"`。旧 `pickup.auto` / `kickAfterDone` 不再生效，`run --every` 已拒绝执行。
 
 - **CLI 启动即握手**（除 `serve` / `help`）：任意子命令起来先读端口文件 `~/.foreman/service.port`（服务写的纯数字），拿它去 `GET /api/ping`；通了直接跑，不通就自动拉起服务、等服务把端口写进文件再连（上限 `handshakeTimeoutMs`，默认 5s）。**CLI 与服务的通信全程 HTTP，没有 unix socket。** 起不来非零退出，打印 `✗ foreman 服务没起来：<原因>` + 两条可执行提示（`foreman serve`、`cat ~/.foreman/service.log`），照做，别手动猜。
 - 逃生开关 `--no-service`：跳过握手与自动拉起，只跑这一条命令（测试与排障用）；配置 `service.enabled: false` 等价于一直带它。
@@ -196,7 +196,7 @@ foreman resume <执行会话id>             # 原会话可修正时：按会话 
                                       #（不传则取 MCP_VM_CONVERSATION_ID，即「用户自己发起的会话」）
 foreman clean <owner/name>#<N>        # 合并关单后清 worktree / 分支 / 工作会话 / 本单编排会话（幂等）
 foreman clean --all                   # 清所有终端态工单的残留
-foreman tasks                         # 每条工单到哪一步、卡在哪
+foreman tasks                         # 已分配会话的实时状态与父子树；工单仅作节点元数据
 foreman pr poll                       # 立刻扫一轮 PR，把他人候选与本人 UI 候选交给router agent
 foreman pr ui-assign <N> --repo R     # 本人 UI PR 轮询指派周晓亮/张振豪验收（只指派，不合）
 foreman pr assign <N> --repo R        # router agent显式分配合并助手；本人/作者不明拒绝，重复分配幂等

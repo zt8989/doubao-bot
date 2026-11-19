@@ -14,6 +14,7 @@ import { acquireLock, releaseLock, runRound, issueKey } from "../src/orchestrato
 import { git, branchExists } from "../src/gitx.mjs"
 import { ensureService, callRaw, ServiceError, resolvePort, portFileOf, readPortFile } from "../src/svclient.mjs"
 import { startServer, pingOnce } from "../src/service.mjs"
+import { sessionTasks, formatSessionTasks } from "../src/tasktree.mjs"
 
 const HELP = `foreman — 接单编排 + 常驻服务
 
@@ -61,7 +62,7 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman clean <owner/name>#<单号>     合并关单后清 worktree、本地分支、工作会话与这张单的编排会话（幂等）
   foreman clean --all                  清所有终端态工单残留的工作区与会话
   foreman pickup [-c <配置>]        手动催一轮自动巡检（服务按 pickup 配置捞一轮单）
-  foreman tasks [--json]
+  foreman tasks [--json]                    已分配会话的实时状态与父子树（工单仅作节点元数据）
   foreman retry <仓库名|owner/name> <工单号> [-c <配置>]
   foreman doctor [-c <配置>] [--start]
   foreman help
@@ -456,29 +457,11 @@ function summarize(handled) {
   return parts.length ? parts.join("，") : "没有可接的工单"
 }
 
-function cmdTasks(pos, flags) {
+async function cmdTasks(pos, flags) {
   const cfg = loadConfig(flags.config)
-  const book = new Book(cfg.stateFile)
-  const list = Object.entries(book.issues).map(([key, v]) => ({
-    key,
-    number: v.issue,
-    title: v.title ?? "",
-    state: v.state ?? "",
-    attempts: v.attempts ?? 0,
-    branch: v.branch ?? "",
-    pr: v.pr ?? null,
-    lastFailure: v.lastFailure ?? "",
-    updatedAt: v.updatedAt ?? "",
-  }))
-  if (flags.json) return out({ ok: true, issues: list })
-  if (!list.length) return process.stdout.write("还没有处理过工单。\n")
-  for (const it of list) {
-    process.stdout.write(
-      `${it.key} · ${it.state}（第 ${it.attempts} 次）${it.pr ? ` PR #${it.pr}` : ""}\n` +
-        (it.title ? `  ${it.title}\n` : "") +
-        (it.lastFailure ? `  卡在：${it.lastFailure}\n` : "")
-    )
-  }
+  const result = await sessionTasks(makeCtx(cfg))
+  if (flags.json) return out(result)
+  process.stdout.write(formatSessionTasks(result))
 }
 
 function cmdRetry(pos, flags) {

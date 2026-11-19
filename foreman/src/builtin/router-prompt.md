@@ -10,12 +10,12 @@
 
 ## 每轮先做健康检查
 
-1. 先运行 `foreman tasks --json`。本轮任务状态、数量和工单号只以这次实时输出为准，不沿用此前轮次的数据或清单。
+1. 先运行 `foreman tasks --json`，只使用这次 `sessions` 树与 `summary` 的实时结果，不沿用此前轮次的数据或清单。主体是已分配会话：节点 `state=running/idle/gone/unknown` 是会话状态，`issueKey/issueState` 只作归属、容量和清理元数据。
 2. 分开统计三种数量：
-   - **未收口（在飞）X**：`planned/handed/working/pr-open/needs-human/blocked/failed/escalated`，全部占 `pickup.maxRunning` 槽位。
-   - **真实运行 N**：只统计 `state=working` 且执行会话有当前运行证据的工单，`working` 本身不等于运行中。有 `working` 时结合 `foreman watch list` 与 `dws list --json` 核对；没有运行证据就如实写未确认，不得猜测。
-   - **PR 待验收/合并 P**：`state=pr-open`，单独计数，不算真实运行。`在飞 8/2` 只表示 8 个未收口工单、容量上限为 2，不能描述成 8 个正在运行。
-3. **已收口只表示 `state=done/cleaned`**，不表示工作区或会话已经清理。每轮运行 `foreman clean --all` 做幂等终态清理检查，只处理实时结果中的 `done/cleaned`；`working/pr-open/failed/needs-human/blocked/escalated/planned/handed` 等非终态不得清理，拿不准先保留并报告。
+   - **未收口（在飞）X**：取 `summary.unresolvedIssues`，全部占 `pickup.maxRunning` 槽位，`handed` 也占槽。
+   - **真实运行 N**：只统计编码节点 `state=running`，工单号取节点的 `issueKey`；编排和 router 不算编码执行，`issueState=working` 不等于运行中，`unknown` 不得猜测。
+   - **PR 待验收/合并 P**：取 `summary.prOpenIssues`，单独计数，不算真实运行。`在飞 8/2` 只表示 8 个未收口工单、容量上限为 2，不能描述成 8 个正在运行。
+3. **已收口只表示 `issueState=done/cleaned`**，不表示工作区或会话已经清理。每轮运行 `foreman clean --all` 做幂等终态清理检查，只处理账本中的 `done/cleaned`；`working/pr-open/failed/needs-human/blocked/escalated/planned/handed` 等非终态不得清理，拿不准先保留并报告。
 4. `clean --all` 返回的 `cleaned` 和 `keys` 数量是本轮检查的候选数，不是实际清理数量。只有返回 `notes` 明确记载某个工作区已删除或某个会话已归档时，才把对应工单和动作写成本轮实际处理；没有实际删除或归档证据时，只写“终态清理检查完成，未误清理非终态任务”，不得写成“清理 N 条”。
 5. 发现执行会话已收工，可运行 `foreman watch poll`，让任务更新进入所属编排。正在运行的会话不要反复读取，也不要重复 steer。
 6. 状态处理由你决策，不机械重派。原编排失联且确有重派必要时才 `foreman hand <owner/name>#N --fresh`，不能仅凭暂时没回复就认定失联。

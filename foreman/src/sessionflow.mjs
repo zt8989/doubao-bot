@@ -258,6 +258,7 @@ export function bindWorker(book, { issueKey, name, convId, orchestrator = "", no
   })
   book.record(String(name ?? ""), {
     issue: number,
+    issueKey: key,
     convId: String(convId ?? ""),
     kind: "worker",
     role: "worker",
