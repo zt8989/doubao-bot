@@ -2,6 +2,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { expandHome } from "./util.mjs"
+import { validateCron } from "./cron.mjs"
 
 export const DEFAULT_EXCLUDE = ["needs-human", "ready-for-human", "needs-info", "wontfix", "agent-blocked"]
 
@@ -170,6 +171,7 @@ export const DEFAULTS = {
     maxEntryChars: 240,
     memoryMaxBytes: 4000,
     userMaxBytes: 2000,
+    dreaming: { enabled: true, cron: "0 3 * * *" },
   },
   lark: { bin: "lark-cli", as: "user" },
   // 定时检查的工作时间窗：只在工作日 8:30–18:30 跑轮询（enabled:false 或整段省略 = 全天跑）。
@@ -291,6 +293,11 @@ export function loadConfig(explicit) {
     if (!Number.isFinite(n) || n <= 0) throw new Error(`配置项 memory.${key} 要是正数，现在是：${cfg.memory[key]}`)
     cfg.memory[key] = Math.floor(n)
   }
+  cfg.memory.dreaming = isObj(cfg.memory.dreaming) ? cfg.memory.dreaming : { enabled: cfg.memory.dreaming !== false }
+  cfg.memory.dreaming.enabled = cfg.memory.dreaming.enabled !== false
+  const dreamingCron = validateCron(cfg.memory.dreaming.cron ?? "0 3 * * *")
+  if (!dreamingCron.ok) throw new Error(`配置项 memory.dreaming.cron 不合法：${dreamingCron.error}`)
+  cfg.memory.dreaming.cron = dreamingCron.expression
 
   for (const key of ["pidFile", "logFile"]) {
     const raw = expandHome(cfg.service[key])

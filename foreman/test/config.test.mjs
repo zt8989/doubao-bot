@@ -62,6 +62,24 @@ test("stateFile 相对路径落在配置文件同目录", () => {
   assert.equal(cfg.stateFile, path.join(dir, "state.json"))
 })
 
+test("memory.dreaming 默认每日 03:00，非法 cron 直接报错", () => {
+  const { file } = tmpConfig({ repos: [{ repo: "a/b", dir: "/tmp", base: "sit-test" }] })
+  const cfg = loadConfig(file)
+  assert.equal(cfg.memory.dreaming.enabled, true)
+  assert.equal(cfg.memory.dreaming.cron, "0 3 * * *")
+  const { file: custom } = tmpConfig({
+    repos: [{ repo: "a/b", dir: "/tmp", base: "sit-test" }],
+    memory: { dreaming: { enabled: false, cron: "0 4 * * *" } },
+  })
+  assert.equal(loadConfig(custom).memory.dreaming.cron, "0 4 * * *")
+  assert.equal(loadConfig(custom).memory.dreaming.enabled, false)
+  const { file: invalid } = tmpConfig({
+    repos: [{ repo: "a/b", dir: "/tmp", base: "sit-test" }],
+    memory: { dreaming: { cron: "bad" } },
+  })
+  assert.throws(() => loadConfig(invalid), /memory\.dreaming\.cron/)
+})
+
 test("身份从配置补齐：pickup.me ↔ prWatch.ignoreAuthors", () => {
   const { file } = tmpConfig({ repos: [{ repo: "a/b", dir: "/tmp", base: "sit-test" }], pickup: { me: "alice" }, prWatch: { ignoreAuthors: [] } })
   const c1 = loadConfig(file)

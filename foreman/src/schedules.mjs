@@ -7,7 +7,7 @@ import { agentExecutor, normalizeAgentExecutor, normalizeScriptExecutor, scriptE
 
 const pad = (n) => String(n).padStart(2, "0")
 
-export const SCHEDULE_IDS = ["prWatch", "mail", "router", "workHours"]
+export const SCHEDULE_IDS = ["prWatch", "mail", "router", "dreaming", "workHours"]
 
 // 临时闭嘴恢复的时刻：今天还没到开始时间且今天是工作日就今天，否则下一个工作日。
 export function nextWorkdayStart(cfg, at = new Date()) {
@@ -33,8 +33,9 @@ const localIso = (d) =>
  * 会话监听是 20 秒一轮，不在这里（cron 最小粒度是分钟）。
  */
 export function cronOf(cfg, id) {
-  const section = cfg?.[id] ?? (id === "router" ? cfg?.inspector : null) ?? {}
+  const section = cfg?.[id] ?? (id === "router" ? cfg?.inspector : id === "dreaming" ? cfg?.memory?.dreaming : null) ?? {}
   if (String(section.cron ?? "").trim()) return String(section.cron).trim()
+  if (id === "dreaming") return "0 3 * * *"
   const seconds = Number(
     section.intervalSeconds ??
       (id === "pickup" ? 1800 : id === "router" ? 600 : id === "mail" ? cfg?.mail?.pollSeconds ?? 300 : 300)
@@ -105,6 +106,22 @@ export function listSchedules(cfg, state = {}) {
       running: routerState.running === true,
     },
     {
+      id: "dreaming",
+      label: "每日记忆 dreaming",
+      enabled: cfg?.memory?.dreaming?.enabled !== false,
+      cron: cronOf(cfg, "dreaming"),
+      executor: "agent",
+      nextAt: state.dreaming?.nextAt || "",
+      intervalSeconds: 0,
+      detail: "每天整理前一日日记：Light 去重、REM 反思、Deep 受控提升；独立 Agent 只能通过 memory 命令写核心记忆，DREAMS.md 供审阅",
+      lastAt: state.dreaming?.lastAt || "",
+      count: Number(state.dreaming?.count ?? 0),
+      lastResult: state.dreaming?.lastResult ?? null,
+      runnable: true,
+      runLabel: "立即整理",
+      running: state.dreaming?.running === true,
+    },
+    {
       id: "workHours",
       label: "工作时间窗",
       // 这里 enabled 表示「现在允许运行」：闭嘴期间就是 false。
@@ -158,7 +175,7 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
     if (!(id in patch)) continue
     const raw = patch[id]
     const obj = raw && typeof raw === "object" ? raw : { enabled: raw === true || raw === "true" }
-    if ("cron" in obj && !["prWatch", "mail", "router"].includes(id)) throw new Error(`${id} 不是独立定时任务，没有 cron 可改`)
+    if ("cron" in obj && !["prWatch", "mail", "router", "dreaming"].includes(id)) throw new Error(`${id} 不是独立定时任务，没有 cron 可改`)
     const next = {}
     if ("enabled" in obj) next.enabled = obj.enabled === true || obj.enabled === "true"
     if ("cron" in obj) {
@@ -185,6 +202,11 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
       if ("enabled" in next) cfg.router.enabled = next.enabled
       if ("cron" in next) cfg.router.cron = next.cron
       if ("agent" in next) cfg.router.agent = next.agent
+    } else if (id === "dreaming") {
+      const dreaming = { ...(cfg.memory?.dreaming ?? {}) }
+      if ("enabled" in next) dreaming.enabled = next.enabled
+      if ("cron" in next) dreaming.cron = next.cron
+      cfg.memory = { ...(cfg.memory ?? {}), dreaming }
     } else if (id === "workHours") {
       if ("days" in obj || "start" in obj || "end" in obj) cfg.workHours = { ...(cfg.workHours ?? {}), ...normalizeWorkHours(obj, cfg) }
       if ("enabled" in next) cfg.workHours = { ...(cfg.workHours ?? {}), offUntil: next.enabled ? "" : localIso(nextWorkdayStart(cfg, at)) }
@@ -195,7 +217,7 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
 }
 
 /** 开关对应的配置键名（这几个节点都是 enabled）。 */
-const FLAG_KEY = { prWatch: "enabled", mail: "enabled", router: "enabled" }
+const FLAG_KEY = { prWatch: "enabled", mail: "enabled", router: "enabled", dreaming: "enabled" }
 
 /**
  * 写回配置文件：只改上面这四个开关，其余字段（含用户手写的格式/注释式排版）原样保留。
@@ -209,6 +231,13 @@ export function persistSchedules(file, patch = {}, cfg = {}) {
     if (!(id in patch)) continue
     const value = patch[id]
     const obj = value && typeof value === "object" ? value : { enabled: value === true || value === "true" }
+    if (id === "dreaming") {
+      const section = { ...(raw.memory?.dreaming ?? {}) }
+      if ("enabled" in obj) section.enabled = obj.enabled === true || obj.enabled === "true"
+      if ("cron" in obj) section.cron = String(cfg?.memory?.dreaming?.cron ?? obj.cron)
+      raw.memory = { ...(raw.memory ?? {}), dreaming: section }
+      continue
+    }
     const section = { ...(raw[id] ?? {}) }
     if (id === "workHours") {
       if ("days" in obj || "start" in obj || "end" in obj) Object.assign(section, normalizeWorkHours(obj, cfg))

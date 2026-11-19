@@ -26,6 +26,35 @@ function normalizeKey(key) {
   return value
 }
 
+function normalizeDay(day) {
+  const value = String(day ?? "").trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error("day 必须是 YYYY-MM-DD")
+  return value
+}
+
+function dreamStatePath(dir) {
+  return path.join(dir, "dreaming", "state.json")
+}
+
+function readDreamState(dir) {
+  const file = dreamStatePath(dir)
+  if (!fs.existsSync(file)) return { version: 1, days: {} }
+  const parsed = JSON.parse(fs.readFileSync(file, "utf8"))
+  return { version: 1, days: parsed.days && typeof parsed.days === "object" ? parsed.days : {} }
+}
+
+function writeDreamState(dir, state) {
+  const file = dreamStatePath(dir)
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  const temporary = `${file}.${process.pid}.${Date.now()}.tmp`
+  try {
+    fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 })
+    fs.renameSync(temporary, file)
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary)
+  }
+}
+
 function normalizeText(text, maxChars) {
   const value = String(text ?? "").trim()
   if (!value) throw new Error("记忆内容不能为空")
@@ -111,6 +140,76 @@ export class MemoryStore {
       memory: coreInfo(this.dir, "memory"),
       user: coreInfo(this.dir, "user"),
     }
+  }
+
+  daily(day) {
+    const value = normalizeDay(day)
+    const file = path.join(this.dir, "memory", `${value}.md`)
+    return {
+      day: value,
+      file: `memory/${value}.md`,
+      path: file,
+      content: fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "",
+    }
+  }
+
+  beginDream({ day, force = false }) {
+    const value = normalizeDay(day)
+    return withWriteLock(this.dir, () => {
+      const state = readDreamState(this.dir)
+      const previous = state.days[value]
+      if (!force && ["running", "completed"].includes(previous?.status)) {
+        return { ok: true, skipped: previous.status === "running" ? "already-running" : "already-completed", day: value, runId: previous.runId }
+      }
+      const runId = `${value}-${Date.now()}-${process.pid}`
+      state.days[value] = { status: "running", runId, startedAt: new Date().toISOString() }
+      writeDreamState(this.dir, state)
+      return { ok: true, day: value, runId, status: "running" }
+    })
+  }
+
+  failDream({ day, runId, error }) {
+    const value = normalizeDay(day)
+    return withWriteLock(this.dir, () => {
+      const state = readDreamState(this.dir)
+      if (state.days[value]?.runId !== runId) return { ok: true, ignored: "stale-run", day: value }
+      state.days[value] = { ...state.days[value], status: "failed", error: String(error || "unknown"), finishedAt: new Date().toISOString() }
+      writeDreamState(this.dir, state)
+      return { ok: true, status: "failed", day: value, runId }
+    })
+  }
+
+  dreamStatus() {
+    return {
+      ok: true,
+      diary: "DREAMS.md",
+      path: path.join(this.dir, "DREAMS.md"),
+      ...readDreamState(this.dir),
+    }
+  }
+
+  dreamReport({ day, runId, text }) {
+    const value = normalizeDay(day)
+    const id = String(runId ?? "").trim()
+    const summary = String(text ?? "").trim()
+    if (!id) throw new Error("dream-report 需要 --run")
+    if (!summary) throw new Error("dream-report 需要非空 --text")
+    return withWriteLock(this.dir, () => {
+      const state = readDreamState(this.dir)
+      const current = state.days[value]
+      if (current?.runId !== id || !["running", "completed"].includes(current.status)) {
+        throw new Error(`${value} 不存在可写报告的 running dreaming：${id}`)
+      }
+      if (current.status !== "completed") {
+        const diary = path.join(this.dir, "DREAMS.md")
+        const marker = `<!-- dream-run:${id} -->`
+        const existing = fs.existsSync(diary) ? fs.readFileSync(diary, "utf8") : ""
+        if (!existing.includes(marker)) fs.appendFileSync(diary, `## ${value}\n\n${marker}\n\n${summary}\n\n`, { mode: 0o600 })
+        state.days[value] = { ...current, status: "completed", finishedAt: new Date().toISOString() }
+        writeDreamState(this.dir, state)
+      }
+      return { ok: true, status: "completed", day: value, runId: id, diary: "DREAMS.md", path: path.join(this.dir, "DREAMS.md") }
+    })
   }
 
   set({ target, key, text }) {
