@@ -504,12 +504,23 @@ export async function mailPollOnce(ctx, { force = false } = {}) {
   }
   const messages = Array.isArray(list?.data) ? list.data : []
   const allow = allowSenders(cfg)
+  const sinceText = String(cfg.mail?.since ?? "").trim()
+  const sinceMs = sinceText ? Date.parse(sinceText) : NaN
   for (const m of messages) {
     out.checked++
     const id = String(m?.message_id ?? "").trim()
     if (!id) continue
     const book = new Book(cfg.stateFile)
     if (book.mail.seen[id]) continue
+    if (Number.isFinite(sinceMs)) {
+      const receivedAt = String(m?.created_at ?? "").trim()
+      const receivedMs = Date.parse(receivedAt)
+      // 起始时间是固定门槛，不随日期滚动；缺时间或早于门槛的历史邮件只登记，不读取、不路由。
+      if (!Number.isFinite(receivedMs) || receivedMs < sinceMs) {
+        book.markMailSeen(id, { verdict: "before-since", since: sinceText, receivedAt })
+        continue
+      }
+    }
     const tag = parseAcceptTag(m?.subject)
     if (!tag) {
       if (!ctx.inbox) continue // 兼容无服务的旧调用；生产服务始终有持久 Inbox。
