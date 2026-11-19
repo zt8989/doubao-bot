@@ -13,9 +13,8 @@ doubao-bot/
 ├── dws/                  # dws 包：bin/dws.mjs、src/、test/、README、package.json
 ├── foreman/              # foreman 包：bin/foreman.mjs、src/、test/、README、package.json
 ├── gitea/                # gitea 包：REST 客户端 + CLI（bin/gitea.mjs，23 条命令）
-├── adapters/gitea/       # opencli 的 gitea 适配器（REST，复用 gitea/src/api.mjs）
 ├── skills/               # dws / foreman / gitea 三个技能
-└── package.json          # 只有 test / link:adapter 两个脚本，不放任何 CLI
+└── package.json          # 只有 test 脚本，不放任何 CLI
 ```
 
 技能与链路的对应：`dws` 只管会话、`gitea` 只管工单读写、`foreman` 管串联（选单→worktree→派活→验收→PR→通知调用方）。
@@ -29,8 +28,8 @@ doubao-bot/
 线上命令，要上线就 commit 后跑一次发布。工作区有未提交改动的单元默认跳过。
 
 ```bash
-scripts/publish.sh                 # 全部：bin（gitea/foreman/dws）+ opencli 适配器 + skill
-scripts/publish.sh dws             # 只发某个单元：gitea / adapters / foreman / dws / skills
+scripts/publish.sh                 # 全部：bin（gitea/foreman/dws）+ skill
+scripts/publish.sh dws             # 只发某个单元：gitea / foreman / dws / skills
 scripts/publish.sh --allow-dirty   # 有未提交改动也照发（默认跳过脏单元）
 ```
 
@@ -40,9 +39,6 @@ scripts/publish.sh --allow-dirty   # 有未提交改动也照发（默认跳过�
   名字大小写还不一致（踩过一次：`.user_skills/dws` + `~/Doubao/skills/dws` 同时在，面板出现 `Dws` 和 `dws`）。
 - **gitea 命令**：`gitea/` 由 `npm link` 装成全局 `gitea`（指向 `dist/gitea`）；foreman 发布时
   会一并发布它，因为 `foreman/src/gitea.mjs` 直接 import `../../gitea/src/api.mjs`。
-- **opencli 适配器**：`adapters/gitea/*.js` 也是 REST 版，直接 import 同一份 `gitea/src/api.mjs`；
-  `scripts/publish.sh adapters` 会拷到 `dist/adapters/gitea` 并把 `~/.opencli/clis/gitea` 逐文件软链过去。
-  改完适配器要 `opencli daemon restart`，否则长驻 daemon 还在用旧 registry。
 - **令牌**：`~/.foreman/gitea-token`（chmod 600），或 `GITEA_TOKEN` 环境变量；生成入口是
   Gitea「设置 → 应用 → 管理 Access Token」，scopes 至少 issue / repository / organization 读写。
 

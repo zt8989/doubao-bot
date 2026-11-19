@@ -12,9 +12,8 @@ description: 通过 REST API 操作内网 Gitea（http://106.54.199.229:3000，�
 bash "$SKILL_DIR/scripts/gitea.sh" pr-view 217 --repo yyzl/win-ai-harness
 ```
 
-命令实现在仓库 `gitea/` 包（CLI 入口 `gitea/bin/gitea.mjs`），foreman 与 opencli 的 gitea 适配器
-都直接复用同一份 `gitea/src/api.mjs`（opencli 侧是 REST，不再是浏览器自动化）。单次调用是秒级，
-不用后台跑、不用等 20–40s。
+命令实现在仓库 `gitea/` 包（CLI 入口 `gitea/bin/gitea.mjs`），foreman 直接复用同一份
+`gitea/src/api.mjs`。单次调用是秒级，不用后台跑、不用等 20–40s。
 
 ## 令牌
 
