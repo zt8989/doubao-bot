@@ -109,7 +109,7 @@ foreman ws list --issue <owner/name>#<单号>                                   
 
 ## 常驻服务（定时投递 + 智能体决策）
 
-foreman 是「CLI + 一个常驻服务」。服务每 10 分钟 steer 同一条检查会话，24 小时未成功投递才新建；**代码定时器只负责投递，不自行派单**。检查智能体负责健康检查、按优先级/容量接单、重派失联编排和本地修账。执行收工不再有代码定时轮询，`watch poll` 由检查智能体或人工按需执行。notify 节点当前只落痕、不发消息。
+foreman 是「CLI + 一个常驻服务」。服务每 10 分钟 steer 同一条检查会话，24 小时未成功投递才新建；**代码定时器只负责投递，不自行派单**。检查智能体负责健康检查、按优先级/容量接单、重派失联编排、本地修账，以及每轮用 `foreman tasks --json` 复核并通过 `foreman clean --all` 清理 `done/cleaned` 残留。执行收工不再有代码定时轮询，`watch poll` 由检查智能体或人工按需执行。notify 节点当前只落痕、不发消息。
 
 ```bash
 foreman serve [--daemon]         # 起服务：前台跑（--daemon 后台，输出进 service.log）
@@ -124,7 +124,7 @@ foreman watch poll               # 立刻跑一轮（checked / settled / notifie
 
 - **派单通道**：`pickup.maxRunning`（默认 2）限制检查智能体 `foreman run` 或人工 `foreman pickup` 的并行单数，优先级沿用 `pickup.priority` 等既有配置；agent 主动 `dispatch` 不限上限，派活动作串行并抢 `run.lock`。自动合并通道已取消，PR 由 `foreman pr merge` 幂等收口；UI PR 仍需两名测试同学验收，未获验收不会自动合并。
 
-- **检查智能体**：每 `inspector.intervalSeconds`（默认 600s）steer 同一 `kind: inspector` 会话；`lastSentAt` 只在成功时刷新，连续 `inspector.recreateAfterHours`（默认 24h）未成功才轮换。它先 `run --dry-run --once` 核对候选，再决定 `run --once`；发现执行会话收工才 `watch poll`；确认原编排失联才 `hand --fresh`；只修本地完成状态用 `issue settle <N> --repo R --note "依据"`，它不关远端 Gitea、不清 worktree、不合 PR。旧 `pickup.auto` / `kickAfterDone` 不再生效，`run --every` 已拒绝执行。
+- **检查智能体**：每 `inspector.intervalSeconds`（默认 600s）steer 同一 `kind: inspector` 会话；`lastSentAt` 只在成功时刷新，连续 `inspector.recreateAfterHours`（默认 24h）未成功才轮换。它先 `run --dry-run --once` 核对候选，再决定 `run --once`；发现执行会话收工才 `watch poll`；每轮用 `foreman tasks --json` 找出 `done/cleaned` 残留并 `foreman clean --all`，不得清理 `working/pr-open`；确认原编排失联才 `hand --fresh`；只修本地完成状态用 `issue settle <N> --repo R --note "依据"`，它不关远端 Gitea、不清 worktree、不合 PR。旧 `pickup.auto` / `kickAfterDone` 不再生效，`run --every` 已拒绝执行。
 
 - **CLI 启动即握手**（除 `serve` / `help`）：任意子命令起来先读端口文件 `~/.foreman/service.port`（服务写的纯数字），拿它去 `GET /api/ping`；通了直接跑，不通就自动拉起服务、等服务把端口写进文件再连（上限 `handshakeTimeoutMs`，默认 5s）。**CLI 与服务的通信全程 HTTP，没有 unix socket。** 起不来非零退出，打印 `✗ foreman 服务没起来：<原因>` + 两条可执行提示（`foreman serve`、`cat ~/.foreman/service.log`），照做，别手动猜。
 - 逃生开关 `--no-service`：跳过握手与自动拉起，只跑这一条命令（测试与排障用）；配置 `service.enabled: false` 等价于一直带它。

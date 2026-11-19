@@ -116,7 +116,7 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 
 - 每 `inspector.intervalSeconds`（默认 600 秒）向同一条检查会话 `steer` 一次；首次 `openNew` 创建。
 - 以最后一次成功投递为轮换基准；从未成功时从首次失败计时，连续 `inspector.recreateAfterHours`（默认 24 小时）未成功才新建检查会话。
-- 定时器只投递，不读取工单状态自行派单。检查智能体负责健康检查、按现有优先级与 `pickup.maxRunning` 接单、必要时 `hand --fresh` 重派独立编排，以及用 `issue settle` 修复本地完成状态。
+- 定时器只投递，不读取工单状态自行派单。检查智能体负责健康检查、按现有优先级与 `pickup.maxRunning` 接单、必要时 `hand --fresh` 重派独立编排、用 `issue settle` 修复本地完成状态，以及每轮通过 `foreman tasks --json` 找出 `done/cleaned` 残留并执行 `foreman clean --all`。
 - `watch poll` 保留为检查智能体/人工按需入口：处理已收工执行会话、推进账本、push/开 PR、steer 回本单编排。
 - **notify 节点当前只落痕、不投递**：判定照做、指纹照记，但不新建会话、不 `dws notify`。
 
@@ -414,6 +414,7 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 - `inspector.enabled` 默认 `true`；起服务 1 秒后投递首轮，之后每 `inspector.intervalSeconds`（默认 600 秒）steer 同一检查会话；
 - 连续 `inspector.recreateAfterHours`（默认 24）小时未成功投递才新建会话；失败本身不会刷新 `lastSentAt`；
 - 检查智能体先 `run --dry-run --once` 核对候选，再决定 `run --once`；优先级仍由 `pickup.priority` 等配置决定，容量为 `pickup.maxRunning`；
+- 每轮巡检快照附带已收口待清理任务；检查智能体必须用 `foreman tasks --json` 复核，只对 `done/cleaned` 执行 `foreman clean --all`，不得清理 `working/pr-open` 等非终态；
 - 显式 `foreman pickup` 会绕过旧 auto 开关与工作时间窗，但保留容量、`run.lock`、节点暂停和账本去重；
 - 执行会话收工由检查智能体或人工 `watch poll` 按需处理，不再有 20 秒代码轮询；
 - `foreman status` 的 `inspector` 段查看会话 id、最近成功/失败投递和下一次时间。

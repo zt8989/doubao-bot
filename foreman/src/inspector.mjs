@@ -1,6 +1,7 @@
 // 检查智能体：Foreman 只负责定时投递与投递失败后的会话轮换，接单、续跑、重派和本地完成均由智能体决策。
 import { Book } from "./book.mjs"
 import { builtinPrompt } from "./builtin-prompts.mjs"
+import { cleanableIssues } from "./sessionflow.mjs"
 
 const ACTIVE_STATES = new Set(["planned", "handed", "working", "pr-open", "needs-human", "blocked", "failed", "escalated"])
 
@@ -29,7 +30,10 @@ export async function inspectionSnapshot(ctx) {
     .sort(([a], [b]) => a.localeCompare(b))
     .slice(0, 60)
     .map(([key, rec]) => issueLine(key, rec, running))
+  const cleanup = cleanableIssues(book)
   return [
+    "每轮先执行 `foreman tasks --json`；只对 state=done/cleaned 的残留任务执行 `foreman clean --all`，及时清理已合并、已关闭工单的工作区与会话。working/pr-open 等非终态不得清理。",
+    `已收口待清理快照：${cleanup.length ? cleanup.join("、") : "空。"}`,
     `在飞上限：${Number(ctx.cfg.pickup?.maxRunning ?? 2)}；本轮只按现有优先级补足空余槽位。`,
     issues.length ? "未收口工单快照：" : "未收口工单快照：空。",
     ...issues,
