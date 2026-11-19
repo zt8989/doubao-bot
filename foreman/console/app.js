@@ -8,8 +8,12 @@ import { LitElement, html } from "lit"
 
 const STATE_LABEL = {
   planned: "已计划",
+  running: "运行中",
+  idle: "空闲",
+  gone: "已失联",
   working: "进行中",
   done: "已完成",
+  cleaned: "已清理",
   "pr-open": "已出 PR",
   "needs-human": "待人工",
   blocked: "阻塞",
@@ -198,8 +202,8 @@ class FmStats extends LitElement {
     const s = this.stats || {}
     const scope = this.scope || "今日"
     const cards = [
-      { label: `${scope} 分配任务`, value: s.tasks, sub: `历史累计 ${s.historyTasks ?? 0} 单`, accent: "accent-cyan" },
-      { label: "进行中", value: s.working, sub: `已出 PR ${s.prOpen ?? 0}`, accent: "accent-green" },
+      { label: s.taskLabel || `${scope} 分配任务`, value: s.tasks, sub: `历史累计 ${s.historyTasks ?? 0} 单`, accent: "accent-cyan" },
+      { label: s.workingLabel || "进行中", value: s.working, sub: s.unresolved === undefined ? `已出 PR ${s.prOpen ?? 0}` : `未收口 ${s.unresolved} · PR 待处理 ${s.prOpen ?? 0}`, accent: "accent-green" },
       { label: `${scope} PR`, value: s.prs, sub: `历史 ${s.historyPrs ?? 0} 条 · 新增 ${s.newPrs ?? 0}`, accent: "accent-cyan" },
     ]
     return html`
@@ -272,6 +276,9 @@ class FmPagination extends LitElement {
 class FmTasks extends LitElement {
   static properties = {
     tasks: { attribute: false },
+    sessions: { attribute: false },
+    summary: { attribute: false },
+    isToday: { type: Boolean },
     nodes: { attribute: false },
     runs: { attribute: false },
     workflows: { attribute: false },
@@ -450,8 +457,74 @@ class FmTasks extends LitElement {
           : ""}在跑 ${cap.inflight ?? 0}/${cap.maxRunning ?? "?"} · 手动接单不看自动接单开关 · 带 needs-info 类标签的走决策单（不监听）
       </div>`
   }
+  sessionTask(node) {
+    return (this.tasks || []).find((t) => t.key === node.issueKey) || null
+  }
+  sessionRow(node, depth = 0, connector = "") {
+    const task = this.sessionTask(node)
+    const issueKeys = [...new Set([node.issueKey, ...Object.keys(node.issueStates || {})].filter(Boolean))]
+    const stateClass = { running: "working", idle: "planned", gone: "failed", unknown: "unknown" }[node.state] || "unknown"
+    const detailKey = task ? `${task.repo}#${task.number}` : ""
+    return html`
+      <tr class="session-row">
+        <td class="session-cell" title=${node.name || ""}>
+          <span class="session-name" style=${`padding-left: ${depth * 20}px`}>
+            <span class="tree-connector">${connector}</span><span>${node.name || "未命名会话"}</span>
+          </span>
+        </td>
+        <td class="session-role">${node.roleName || "—"}</td>
+        <td><span class=${"badge " + stateClass}>${STATE_LABEL[node.state] || node.state}</span></td>
+        <td class="branch-cell" title=${issueKeys.join(", ")}>${issueKeys.length ? issueKeys.join(", ") : "—"}</td>
+        <td>${node.issueState ? html`<span class=${"badge " + node.issueState}>${STATE_LABEL[node.issueState] || node.issueState}</span>` : "—"}</td>
+        <td class="branch-cell">${node.prKey ? `${node.prKey} · ${node.prMerged ? "已合并" : "待合并"}` : "—"}</td>
+        <td class="detail-cell">
+          ${task
+            ? html`<button class="ghost" @click=${() => this.toggle(detailKey)}>${this.openKey === detailKey ? "收起" : "详情"}</button>
+                ${task.state === "pr-open"
+                  ? html`<button
+                      class="ghost session-complete"
+                      title="核对远端 PR 已合并后，将工单置为已完成并执行既有清理"
+                      ?disabled=${this.completeBusy !== ""}
+                      @click=${() => emit(this, "task-complete", { repo: task.repo, number: task.number })}
+                    >${this.completeBusy === detailKey ? "完成中…" : "手动完成"}</button>`
+                  : ""}`
+            : "—"}
+        </td>
+      </tr>
+      ${detailKey && this.openKey === detailKey ? this.detail(task) : ""}
+      ${(node.children || []).map((child, index, children) =>
+        this.sessionRow(child, depth + 1, index === children.length - 1 ? "└─ " : "├─ "))}`
+  }
+  sessionsView() {
+    const roots = this.sessions || []
+    const paged = pageSlice(roots, this.page)
+    if (!roots.length) {
+      return html`<div class="empty">
+        <div class="empty-title">当前还没有分配会话</div>
+        <div class="empty-sub">编排、编码、补派与合并会话会按父子关系显示在这里</div>
+      </div>`
+    }
+    return html`
+      <div class="table-wrap">
+        <table class="tasks session-table">
+          <thead><tr>
+            <th class="col-session">会话</th>
+            <th class="col-role">角色</th>
+            <th class="col-state">真实状态</th>
+            <th>工单</th>
+            <th class="col-issue-state">工单状态</th>
+            <th class="col-pr">PR</th>
+            <th class="col-detail">详情</th>
+          </tr></thead>
+          <tbody>${paged.rows.map((node) => this.sessionRow(node))}</tbody>
+        </table>
+      </div>
+      <fm-pagination scope="tasks" .page=${paged.page} .total=${paged.total} .pageSize=${PAGE_SIZE}></fm-pagination>`
+  }
   render() {
     const rows = this.tasks || []
+    const sessionMode = this.isToday === true && Array.isArray(this.sessions)
+    const summary = this.summary || {}
     const paged = pageSlice(rows, this.page)
     const scope = this.scope || "今日"
     const tab = this.tab === "pending" ? "pending" : "today"
@@ -479,12 +552,14 @@ class FmTasks extends LitElement {
               ? html`<button class="ghost" ?disabled=${this.candBusy === "loading"} @click=${() => emit(this, "candidates-refresh")}>
                   ${this.candBusy === "loading" ? "刷新中…" : "刷新"}
                 </button>`
-              : html`<span class="hint">${rows.length ? `${rows.length} 条 · 点「详情」看每个节点` : "暂无"}</span>`}
+              : html`<span class="hint">${sessionMode
+                  ? `${summary.sessions ?? 0} 会话 · 真实运行 ${summary.runningWorkers ?? 0} · 未收口 ${summary.unresolvedIssues ?? 0}`
+                  : rows.length ? `${rows.length} 条 · 点「详情」看每个节点` : "暂无"}</span>`}
           </div>
         </div>
         ${tab === "today" && this.completeError ? html`<div class="note error" role="alert">${this.completeError}</div>` : ""}
         ${tab === "today" && this.completeNote ? html`<div class="note" role="status">${this.completeNote}</div>` : ""}
-        ${tab === "pending" ? this.pendingView() : rows.length
+        ${tab === "pending" ? this.pendingView() : sessionMode ? this.sessionsView() : rows.length
           ? html`
               <div class="table-wrap">
                 <table class="tasks">
@@ -1477,6 +1552,9 @@ class FmConsole extends LitElement {
               <fm-stats .stats=${this.data.stats} .scope=${this.data.isToday === false ? this.data.day : "今日"}></fm-stats>
               <fm-tasks
                 .tasks=${this.data.tasks}
+                .sessions=${this.data.sessions}
+                .summary=${this.data.summary}
+                .isToday=${this.data.isToday !== false}
                 .nodes=${this.workflow?.nodes || []}
                 .runs=${this.workflow?.runs || []}
                 .workflows=${this.workflow?.workflows || []}

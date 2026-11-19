@@ -11,6 +11,7 @@ import fs from "node:fs"
 import http from "node:http"
 import path from "node:path"
 import { Book } from "./book.mjs"
+import { sessionTasks } from "./tasktree.mjs"
 
 const MAX_BODY = 1 << 20
 
@@ -103,7 +104,7 @@ export function startConsoleHttp({ store, ctx, dir, host = "127.0.0.1", port = 7
     }
     // 回看历史某天不用再扫一遍账本写库；看今天才同步，保持实时。
     const sync = day ? null : store.sync(book)
-    return store.snapshot({
+    const snapshot = store.snapshot({
       book,
       cfg: ctx.cfg,
       pr: { ...ctx.state.pr, lastNewPrs: sync?.newPrs ?? 0 },
@@ -116,6 +117,33 @@ export function startConsoleHttp({ store, ctx, dir, host = "127.0.0.1", port = 7
       day,
       runningSessions,
     })
+    if (day) return snapshot
+    // 当前任务页与 CLI 共用同一份会话树；历史日期仍按事件回放展示旧工单视图。
+    // 复用上面已读的侧边栏，避免一次快照触发两次 dws list。
+    const tree = await sessionTasks({
+      cfg: ctx.cfg,
+      dws: {
+        runningMap: async () => {
+          if (runningSessions === null) throw new Error("DWS 侧边栏状态不可用")
+          return runningSessions
+        },
+      },
+    })
+    return {
+      ...snapshot,
+      sessions: tree.sessions,
+      summary: tree.summary,
+      sessionStatus: { source: tree.statusSource, error: tree.statusError },
+      stats: {
+        ...snapshot.stats,
+        tasks: tree.summary.sessions,
+        working: tree.summary.runningWorkers,
+        prOpen: tree.summary.prOpenIssues,
+        unresolved: tree.summary.unresolvedIssues,
+        taskLabel: "当前分配会话",
+        workingLabel: "真实运行",
+      },
+    }
   }
 
   const server = http.createServer(async (req, res) => {

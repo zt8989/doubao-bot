@@ -93,20 +93,34 @@ test("HTTP：首页进行中数量使用执行会话实时状态", async () => {
   const now = new Date().toISOString()
   fs.writeFileSync(stateFile, JSON.stringify({
     issues: {
-      "a/b#1": { title: "实际在跑", state: "working", agentConvId: "conv-live", updatedAt: now },
+      "a/b#1": { title: "实际在跑", state: "working", orchestrator: "conv-orch", agentConvId: "conv-live", updatedAt: now },
       "a/b#2": { title: "等待收口", state: "working", agentConvId: "conv-idle", updatedAt: now },
+    },
+    sessions: {
+      "编排一": { convId: "conv-orch", kind: "orchestrator", role: "orchestrator", issueKey: "a/b#1" },
+      "编码一": { convId: "conv-live", kind: "worker", role: "worker", parent: "conv-orch" },
+      "编码二": { convId: "conv-idle", kind: "worker", role: "worker" },
     },
   }))
   const store = new ConsoleStore(path.join(dir, "console.db"))
   const ctx = {
     cfg: { stateFile },
     state: { pr: {} },
-    dws: { runningMap: async () => ({ "conv-live": { running: true }, "conv-idle": { running: false } }) },
+    dws: { runningMap: async () => ({ "conv-orch": { running: false }, "conv-live": { running: true }, "conv-idle": { running: false } }) },
   }
   const h = await startConsoleHttp({ store, ctx, dir, host: "127.0.0.1", port: 0, log: () => {} })
   try {
     const snap = await (await fetch(`${h.url}/api/snapshot`, { cache: "no-store" })).json()
     assert.equal(snap.stats.working, 1)
+    assert.equal(snap.stats.tasks, 3, "当前指标按已分配会话计数，不按工单行计数")
+    assert.equal(snap.summary.unresolvedIssues, 2)
+    assert.equal(snap.summary.runningWorkers, 1)
+    assert.equal(snap.sessions.length, 2)
+    const orchestrator = snap.sessions.find((n) => n.convId === "conv-orch")
+    assert.equal(orchestrator.state, "idle")
+    assert.equal(orchestrator.children[0].convId, "conv-live")
+    assert.equal(orchestrator.children[0].state, "running")
+    assert.equal(orchestrator.children[0].issueState, "working")
     assert.deepEqual(snap.tasks.filter((t) => t.running).map((t) => t.key), ["a/b#1"])
   } finally {
     await new Promise((r) => h.server.close(r))
