@@ -1,10 +1,10 @@
 // Gitea 工单/PR 适配器：workflow 只通过它读写工单与 PR。
 // 换 Jira / GitLab 时照这个形状再写一个即可。
-import { listPulls, listIssues, viewIssue, viewPr, mergePr, closeIssue, createPr, commentIssue, editLabels } from "../../gitea.mjs"
+import { listPulls, listIssues, viewIssue, viewPr, mergePr, closeIssue, createPr, commentIssue, editLabels, assign } from "../../gitea.mjs"
 
 export class GiteaTrackerAdapter {
   constructor({ impl = {} } = {}) {
-    this.impl = { listPulls, listIssues, viewIssue, viewPr, mergePr, closeIssue, createPr, commentIssue, editLabels, ...impl }
+    this.impl = { listPulls, listIssues, viewIssue, viewPr, mergePr, closeIssue, createPr, commentIssue, editLabels, assign, ...impl }
   }
 
   viewIssue(repo, number) {
@@ -37,6 +37,11 @@ export class GiteaTrackerAdapter {
 
   commentIssue(repo, number, body) {
     return this.impl.commentIssue(repo, number, body)
+  }
+
+  // UI PR 验收指派仍走适配器，不能把 service 里的 ctx.gitea.assign 打成空调用。
+  assign(repo, number, username) {
+    return this.impl.assign(repo, number, username)
   }
 
   // 关单时摘接单标签：标签是 close 节点的产物，由它自己收。

@@ -4,6 +4,7 @@ import assert from "node:assert/strict"
 import { Lifecycle, EVENTS, STAGES, WORKFLOWS, stagesOf, workflowsOf } from "../src/workflow/lifecycle.mjs"
 import { assertSessionAdapter } from "../src/workflow/adapters/session.mjs"
 import { DoubaoSessionAdapter } from "../src/workflow/adapters/doubao.mjs"
+import { GiteaTrackerAdapter } from "../src/workflow/adapters/gitea.mjs"
 import { WorkflowEngine } from "../src/workflow/engine.mjs"
 import { resolveIssueKey } from "../src/workflow/cleaners.mjs"
 import { Book } from "../src/book.mjs"
@@ -81,6 +82,20 @@ test("Lifecycle：hooks 先跑、适配器按注册顺序跑，历史留痕；�
 
 test("SessionAdapter 契约：缺方法会被点名", () => {
   assert.throws(() => assertSessionAdapter({ status() {} }), /缺少方法/)
+})
+
+test("GiteaTrackerAdapter：保留 UI 验收指派的 assign 转发", async () => {
+  const calls = []
+  const tracker = new GiteaTrackerAdapter({
+    impl: {
+      assign: async (...args) => {
+        calls.push(args)
+        return { ok: true }
+      },
+    },
+  })
+  assert.deepEqual(await tracker.assign("demo/demo", 90, "ywwb1328"), { ok: true })
+  assert.deepEqual(calls, [["demo/demo", 90, "ywwb1328"]])
 })
 
 function fakeDriver() {
