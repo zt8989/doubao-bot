@@ -204,7 +204,7 @@ test("inspect RPC：直接调用 router agent 并返回执行结果", async () =
   }
 })
 
-test("服务 Schedule 直接唤醒路由 Agent，Worker 只确认执行结果", async () => {
+test("服务 Schedule 直接唤醒路由 Agent，成功 queued 不写 Inbox 噪音", async () => {
   const f = fixture()
   Object.assign(f.cfg, {
     router: { enabled: true, intervalSeconds: 600, recreateAfterHours: 24 },
@@ -229,9 +229,9 @@ test("服务 Schedule 直接唤醒路由 Agent，Worker 只确认执行结果", 
     assert.equal(f.queued.length, 0)
     await server.schedules.tick(new Date())
     assert.equal(f.opened.length, 1, "Schedule 的 agent 执行器直接创建路由会话")
-    assert.equal(server.inbox.list()[0].kind, "schedule.result")
+    assert.equal(server.inbox.count(), 0, "queued 只是投递回执，不是有效 Inbox 信息")
     await server.worker.idle()
-    assert.equal(server.inbox.counts().done, 1)
+    assert.equal(server.inbox.count(), 0)
   } finally {
     if (server) await server.close()
     fs.rmSync(f.dir, { recursive: true, force: true })

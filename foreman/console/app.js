@@ -727,7 +727,7 @@ class FmQueue extends LitElement {
                 ${rows.map((row) => html`
                   <tr>
                     <td class="id-cell">#${row.id}</td>
-                    <td class="branch-cell" title=${kind === "outbox" ? row.channel : row.kind}>${kind === "outbox" ? row.channel : row.kind}</td>
+                    <td class="branch-cell" title=${kind === "outbox" ? row.channel : row.kind}>${kind === "outbox" ? row.channel : row.payload?.type || row.kind}</td>
                     <td class="title-cell" title=${queueSummary(kind, row)}>${queueSummary(kind, row) || "—"}</td>
                     <td><span class=${"badge " + (row.status === "processing" ? "working" : row.status === "sent" ? "done" : row.status)}>${QUEUE_STATUS_LABEL[row.status] || row.status}</span></td>
                     <td class="try-cell">${row.attempts || 0}${kind === "outbox" ? `/${row.maxAttempts || "—"}` : ""}</td>
