@@ -22,8 +22,11 @@ function failureEnvelope(schedule, executor, error, type = "schedule.error") {
 }
 
 function mailEnvelope(result) {
-  const keys = ["routed", "matched", "verdicts", "steered", "merged", "reminders"]
-  if (!keys.some((key) => Number(result?.[key] ?? 0) > 0)) return null
+  // 「普通回复」只是把来信按 [FM-SID:…] 转投对应会话，属于正常路由，不算需要处理的活动，
+  // 单独出现时不入箱；只有验收、注回、合并、催办这类才是要人/Agent 关注的事件。
+  const triggers = ["matched", "verdicts", "steered", "merged", "reminders"]
+  if (!triggers.some((key) => Number(result?.[key] ?? 0) > 0)) return null
+  const keys = ["routed", ...triggers]
   const labels = { routed: "普通回复", matched: "验收回复", verdicts: "验收判定", steered: "注回会话", merged: "合并", reminders: "催办" }
   const parts = keys.filter((key) => Number(result?.[key] ?? 0) > 0).map((key) => `${labels[key]} ${Number(result[key])}`)
   return {

@@ -275,6 +275,17 @@ test("邮件只检查时无事件，有实际回复或验收活动时写 JSON �
   assert.equal(store.get(fired.id).payload.json.verdicts, 1)
 })
 
+test("邮件只路由普通回复时不入箱，避免每封回信都刷一条事件", async () => {
+  const { store } = fixture()
+  const scheduler = new ScheduleRunner({
+    store,
+    executors: { mail: { type: "script", run: async () => ({ ok: true, checked: 30, routed: 1, matched: 0, verdicts: 0, steered: 0, merged: 0, reminders: 0 }) } },
+  })
+  scheduler.sync([{ id: "mail", kind: "mail", cron: "*/10 * * * *", enabled: false }])
+  assert.equal((await scheduler.runNow("mail")).kind, "schedule.noop")
+  assert.equal(store.count(), 0)
+})
+
 test("同进程写入后直接 wake Worker，无需等待轮询", async () => {
   const { store } = fixture()
   const runs = []
