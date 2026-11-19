@@ -1022,6 +1022,8 @@ footer {
   /* 定时任务行：窄屏改成上下四段，按钮不再挤在右侧 */
   .sched { grid-template-columns: minmax(0, 1fr); grid-template-areas: "main" "meta" "cron" "acts"; gap: 8px; padding: 12px 14px; align-items: start; }
   .sched-acts { flex-wrap: wrap; justify-content: flex-start; }
+  .sched-meta, .sched-meta span, .sched-meta code, .sched-detail { overflow-wrap: anywhere; word-break: break-word; }
+  .sched-name { overflow-wrap: anywhere; }
 }
 
 /* ---------------- workflow 节点 / 任务详情 ---------------- */
