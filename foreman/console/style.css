@@ -968,17 +968,47 @@ footer {
 }
 
 @media (max-width: 620px) {
-  .brand-text { font-size: 13px; }
-  .meta { gap: 6px; }
+  /* 顶栏：品牌一行，其余状态换行排；不再挤成一根竖条 */
+  .topbar { flex-wrap: wrap; align-items: flex-start; gap: 8px; padding: 10px 12px; }
+  .brand { flex: 1 1 auto; }
+  .brand-text { font-size: 13px; letter-spacing: 0.1em; }
+  .meta { width: 100%; gap: 6px; }
   .meta-item { font-size: 11.5px; padding: 3px 8px; }
-  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  table.tasks th.col-try, table.tasks td:nth-child(5) { display: none; }
-  .pr-title { flex-basis: 100%; }
-  .app-shell > fm-sidebar { top: calc(var(--fm-topbar-h, 112px) + 14px); margin: 14px 0 0 8px; }
-  .sidebar { width: 44px; padding: 6px; }
+  .meta-item.mono { font-variant-numeric: tabular-nums; }
+
+  /* 侧栏改成顶部一条可横向滚动的导航，不再占掉正文宽度 */
+  .app-shell { display: block; }
+  .app-shell > fm-sidebar { position: static; top: auto; margin: 10px 10px 0; width: auto; display: block; }
+  .sidebar { width: 100%; padding: 6px; }
+  .side-nav { flex-direction: row; overflow-x: auto; gap: 4px; scrollbar-width: none; }
+  .side-nav::-webkit-scrollbar { display: none; }
   .sidebar .side-text { display: none; }
-  .sidebar .side-link, .sidebar .side-collapse { justify-content: center; padding-left: 0; padding-right: 0; }
-  main { padding: 14px 10px 8px; }
+  .side-link { width: auto; flex: 0 0 auto; justify-content: center; padding: 8px 12px; }
+  .side-collapse { display: none; }
+
+  main { padding: 12px 10px 8px; gap: 14px; max-width: none; }
+
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .pr-title { flex-basis: 100%; }
+
+  /* 表格：固定列宽会把中文压成竖排，小屏改成按内容排 + 更小的内边距 */
+  table.tasks { table-layout: auto; }
+  table.tasks th, table.tasks td { padding: 8px 8px; }
+  table.tasks th { letter-spacing: 0; }
+  table.tasks td { font-size: 12.5px; }
+  table.tasks th.col-try, table.tasks td:nth-child(5) { display: none; }
+  table.tasks th.col-issue-state, table.tasks td.col-issue-state { display: none; }
+  .session-cell, .session-name { min-width: 0; }
+  .session-name { overflow-wrap: anywhere; }
+
+  /* 面板标题、表单：竖排，别把按钮挤出屏幕 */
+  .panel-head { flex-wrap: wrap; align-items: flex-start; gap: 8px; }
+  .panel-side { width: 100%; flex-wrap: wrap; }
+  .schedule-title { flex-wrap: wrap; gap: 8px; }
+  .schedule-definition > div { grid-template-columns: 1fr; gap: 4px; }
+  .schedule-edit-form, .schedule-agent-input { width: 100%; }
+  .wf-grid { grid-template-columns: minmax(0, 1fr); }
+  .sched-acts { flex-wrap: wrap; }
 }
 
 /* ---------------- workflow 节点 / 任务详情 ---------------- */
