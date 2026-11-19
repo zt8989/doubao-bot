@@ -55,6 +55,13 @@ export const editLabels = wrap(async (repo, n, { add = "", remove = "" } = {}) =
   return api.editIssueLabels(repo, n, { add: a, remove: d })
 })
 
+export const READY_FOR_AGENT = "ready-for-agent"
+export const READY_FOR_HUMAN = "ready-for-human"
+
+// PR 建好后工单交回人工：摘 ready-for-agent、打 ready-for-human（幂等，两标签都在时只保留后者）。
+export const readyForHuman = wrap(async (repo, n) =>
+  api.editIssueLabels(repo, n, { add: [READY_FOR_HUMAN], remove: [READY_FOR_AGENT] }))
+
 export const viewPr = wrap(async (repo, pr, { files = false } = {}) => api.viewPull(repo, pr, { files }))
 
 export const assign = wrap(async (repo, n, username) => api.setAssignees(repo, n, { add: [String(username ?? "").trim()] }))

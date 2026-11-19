@@ -19,6 +19,7 @@ function ctxOf(dir) {
     closeIssue: async (repo, n) => { created.push({ kind: "close", repo, n }) },
     mergePr: async (repo, n, opts) => { created.push({ kind: "merge", repo, n, opts }) },
     viewPr: async () => ({ state: "open", mergeNote: "" }),
+    editLabels: async (repo, n, opts) => { created.push({ kind: "label", repo, n, opts }) },
   }
   const cfg = { stateFile: path.join(dir, "state.json"), pickup: { me: "233151" } }
   const consoleStore = new ConsoleStore(path.join(dir, "console.db"))
@@ -38,6 +39,12 @@ test("pr open：建 PR 并记 prSeen + 工单转 pr-open，控制台立刻可见
     assert.equal(r.ok, true)
     assert.equal(r.pr, 12)
     assert.equal(r.url, "http://gitea/demo/demo/pulls/12")
+    // 约定：PR 开出来就把 ready-for-agent 换成 ready-for-human
+    const label = created.find((c) => c.kind === "label")
+    assert.deepEqual(label, {
+      kind: "label", repo: "demo/demo", n: 9,
+      opts: { add: "ready-for-human", remove: "ready-for-agent" },
+    })
 
     const pr = new Book(cfgOf(dir)).prSeen["demo/demo#12"]
     assert.equal(pr.number, 12)
@@ -52,7 +59,7 @@ test("pr open：建 PR 并记 prSeen + 工单转 pr-open，控制台立刻可见
     const bad = await handleRequest(ctx, { id: "cli", cmd: "pr open", repo: "demo/demo", head: "x" })
     assert.equal(bad.ok, false)
     assert.equal(bad.error, "bad-request")
-    assert.equal(created.length, 1)
+    assert.equal(created.filter((c) => c.kind === "pr").length, 1)
   } finally {
     consoleStore.close()
     fs.rmSync(dir, { recursive: true, force: true })

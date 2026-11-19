@@ -2059,6 +2059,16 @@ export async function handleRequest(ctx, req) {  const id = req?.id
         `PR 涉及 UI ${repo}#${number}：验收邮件${acceptance.ok ? `已发给 ${acceptance.to}（${acceptance.tag}）` : `跳过（${acceptance.skipped}）`}`
       )
     }
+    // 约定：PR 开出就把工单交回人工——摘 ready-for-agent、打 ready-for-human。
+    if (issueNo) {
+      const label = ctx.gitea?.editLabels
+      try {
+        await label?.(issueRepo, issueNo, { add: "ready-for-human", remove: "ready-for-agent" })
+        ctx.log?.(`工单 ${issueRepo}#${issueNo}：ready-for-agent → ready-for-human`)
+      } catch (e) {
+        ctx.log?.(`工单 ${issueRepo}#${issueNo} 改标签失败（不影响 PR）：${e?.message ?? e}`)
+      }
+    }
     // 立刻落库，控制台不用等下一轮同步。
     try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
     ctx.log?.(`PR 建好 ${repo}#${number} ${pr.url ?? ""}（走 foreman）`)

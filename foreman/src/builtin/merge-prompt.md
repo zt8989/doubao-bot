@@ -8,6 +8,8 @@
 
 **PR 涉及 UI 时，foreman 建 PR（`pr open --ui`，或从 worktree diff 自动认出）会把链接发到测试同学邮箱；合并拒绝返回 `acceptance-waiting` / `acceptance-rejected` 时，用 `foreman mail requests` 查看回复状态并等待验收结果。**
 
+PR 对应工单的标签已是 `ready-for-human`（开 PR 时由 foreman 从 `ready-for-agent` 换过来），这条单等人工验收。
+
 ## Gitea CLI（工具）
 
 - 核对用只读命令：`gitea pr-view <n> --repo R [--files]`（作者、base/head、是否已合并），open PR 列表用 `gitea pull-list --repo R --state open`；输出 `{ok, data}`。

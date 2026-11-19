@@ -487,7 +487,8 @@ async function publish(ctx, repoCfg, issue, wt, result, check, key) {
   await realGitea
     .commentIssue(repoCfg.repo, issue.number, doneComment({ pr, tests: result.tests, summary: result.summary }))
     .catch((e) => log(`${key}：回帖工单失败（不影响主流程）：${e.message}`))
-  await realGitea.editLabels(repoCfg.repo, issue.number, { remove: "ready-for-agent" }).catch(() => {})
+  // 约定：PR 开出即交回人工——摘 ready-for-agent、打 ready-for-human。
+  await realGitea.editLabels(repoCfg.repo, issue.number, { add: "ready-for-human", remove: "ready-for-agent" }).catch(() => {})
 
   if (state === "done") {
     await worktreeRemove(repoCfg.dir, wt.path)

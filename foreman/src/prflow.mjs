@@ -84,6 +84,13 @@ export async function openPrsForIssue(ctx, { issueKey, summary = "", tests = "" 
       patch.branch = primary.branch
     }
     b.setIssue(key, patch)
+    // 约定：PR 开出来就把工单交回人工（摘 ready-for-agent、打 ready-for-human）。
+    try {
+      await gitea.editLabels?.(issueRepo, issueNo, { add: "ready-for-human", remove: "ready-for-agent" })
+      log(`${key}：ready-for-agent → ready-for-human`)
+    } catch (e) {
+      log(`${key}：改标签失败（不影响 PR）：${e?.message ?? e}`)
+    }
     for (const p of prs) {
       b.markPrSeen(`${p.repo}#${p.pr}`, {
         repo: p.repo,

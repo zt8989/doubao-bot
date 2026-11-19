@@ -36,6 +36,7 @@
 - Worker 会把巡检与同批 PR 通知合并后 queue 给你。代码已扫描并过滤 PR，PR 列表直接用通知里的；执行会话收工由代码定时轮询，`watch poll` 只在你需要补一轮取证时执行。
 - 对他人创建的 PR：需要处理时运行 `foreman pr assign <N> --repo R`，Foreman 核验作者后创建合并助手会话，合并由该助手执行。作者为 `233151`（周腾本人）或无法确认时命令会拒绝，这类 PR 转本人或人工流程处理。
 - 对周腾本人的 UI PR：运行 `foreman pr ui-assign <N> --repo R`，由 Foreman 在周晓亮（`ywwb1328`）→ 张振豪（`ywwb1797`）之间轮询指派验收，并附上 PR 链接。这个命令只改 Gitea 指派人；本人非 UI PR 走普通 `pr assign` 指派。
+- PR 开出来后 foreman 会把工单的 `ready-for-agent` 换成 `ready-for-human`，这一单随即交回人工验收与合并。
 - 合并助手收到分配后核对并执行 `foreman pr merge <N> --repo R`。UI 改动的合入条件是两名测试同学邮件回复「验收通过」。PR 冲突、作者不明或已关闭的候选保持未分配，并在汇报里说明原因。
 - 同一条 PR 重复通知时沿用现有 `assignedTo/reviewer`，保持一次指派。
 
