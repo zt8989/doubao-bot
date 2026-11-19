@@ -84,6 +84,46 @@ test("普通邮件回复入 Inbox，Worker steer 命中会话，其余交给 rou
   }
 })
 
+test("邮件起始时间固定：今天之前的邮件不读取、不进入 Inbox", async () => {
+  const dir = tempDir()
+  const store = new InboxStore(new DatabaseSync(":memory:"))
+  const reads = []
+  const messages = [
+    { message_id: "m-old", subject: "昨天", created_at: "2026-11-18T15:59:59Z" },
+    { message_id: "m-start", subject: "今天零点", created_at: "2026-11-18T16:00:00Z" },
+    { message_id: "m-new", subject: "今天稍后", created_at: "2026-11-19T01:00:00+08:00" },
+    { message_id: "m-no-date", subject: "缺少日期" },
+  ]
+  const ctx = {
+    cfg: {
+      stateFile: path.join(dir, "state.json"),
+      mail: { enabled: true, testers: [], since: "2026-11-19T00:00:00+08:00" },
+    },
+    inbox: store,
+    log: () => {},
+    mail: {
+      list: async () => ({ data: messages }),
+      read: async (id) => {
+        reads.push(id)
+        return { body: `回复 ${id}`, created_at: messages.find((m) => m.message_id === id).created_at }
+      },
+    },
+  }
+  try {
+    const result = await mailPollOnce(ctx, { force: true })
+    assert.equal(result.checked, 4)
+    assert.equal(result.routed, 2)
+    assert.deepEqual(reads, ["m-start", "m-new"])
+    assert.equal(store.counts().pending, 2)
+    const seen = new Book(ctx.cfg.stateFile).mail.seen
+    assert.equal(seen["m-old"].verdict, "before-since")
+    assert.equal(seen["m-no-date"].verdict, "before-since")
+  } finally {
+    store.db.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("DWS 临时故障保留邮件事件重试，不错误改投 router", async () => {
   const dir = tempDir()
   const store = new InboxStore(new DatabaseSync(":memory:"))

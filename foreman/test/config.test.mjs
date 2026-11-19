@@ -35,6 +35,13 @@ test("数值写错要报错，不静默", () => {
   assert.throws(() => loadConfig(f2), /timeoutMinutes/)
 })
 
+test("mail.since 保留合法固定时间，拒绝非法日期", () => {
+  const { file } = tmpConfig({ repos: [{ repo: "a/b", dir: "/tmp", base: "sit-test" }], mail: { since: "2026-11-19T00:00:00+08:00" } })
+  assert.equal(loadConfig(file).mail.since, "2026-11-19T00:00:00+08:00")
+  const { file: invalid } = tmpConfig({ repos: [{ repo: "a/b", dir: "/tmp", base: "sit-test" }], mail: { since: "每天零点" } })
+  assert.throws(() => loadConfig(invalid), /mail\.since/)
+})
+
 test("repo 写错（缺 owner/ 或缺 dir）直接报错", () => {
   const { file } = tmpConfig({ repos: [{ repo: "no-slash", dir: "/tmp" }] })
   assert.throws(() => loadConfig(file), /owner\/name/)

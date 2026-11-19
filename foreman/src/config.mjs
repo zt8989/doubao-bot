@@ -340,6 +340,10 @@ export function loadConfig(explicit) {
   cfg.mail.confirmed = cfg.mail.confirmed !== false
   cfg.mail.bin = String(cfg.mail.bin ?? "agently-cli").trim() || "agently-cli"
   cfg.mail.subjectPrefix = String(cfg.mail.subjectPrefix ?? "【foreman 验收】").trim() || "【foreman 验收】"
+  cfg.mail.since = String(cfg.mail.since ?? "").trim()
+  if (cfg.mail.since && !Number.isFinite(Date.parse(cfg.mail.since))) {
+    throw new Error(`配置项 mail.since 要是合法的固定日期时间，现在是：${cfg.mail.since}`)
+  }
   const mStrategy = String(cfg.mail.strategy ?? "round-robin").trim().toLowerCase()
   if (!["round-robin", "all"].includes(mStrategy)) {
     throw new Error(`配置项 mail.strategy 只能是 round-robin/all，现在是：${cfg.mail.strategy}`)
