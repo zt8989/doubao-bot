@@ -41,7 +41,7 @@ import { InboxStore, AgentWorker, ScheduleRunner } from "./inbox.mjs"
 import { OutboxStore, OutboxDispatcher } from "./outbox.mjs"
 import { enqueueOutbound } from "./outbound.mjs"
 import { LarkDriver } from "./lark.mjs"
-import { listSchedules, applySchedules, persistSchedules, cronOf } from "./schedules.mjs"
+import { listSchedules, applySchedules, persistSchedules, cronOf, customAgentSchedules } from "./schedules.mjs"
 import { normalizeEventEnvelope } from "./schedule-events.mjs"
 import { runConfiguredScript } from "./executors.mjs"
 import { startOperation, finishOperation } from "./operations.mjs"
@@ -713,6 +713,8 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     router: { lastAt: null, count: 0, lastResult: null, running: false, nextAt: "" },
     routerInterval: null,
     dreaming: { lastAt: null, count: 0, lastResult: null, running: false, nextAt: "" },
+    // 自定义 Agent 定时任务运行时：id -> { lastAt, count, lastResult, running, nextAt }
+    agentSchedules: {},
     // 验收邮件轮询运行时
     mail: { lastPollAt: null, pollCount: 0, polling: false, lastResult: null, nextAt: "" },
     mailInterval: null,
@@ -876,6 +878,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   // 只 bypass「没开 / 不在工作时间」；容量、busy、锁、节点暂停这些保护仍然生效。
   ctx.runSchedule = async (id) => {
     if (["pickup", "prWatch", "mail", "router", "inspector", "dreaming"].includes(id)) return scheduler.runNow(id === "inspector" ? "router" : id)
+    if (customAgentSchedules(cfg).some((item) => item.id === id)) return scheduler.runNow(id)
     throw Object.assign(new Error(`${id} 没有可以立即执行的动作`), { code: "schedule_not_runnable" })
   }
   // 合并不再有定时任务（合并通道已取消）：`foreman pr merge` 当场执行，合完直接返回。
@@ -935,33 +938,87 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
       state.dreaming.running = false
     }
   }
+  // 自定义 Agent 定时任务：到点新开一条豆包会话，把提示词当首句投递；不等第一轮跑完。
+  const agentScheduleRuntime = (id) =>
+    (state.agentSchedules[id] ??= { lastAt: null, count: 0, lastResult: null, running: false, nextAt: "" })
+  const agentSchedulePrompt = (item, session, at) => {
+    const pad = (n) => String(n).padStart(2, "0")
+    const when = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}`
+    return `# 定时任务：${item.label || item.id}
+
+本会话由 Foreman 的 Agent 型定时任务「${item.label || item.id}」在 ${when} 按时开起，任务 ID：${item.id}，会话：${session}。
+把下面这段任务当作本轮唯一目标；需要时直接调用工具取数，跑完在本会话给最终回复，不要转交给别的编排会话。
+
+---
+
+${String(item.prompt ?? "").trim()}
+`
+  }
+  const runAgentSchedule = async (item) => {
+    if (!item) return { ok: false, error: "定时任务不存在" }
+    const runtime = agentScheduleRuntime(item.id)
+    if (runtime.running) return { ok: true, skipped: "busy" }
+    runtime.running = true
+    const at = new Date()
+    const pad = (n) => String(n).padStart(2, "0")
+    const stamp = `${at.getFullYear()}${pad(at.getMonth() + 1)}${pad(at.getDate())}-${pad(at.getHours())}${pad(at.getMinutes())}`
+    const session = `foreman-${item.id}-${stamp}`
+    try {
+      const delivered = await ctx.dws.openNew({ name: session, prompt: agentSchedulePrompt(item, session, at), noWait: true })
+      if (delivered?.ok === false) throw new Error(delivered.error || `Agent 定时任务 ${item.id} 投递失败`)
+      runtime.lastAt = nowIso()
+      runtime.count++
+      runtime.lastResult = `已派发 ${session}`
+      log(`Agent 定时任务 ${item.id} 已派发：${session}`)
+      return { ok: true, dispatched: true, session, convId: String(delivered?.convId ?? "") }
+    } finally {
+      runtime.running = false
+    }
+  }
   const syncScheduleState = (items) => {
     const ids = { pickup: "pickup", prWatch: "pr", mail: "mail", router: "router", dreaming: "dreaming" }
     for (const [id, key] of Object.entries(ids)) {
       state[key].nextAt = items.find((item) => item.id === id)?.nextAt || ""
     }
+    for (const item of customAgentSchedules(cfg)) {
+      agentScheduleRuntime(item.id).nextAt = items.find((row) => row.id === item.id)?.nextAt || ""
+    }
   }
+  const buildScheduleExecutors = () => ({
+    pickup: { type: "script", run: (_, { manual }) => runConfiguredScript(ctx, "pickup", { manual }) },
+    prWatch: { type: "script", run: (_, { manual }) => runConfiguredScript(ctx, "prWatch", { manual }) },
+    mail: { type: "script", run: () => recordMailPoll(() => runConfiguredScript(ctx, "mail")) },
+    router: { type: "script", run: () => runConfiguredScript(ctx, "router") },
+    dreaming: { type: "agent", run: recordDream },
+    ...Object.fromEntries(
+      customAgentSchedules(cfg).map((item) => [item.id, { type: "agent", run: () => runAgentSchedule(item) }])
+    ),
+  })
   scheduler = new ScheduleRunner({
     store: inbox,
-    executors: {
-      pickup: { type: "script", run: (_, { manual }) => runConfiguredScript(ctx, "pickup", { manual }) },
-      prWatch: { type: "script", run: (_, { manual }) => runConfiguredScript(ctx, "prWatch", { manual }) },
-      mail: { type: "script", run: () => recordMailPoll(() => runConfiguredScript(ctx, "mail")) },
-      router: { type: "script", run: () => runConfiguredScript(ctx, "router") },
-      dreaming: { type: "agent", run: recordDream },
-    },
+    executors: buildScheduleExecutors(),
     allow: (schedule) => !["prWatch", "pickup"].includes(schedule.id) || inWorkHours(cfg),
     onChange: syncScheduleState,
     onError: (error) => log(`Schedule 异常：${error.message}`),
   })
   ctx.inboxSchedules = scheduler
   const armSchedules = () => {
+    scheduler.executors = buildScheduleExecutors()
     scheduler.sync([
       { id: "pickup", kind: "pickup", executor: "script", cron: cronOf(cfg, "pickup"), enabled: cfg.pickup?.auto === true },
       { id: "prWatch", kind: "prWatch", executor: "script", cron: cronOf(cfg, "prWatch"), enabled: cfg.prWatch?.enabled === true },
       { id: "mail", kind: "mail", executor: "script", cron: cronOf(cfg, "mail"), enabled: cfg.mail?.enabled === true },
       { id: "router", kind: "router", executor: "script", cron: cronOf(cfg, "router"), enabled: (cfg.router ?? cfg.inspector)?.enabled === true },
       { id: "dreaming", kind: "dreaming", executor: "agent", cron: cronOf(cfg, "dreaming"), enabled: cfg.memory?.dreaming?.enabled !== false },
+      // 配置里登记的 Agent 型定时任务：每条一个独立豆包会话。
+      ...customAgentSchedules(cfg).map((item) => ({
+        id: item.id,
+        kind: "agent",
+        executor: "agent",
+        cron: item.cron,
+        enabled: item.enabled !== false,
+        payload: { label: item.label || item.id },
+      })),
       // 停用旧持久 Schedule；旧 Inbox 事件仍由 router handler 兼容消费。
       { id: "inspector", kind: "inspector", executor: "agent", cron: cronOf(cfg, "router"), enabled: false },
     ])

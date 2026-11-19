@@ -268,6 +268,11 @@ Inbox、Outbox 与 ConsoleStore 共用 `~/.foreman/console.db` 的同一连接�
   - 点「开启/停止」或「保存时间」会 `POST /api/schedules`（如 `{"patch":{"router":{"enabled":true,"cron":"*/10 * * * *"}}}`）：先校验并改内存 cfg、再写回 `config.json`、然后立刻重排定时器，**不用重启服务**；非法 cron 返回 400，不会落盘；
   - router agent的「立即巡检」走 `POST /api/schedules/run`，等价于手动 `foreman route`；它只是提前写入 Inbox，由 Worker 投递，不代替智能体决策。
   - `GET /api/schedules` 返回同一份状态，脚本/CLI 也可用。
+  - **自定义 Agent 型定时任务**：在 `config.json` 的 `agentSchedules` 里登记
+    `{ "id", "label", "cron", "enabled": true, "prompt", "detail" }`，发布后列表会多出一行，徽标是 **Agent**。
+    到点由服务用 `dws open --no-wait` 新开一条 `foreman-<id>-<时间戳>` 会话，把提示词作为首句投递；
+    不投给 router agent、不写 Inbox，跑完在会话里直接给最终回复。id 不能与内置任务重名。
+    页面编辑区可改开关、cron 与提示词，保存同样走 `POST /api/schedules`；「立即执行」走 `POST /api/schedules/run`。
 - **「操作日志」页面**：派单、投递编排通知、建/合 PR、合并后清理、执行会话归档都会先记一条「进行中」，结束再更新为「成功 / 失败」；服务重启时未收尾的记录标为「已中断」，不会永远显示正在执行。支持按状态筛选，每 15 秒自动刷新。
   - 数据在同一个 `console.db` 的 `operations` 表；查询接口 `GET /api/operations?limit=100&status=running&action=merge`（后两个参数可省略）。
   - 同时写一份到 `service.log`，前缀为 `[操作]`；日志写不进去不会阻断派单或合并主流程。

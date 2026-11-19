@@ -235,6 +235,11 @@ export class ScheduleRunner {
   sync(definitions, now = new Date()) {
     const at = iso(now)
     this.store.tx(() => {
+      // 配置里删掉的自定义定时任务要从表里清掉，避免继续按旧 cron 触发。
+      const keep = new Set(definitions.map((d) => d.id))
+      for (const row of this.store.schedules()) {
+        if (!keep.has(row.id)) this.store.db.prepare("DELETE FROM agent_schedules WHERE id = ?").run(row.id)
+      }
       for (const definition of definitions) {
         const previous = this.store.db.prepare("SELECT * FROM agent_schedules WHERE id = ?").get(definition.id)
         const enabled = definition.enabled === true

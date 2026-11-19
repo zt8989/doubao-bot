@@ -173,6 +173,9 @@ export const DEFAULTS = {
     userMaxBytes: 2000,
     dreaming: { enabled: true, cron: "0 3 * * *" },
   },
+  // 自定义 Agent 定时任务：到点新开一条豆包会话，把 prompt 当作首句投递。
+  // 每项 { id, label, cron, enabled, prompt, detail? }；id 不能与内置定时任务重名。
+  agentSchedules: [],
   lark: { bin: "lark-cli", as: "user" },
   // 定时检查的工作时间窗：只在工作日 8:30–18:30 跑轮询（enabled:false 或整段省略 = 全天跑）。
   // offUntil 是临时闭嘴时间点，到点自动恢复。
@@ -298,6 +301,32 @@ export function loadConfig(explicit) {
   const dreamingCron = validateCron(cfg.memory.dreaming.cron ?? "0 3 * * *")
   if (!dreamingCron.ok) throw new Error(`配置项 memory.dreaming.cron 不合法：${dreamingCron.error}`)
   cfg.memory.dreaming.cron = dreamingCron.expression
+
+  // 自定义 Agent 定时任务：id 唯一且不与内置重名；cron 必须合法；提示词不能为空。
+  const builtinScheduleIds = ["pickup", "prWatch", "mail", "router", "inspector", "dreaming", "workHours"]
+  const rawAgentSchedules = Array.isArray(cfg.agentSchedules) ? cfg.agentSchedules : []
+  if (rawAgentSchedules.length > 10) throw new Error("配置项 agentSchedules 最多 10 条")
+  const seenScheduleIds = new Set()
+  cfg.agentSchedules = rawAgentSchedules.map((item, index) => {
+    const raw = isObj(item) ? item : {}
+    const id = String(raw.id ?? "").trim() || `agent-${index + 1}`
+    if (!/^[a-z][a-z0-9_-]{1,31}$/.test(id)) throw new Error(`配置项 agentSchedules[${index}].id 只能用小写字母、数字、_ 或 -：${id}`)
+    if (builtinScheduleIds.includes(id)) throw new Error(`配置项 agentSchedules[${index}].id 与内置定时任务重名：${id}`)
+    if (seenScheduleIds.has(id)) throw new Error(`配置项 agentSchedules 里 id 重复：${id}`)
+    seenScheduleIds.add(id)
+    const cron = validateCron(raw.cron)
+    if (!cron.ok) throw new Error(`配置项 agentSchedules[${index}].cron 不合法：${cron.error}`)
+    const prompt = String(raw.prompt ?? "")
+    if (!prompt.trim()) throw new Error(`配置项 agentSchedules[${index}] 缺少 prompt`)
+    return {
+      id,
+      label: String(raw.label ?? "").trim() || id,
+      cron: cron.expression,
+      enabled: raw.enabled !== false,
+      prompt,
+      detail: String(raw.detail ?? "").trim(),
+    }
+  })
 
   for (const key of ["pidFile", "logFile"]) {
     const raw = expandHome(cfg.service[key])

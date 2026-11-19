@@ -9,6 +9,35 @@ const pad = (n) => String(n).padStart(2, "0")
 
 export const SCHEDULE_IDS = ["pickup", "prWatch", "mail", "router", "dreaming", "workHours"]
 
+/** 配置里登记的自定义 Agent 定时任务（每条到点新开一条豆包会话）。 */
+export function customAgentSchedules(cfg) {
+  return Array.isArray(cfg?.agentSchedules) ? cfg.agentSchedules : []
+}
+
+function customScheduleRows(cfg, state = {}) {
+  const runtimeOf = (id) => (state.agentSchedules ?? {})[id] ?? {}
+  return customAgentSchedules(cfg).map((item) => {
+    const runtime = runtimeOf(item.id)
+    return {
+      id: item.id,
+      label: item.label || item.id,
+      enabled: item.enabled !== false,
+      cron: item.cron,
+      executor: "agent",
+      agent: { prompt: String(item.prompt ?? ""), custom: true },
+      nextAt: runtime.nextAt || "",
+      intervalSeconds: 0,
+      detail: String(item.detail ?? "").trim() || "到点新开一条豆包会话，把提示词作为首句投递；跑完在本会话直接给最终回复",
+      lastAt: runtime.lastAt || "",
+      count: Number(runtime.count ?? 0),
+      lastResult: runtime.lastResult ?? null,
+      runnable: true,
+      runLabel: "立即执行",
+      running: runtime.running === true,
+    }
+  })
+}
+
 // 临时闭嘴恢复的时刻：今天还没到开始时间且今天是工作日就今天，否则下一个工作日。
 export function nextWorkdayStart(cfg, at = new Date()) {
   const w = cfg?.workHours ?? {}
@@ -154,6 +183,7 @@ export function listSchedules(cfg, state = {}) {
       runLabel: "",
       running: false,
     },
+    ...customScheduleRows(cfg, state),
   ]
 }
 
@@ -188,11 +218,13 @@ function normalizeWorkHours(value, cfg) {
  */
 export function applySchedules(cfg, patch = {}, at = new Date()) {
   if (patch.inspector && !patch.router) patch = { ...patch, router: patch.inspector }
-  for (const id of SCHEDULE_IDS) {
+  const customIds = customAgentSchedules(cfg).map((item) => item.id)
+  for (const id of [...SCHEDULE_IDS, ...customIds]) {
     if (!(id in patch)) continue
     const raw = patch[id]
     const obj = raw && typeof raw === "object" ? raw : { enabled: raw === true || raw === "true" }
-    if ("cron" in obj && !["pickup", "prWatch", "mail", "router", "dreaming"].includes(id)) throw new Error(`${id} 不是独立定时任务，没有 cron 可改`)
+    const custom = customAgentSchedules(cfg).find((item) => item.id === id)
+    if ("cron" in obj && !["pickup", "prWatch", "mail", "router", "dreaming"].includes(id) && !custom) throw new Error(`${id} 不是独立定时任务，没有 cron 可改`)
     const next = {}
     if ("enabled" in obj) next.enabled = obj.enabled === true || obj.enabled === "true"
     if ("cron" in obj) {
@@ -201,8 +233,19 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
       next.cron = v.expression
     }
     if ("script" in obj && !["pickup", "prWatch", "mail", "router"].includes(id)) throw new Error(`${id} 不是脚本执行器`)
-    if ("agent" in obj) throw new Error(`${id} 不是 Agent 执行器`)
+    if ("agent" in obj && !custom) throw new Error(`${id} 不是 Agent 执行器`)
     if ("script" in obj) next.script = normalizeScriptExecutor(obj.script, cfg, id)
+    if (custom) {
+      // 自定义 Agent 任务只改开关、cron 与提示词；提示词不能改成空串。
+      if ("enabled" in next) custom.enabled = next.enabled
+      if ("cron" in next) custom.cron = next.cron
+      if ("agent" in obj) {
+        const prompt = obj.agent && typeof obj.agent.prompt === "string" ? obj.agent.prompt : null
+        if (prompt === null || !prompt.trim()) throw new Error(`${id} 的 Agent 提示词不能为空`)
+        custom.prompt = prompt
+      }
+      continue
+    }
     if (id === "pickup") {
       cfg.pickup = { ...(cfg.pickup ?? {}) }
       if ("enabled" in next) cfg.pickup.auto = next.enabled
@@ -270,6 +313,21 @@ export function persistSchedules(file, patch = {}, cfg = {}) {
     }
     raw[id] = section
   }
+  // 自定义 Agent 定时任务按 id 原地改，不动条目里用户自己写的其他字段。
+  const agentList = Array.isArray(raw.agentSchedules) ? raw.agentSchedules : []
+  for (const item of customAgentSchedules(cfg)) {
+    if (!(item.id in patch)) continue
+    const value = patch[item.id]
+    const obj = value && typeof value === "object" ? value : { enabled: value === true || value === "true" }
+    const index = agentList.findIndex((it) => it && typeof it === "object" && String(it.id ?? "").trim() === item.id)
+    if (index < 0) continue
+    const entry = { ...agentList[index] }
+    if ("enabled" in obj) entry.enabled = obj.enabled === true || obj.enabled === "true"
+    if ("cron" in obj) entry.cron = String(item.cron ?? obj.cron)
+    if ("agent" in obj) entry.prompt = String(item.prompt ?? "")
+    agentList[index] = entry
+  }
+  if (agentList.length) raw.agentSchedules = agentList
   fs.writeFileSync(file, JSON.stringify(raw, null, 2) + "\n")
   return true
 }
