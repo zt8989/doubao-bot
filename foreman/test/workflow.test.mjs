@@ -84,12 +84,13 @@ test("SessionAdapter 契约：缺方法会被点名", () => {
 })
 
 function fakeDriver() {
-  const calls = { open: 0, send: 0, openNew: 0, archive: [] }
+  const calls = { open: 0, send: 0, openNew: 0, queue: [], archive: [] }
   return {
     calls,
     open: async () => { calls.open++; return { convId: "c1" } },
     send: async () => { calls.send++; return {} },
     openNew: async () => { calls.openNew++; return { convId: "c2" } },
+    queue: async (target, text) => { calls.queue.push({ target, text }); return {} },
     status: async () => ({ finished: true }),
     info: async () => ({ lastReply: "x" }),
     notify: async () => ({}),
@@ -107,6 +108,8 @@ test("豆包 adapter：旧调用面与新契约都转到 driver；单实例护�
   await a.resumeExecution({ name: "n", prompt: "p" })
   await a.openNew({ name: "n", prompt: "p" })
   await a.deliver({ name: "n", prompt: "p" })
+  await a.queue("inspector-1", "本轮巡检")
+  assert.deepEqual(driver.calls.queue, [{ target: "inspector-1", text: "本轮巡检" }])
   assert.equal(driver.calls.open, 2)
   assert.equal(driver.calls.send, 2)
   assert.equal(driver.calls.openNew, 2)
