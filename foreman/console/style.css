@@ -997,17 +997,19 @@ footer {
   table.tasks th { letter-spacing: 0; }
   table.tasks td { font-size: 12.5px; }
   table.tasks th.col-state, table.tasks td.col-state { width: 92px; }
-  table.tasks th.col-detail, table.tasks td.col-detail { width: 52px; }
+  table.tasks th.col-detail, table.tasks td.col-detail { width: 74px; }
   table.tasks td, table.tasks th { white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
   table.tasks th.col-try, table.tasks td:nth-child(5) { display: none; }
   table.tasks th.col-issue-state, table.tasks td.col-issue-state { display: none; }
   .session-cell, .session-name { min-width: 0; }
-  .session-name { overflow-wrap: anywhere; }
+  /* 会话名在手机上折行显示，不再省略成 for… */
+  .session-name > span:last-child { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
 
   /* 会话表在手机上只留「会话 / 真实状态 / 详情」，其余列会让表格横向拉长 */
-  table.tasks th.col-role, table.tasks td.col-role,
+  table.tasks th.col-role, table.tasks td.session-role,
   table.tasks th.col-pr, table.tasks td.col-pr,
   table.session-table th:nth-child(4), table.session-table td.branch-cell { display: none; }
+  table.session-table th.col-session { width: auto; }
 
   /* 面板标题、表单：竖排，别把按钮挤出屏幕 */
   .panel-head { flex-direction: column; align-items: stretch; gap: 8px; }
