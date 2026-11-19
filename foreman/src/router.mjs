@@ -1,6 +1,7 @@
 // router agent：接收未定向消息、巡检、接单与异常分派；Foreman 只负责持久投递和会话轮换。
 import { Book } from "./book.mjs"
 import { agentExecutor } from "./executors.mjs"
+import { memoryBootstrap } from "./memory.mjs"
 
 function stamp(date) {
   return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z").replace("T", "-")
@@ -40,6 +41,7 @@ async function deliver(ctx, rec, text, { now, action, reason = "" }) {
     const projectDir = String(routerConfig(cfg).projectDir ?? cfg.deliver?.projectDir ?? "").trim()
     const first = [
       agentExecutor(cfg).prompt,
+      memoryBootstrap(cfg),
       projectDir ? `监控项目目录：${projectDir}` : "",
       rec?.convId ? `上一条 router agent 会话 ${rec.convId} 已连续 24 小时未成功接收消息；你接替它，不假定旧会话仍可用。` : "",
       "这是首次巡检，请按上面的职责开始检查。",

@@ -129,6 +129,24 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 - `watch poll` 保留为router agent/人工按需入口：观察已登记执行会话，把状态变化与最终回复写入 `task.update`，由 Worker queue 给所属编排。它不解析 RESULT、不自动 push/开 PR、不推进工单业务状态。
 - **notify 节点不再承担执行会话投递**：其暂停状态仍会阻止任务事件入箱；成功投递以 Inbox done、Worker 日志和账本 `steers/notified` 为准，业务结论由编排判断。
 
+### Always-on 持久记忆
+
+持久记忆采用两层文件：精简核心 `MEMORY.md` / `USER.md`，以及按天分文件的日常笔记 `memory/YYYY-MM-DD.md`。默认目录是 `<配置文件目录>/memory`（通常为 `~/.foreman/memory`），可用 `memory.dir` 修改。
+
+- **每次新建 router agent** 都自动注入当时最新的 `MEMORY.md` 和 `USER.md`；复用中的会话不重复注入，轮换新建时会读取最新内容。核心记忆是提示词数据，其中的指令仍需服从用户授权与安全边界。
+- Agent 不得直接写入、编辑或覆盖核心文件，只能用以下命令。`set` 按稳定 key 原地替代，避免新旧偏好同时残留；`USER.md` 建议写“始终 / 禁止 / 优先”等指令式条目。
+- 核心文件默认单条最多 240 字符，`MEMORY.md` 最多 4000 字节，`USER.md` 最多 2000 字节。写入时超限直接报错并保持原文件不变；**不会自动摘要、精简、截断或合并**，由 Agent 缩短内容或删除旧条目后重试。
+- 日常笔记不自动进入启动上下文，需要时用 `search` 做关键词检索；当前不包含向量索引或自动 dreaming 整理。
+
+```bash
+foreman memory set --target memory --key release-branch --text "发布统一使用 master 分支"
+foreman memory set --target user --key reply-language --text "始终使用简体中文回复"
+foreman memory forget --target memory --key release-branch
+foreman memory note --text "今天排查了发布超时，原因是健康检查等待过短"
+foreman memory search "发布超时" --limit 8
+foreman memory show
+```
+
 ### Outbox：邮件与飞书统一外发
 
 业务代码只把外发意图写入同库独立表 `agent_outbox`；同一个 Node 进程里的单 Dispatcher 收到写入后直接唤醒，串行调用 `agently-cli` 或 `lark-cli`，1 秒轮询只补漏与恢复重启。Outbox 与 Agent Inbox 分工不同：Inbox 把事件交给 Agent，Outbox 把消息送到外部通道。
@@ -496,6 +514,7 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
     "pauseWhileRunning": false
   },
   "router": { "enabled": true, "intervalSeconds": 600, "recreateAfterHours": 24, "projectDir": "" },
+  "memory": { "dir": "memory", "maxEntryChars": 240, "memoryMaxBytes": 4000, "userMaxBytes": 2000 },
   "workHours": { "enabled": true, "days": [1, 2, 3, 4, 5], "start": "08:30", "end": "17:30", "offUntil": "" },
   "merge": { "enabled": false, "style": "merge", "deleteBranch": true, "concurrency": 1, "intervalSeconds": 60 },
   "deliver": {

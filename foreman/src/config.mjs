@@ -164,6 +164,13 @@ export const DEFAULTS = {
     leaseSeconds: 120,
     maxAttempts: 8,
   },
+  // Always-on 记忆：核心文件启动时注入；日记只按需检索。超限只拒绝写入，不自动精简。
+  memory: {
+    dir: "memory",
+    maxEntryChars: 240,
+    memoryMaxBytes: 4000,
+    userMaxBytes: 2000,
+  },
   lark: { bin: "lark-cli", as: "user" },
   // 定时检查的工作时间窗：只在工作日 8:30–18:30 跑轮询（enabled:false 或整段省略 = 全天跑）。
   // offUntil 是临时闭嘴时间点，到点自动恢复。
@@ -274,6 +281,17 @@ export function loadConfig(explicit) {
 
   // 服务三路径：同 stateFile 的解析规则（~ 展开；相对路径落到配置文件同目录）。
   const baseDir = fs.existsSync(file) ? path.dirname(file) : process.cwd()
+
+  // 记忆目录按配置文件解析；长度上限必须为正数，避免 NaN 让写入校验静默失效。
+  cfg.memory = isObj(cfg.memory) ? cfg.memory : {}
+  const rawMemoryDir = expandHome(String(cfg.memory.dir ?? "memory").trim() || "memory")
+  cfg.memory.dir = path.isAbsolute(rawMemoryDir) ? rawMemoryDir : path.resolve(baseDir, rawMemoryDir)
+  for (const key of ["maxEntryChars", "memoryMaxBytes", "userMaxBytes"]) {
+    const n = Number(cfg.memory[key])
+    if (!Number.isFinite(n) || n <= 0) throw new Error(`配置项 memory.${key} 要是正数，现在是：${cfg.memory[key]}`)
+    cfg.memory[key] = Math.floor(n)
+  }
+
   for (const key of ["pidFile", "logFile"]) {
     const raw = expandHome(cfg.service[key])
     cfg.service[key] = path.isAbsolute(raw) ? raw : path.resolve(baseDir, raw)

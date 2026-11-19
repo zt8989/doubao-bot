@@ -15,6 +15,7 @@ import { git, branchExists } from "../src/gitx.mjs"
 import { ensureService, callRaw, ServiceError, resolvePort, portFileOf, readPortFile } from "../src/svclient.mjs"
 import { startServer, pingOnce } from "../src/service.mjs"
 import { sessionTasks, formatSessionTasks } from "../src/tasktree.mjs"
+import { MemoryStore } from "../src/memory.mjs"
 
 const HELP = `foreman — 接单编排 + 常驻服务
 
@@ -41,6 +42,11 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman send --type lark (--chat-id <oc_...>|--user-id <ou_...>) (--text <正文>|--markdown <正文>)
   foreman outbox list [--limit <N>] [--status <状态>] [--channel mail|lark]
   foreman outbox run                       手动让 Dispatcher 消费一轮（排障用）
+  foreman memory show                     查看精简核心记忆 MEMORY.md / USER.md
+  foreman memory set --target memory|user --key <稳定键> --text <一条记忆>
+  foreman memory forget --target memory|user --key <稳定键>
+  foreman memory note --text <日常观察>      写入当天日记，不自动注入
+  foreman memory search <查询词> [--limit N] 按需检索核心记忆与日记
   foreman mail request <owner/repo>#<N> [--url <PR链接>] [--issue <owner/repo>#<N> --title <标题>]
   foreman mail poll
   foreman mail requests
@@ -535,6 +541,20 @@ async function cmdMail(pos, flags) {
   return out({ ok: true, ...r })
 }
 
+async function cmdMemory(pos, flags) {
+  const cfg = loadConfig(flags.config)
+  const action = String(pos.shift() ?? "show")
+  const store = new MemoryStore(cfg)
+  if (action === "show") return out({ ok: true, ...store.show() })
+  if (action === "set") {
+    return out(store.set({ target: strFlag(flags.target), key: strFlag(flags.key), text: strFlag(flags.text) }))
+  }
+  if (action === "note") return out(store.note({ text: strFlag(flags.text) }))
+  if (action === "forget") return out(store.forget({ target: strFlag(flags.target), key: strFlag(flags.key) }))
+  if (action === "search") return out(store.search(pos.join(" "), { limit: Number(flags.limit ?? 8) }))
+  throw new Error(`未知 memory 子命令：${action}（show|set|forget|note|search）`)
+}
+
 async function cmdDoctor(pos, flags) {
   const cfg = loadConfig(flags.config)
   const checks = []
@@ -818,6 +838,8 @@ async function main() {
       return cmdOutbox(pos, flags)
     case "worker":
       return cmdWorker(pos, flags)
+    case "memory":
+      return cmdMemory(pos, flags)
     case "dispatch":
       return cmdDispatch(pos, flags)
     case "resume":
