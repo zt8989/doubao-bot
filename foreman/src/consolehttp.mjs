@@ -2,6 +2,8 @@
 //   GET  /                 控制台页面（Vite 构建产物 console/dist）
 //   GET  /assets/<name>    带 hash 的 js/css，长缓存
 //   GET  /api/snapshot?day=YYYY-MM-DD  当天（或指定某天）任务 + PR + 统计；看今天时先跟账本对齐
+//   GET  /api/inbox?limit=100&status=   持久 Inbox 事件与状态统计（只读）
+//   GET  /api/outbox?limit=100&status=&channel=  持久 Outbox 消息与状态统计（只读）
 //   GET  /api/polls        最近几轮扫描记录
 //   GET  /api/history?days=7&day=YYYY-MM-DD&repo=R&key=<owner>/<repo>#<N>  历史事件（按天分组）
 //   POST /api/sync         立刻扫一轮 PR（Gitea REST）+ 落库，返回最新快照
@@ -141,6 +143,22 @@ export function startConsoleHttp({ store, ctx, dir, host = "127.0.0.1", port = 7
 
       if (pathname === "/api/snapshot") {
         return sendJson(res, 200, await snapshotNow((url.searchParams.get("day") || "").trim()))
+      }
+
+      if (pathname === "/api/inbox" || pathname === "/api/outbox") {
+        // 首页队列只读视图：复用服务层 inbox/outbox list，避免 HTTP 另维护一套数据口径。
+        if (req.method !== "GET") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
+        if (!onRpc) return sendJson(res, 501, { ok: false, error: "rpc_not_enabled" })
+        const kind = pathname === "/api/inbox" ? "inbox" : "outbox"
+        const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 100, 1), 500)
+        const r = await onRpc({
+          id: `http-${kind}-list`,
+          cmd: `${kind} list`,
+          limit,
+          status: (url.searchParams.get("status") || "").trim(),
+          ...(kind === "outbox" ? { channel: (url.searchParams.get("channel") || "").trim() } : {}),
+        })
+        return sendJson(res, r?.ok === false ? 500 : 200, r)
       }
 
       if (pathname === "/api/polls") {
