@@ -44,7 +44,7 @@ test("readFixedPrompt：配置没给路径就用内置提示词；给了路径�
     assert.match(readFixedPrompt({}), /最终回复由你统一判断/)
     assert.match(readFixedPrompt({}, "", { lane: "merge" }), /合并助手/)
     assert.match(readFixedPrompt({}, "", { lane: "merge" }), /按通知给出的命令逐条合并/)
-    assert.match(readFixedPrompt({}, "", { lane: "merge" }), /不用 `<RESULT>`/)
+    assert.match(readFixedPrompt({}, "", { lane: "merge" }), /按回包内容直接汇报/)
     const missing = path.join(dir, "nope.md")
     assert.throws(() => readFixedPrompt({ deliver: { promptFile: missing } }), /读不到固定提示词/)
     const empty = path.join(dir, "empty.md")
@@ -72,7 +72,7 @@ test("deliverPrompt：编排提示词原文在前，只给编排决策，不派�
   assert.ok(!deliverPrompt({ fixed, kind: "合并完成", text, lane: "merge" }).includes("在上限"))
   assert.match(out, /【foreman】demo\/demo#2 状态：done/)
   // 角色与三条路只在编排提示词（MD）里说一遍，组装层不复述，避免同一段身份说明出现两次。
-  assert.match(out, /按上面的编排提示词做决定，不要亲手实现工单/)
+  assert.match(out, /实现交给工作会话/)
   assert.match(out, /不是派给你的实现任务/)
   assert.ok(!out.includes("你的角色是编排者，不是这张工单的执行者"))
   assert.ok(!out.includes("由你决定下一步"))

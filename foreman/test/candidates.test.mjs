@@ -205,9 +205,9 @@ test("决策单提示词：先判断再决定动不动手，并说明这次没�
   })
   assert.match(p, /决策会话/)
   assert.match(p, /needs-info/)
-  assert.match(p, /不要猜、不要硬做/)
+  assert.match(p, /可选方案和你的推荐/)
   assert.match(p, /没有人监听/)
-  assert.match(p, /RESULT/)
+  assert.match(p, /直接给出最终回复/)
   assert.match(p, /\/tmp\/wt/, "仍给工作区：判断下来能做就能直接改")
 })
 

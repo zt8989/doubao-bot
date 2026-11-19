@@ -76,7 +76,7 @@ test("router agent首轮新建，后续巡检复用同一条会话", async () =>
     assert.equal(f.opened.length, 1)
     assert.equal(f.queued.length, 1)
     assert.equal(f.queued[0].target, "router-1")
-    assert.match(f.opened[0].prompt, /只能修正 Foreman 本地账本/)
+    assert.match(f.opened[0].prompt, /修正本地账本里的错误完成状态/)
     assert.match(f.opened[0].prompt, /foreman tasks --json/)
     assert.match(f.opened[0].prompt, /全部未收口工单的合计上限/)
     assert.match(f.opened[0].prompt, /dry-run 只用于确认候选优先级/)
