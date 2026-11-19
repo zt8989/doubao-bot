@@ -1,7 +1,7 @@
 // 在 Gitea 仓库创建工单——REST API。附件图片先上传再追加进正文。
 import { cli, Strategy } from '@jackwener/opencli/registry';
 import { ArgumentError } from '@jackwener/opencli/errors';
-import { command, createIssue, editIssue, rejectProject, requireRepo, resolveMilestoneId, splitList, uploadIssueAssets } from './rest.js';
+import { command, createIssue, editIssue, requireRepo, resolveMilestoneId, resolveProjectIds, splitList, uploadIssueAssets } from './rest.js';
 
 cli({
   site: 'gitea',
@@ -18,13 +18,12 @@ cli({
     { name: 'assignee', type: 'string', default: '', help: '指派人，用户名，逗号分隔多个' },
     { name: 'milestone', type: 'string', default: '', help: '里程碑，名称或 id' },
     { name: 'label', type: 'string', default: '', help: '标签，名称或 id，逗号分隔多个' },
-    { name: 'project', type: 'string', default: '', help: '（REST 版本暂不支持）项目，名称或 id' },
+    { name: 'project', type: 'string', default: '', help: '项目，名称或 id，逗号分隔多个（仓库级/组织级均可）' },
     { name: 'ref', type: 'string', default: '', help: '引用分支 / Git 标签，如 main' },
   ],
   columns: ['issueNumber', 'title', 'url'],
   func: command('issue', async (args) => {
     const repo = requireRepo(args.repo);
-    rejectProject(args.project);
     const title = String(args.title ?? '').trim();
     if (!title) throw new ArgumentError('缺少 --title');
 
@@ -34,6 +33,7 @@ cli({
       labels: splitList(args.label),
       assignees: splitList(args.assignee),
       milestone: String(args.milestone ?? '').trim() ? await resolveMilestoneId(repo, args.milestone) : null,
+      projects: String(args.project ?? '').trim() ? await resolveProjectIds(repo, splitList(args.project)) : [],
       ref: String(args.ref ?? '').trim(),
     });
 
@@ -51,6 +51,7 @@ cli({
       url: created.url,
       labels: created.labels,
       assignees: created.assignees,
+      projects: (created.projects ?? []).map((p) => p.title),
     };
   }),
 });

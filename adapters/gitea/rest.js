@@ -95,11 +95,6 @@ export const pageOf = (value) => {
   return n;
 };
 
-// REST 建单/建 PR 接口没有 project 字段；宁可报错也不静默丢参数。
-export const rejectProject = (project) => {
-  if (String(project ?? '').trim()) throw new ArgumentError('--project 在 REST 版本暂不支持');
-};
-
 export async function resolveMilestoneId(repo, value) {
   const wanted = String(value ?? '').trim();
   if (!wanted) throw new ArgumentError('milestone 不能为空');

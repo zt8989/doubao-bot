@@ -33,6 +33,7 @@ cli({
       dueDate: issue.dueDate,
       commentsCount: issue.commentsCount,
       comments: issue.comments ?? [],
+      projects: issue.projects ?? [],
       url: issue.url,
     };
   }),

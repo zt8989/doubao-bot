@@ -13,6 +13,7 @@ import {
   setDueDate,
   setIssueMilestone,
   editIssueLabels,
+  resolveProjectIds,
   createPull,
   editPull,
   mergePull,
@@ -129,12 +130,14 @@ const commands = {
     const labels = split(flags.label)
     const assignees = split(flags.assignee)
     const milestone = flags.milestone ? await resolveMilestone(repo, flags.milestone) : null
+    const projects = flags.project ? await resolveProjectIds(repo, split(flags.project)) : []
     const created = await createIssue(repo, {
       title,
       body: String(flags.body ?? ""),
       labels,
       assignees,
       milestone,
+      projects,
       dueDate: flags.due ? String(flags.due) : null,
       ref: flags.ref ? String(flags.ref) : "",
     })
@@ -146,7 +149,7 @@ const commands = {
       created.body = body
       created.assets = uploaded
     }
-    return { issueNumber: created.number, number: created.number, title: created.title, url: created.url, labels: created.labels, assignees: created.assignees }
+    return { issueNumber: created.number, number: created.number, title: created.title, url: created.url, labels: created.labels, assignees: created.assignees, projects: (created.projects ?? []).map((p) => p.title) }
   },
 
   async "issue-comment"(flags, pos) {
@@ -240,6 +243,7 @@ const commands = {
       labels: split(flags.label),
       assignees: split(flags.assignee),
       milestone: flags.milestone ? await resolveMilestone(repo, flags.milestone) : null,
+      projects: flags.project ? await resolveProjectIds(repo, split(flags.project)) : [],
       reviewers: split(flags.reviewer),
       draft: Boolean(flags.draft),
     })
@@ -251,7 +255,7 @@ const commands = {
       await editPull(repo, created.number, { body })
       created.assets = uploaded
     }
-    return { prNumber: created.prNumber, number: created.number, title: created.title, url: created.url }
+    return { prNumber: created.prNumber, number: created.number, title: created.title, url: created.url, projects: (created.projects ?? []).map((p) => p.title) }
   },
 
   async "pr-edit"(flags, pos) {
@@ -387,7 +391,7 @@ const USAGE = `gitea — 内网 Gitea REST API 客户端（替代 opencli 浏览
   gitea explore issues|pulls|milestones|repos [query] [--state ...] [--page N]
 
 写：
-  gitea issue --repo R --title T [--body MD] [--label a,b] [--assignee u] [--milestone M] [--due YYYY-MM-DD] [--ref branch] [--image p1,p2]
+  gitea issue --repo R --title T [--body MD] [--label a,b] [--assignee u] [--milestone M] [--project name|id] [--due YYYY-MM-DD] [--ref branch] [--image p1,p2]
   gitea issue-comment <n> <body> --repo R
   gitea issue-edit <n> --repo R [--title T] [--body MD] [--append] [--label-add a,b] [--label-remove a,b] [--set-labels a,b]
   gitea close|reopen <n> --repo R
@@ -395,7 +399,7 @@ const USAGE = `gitea — 内网 Gitea REST API 客户端（替代 opencli 浏览
   gitea due <n> <YYYY-MM-DD|clear> --repo R
   gitea milestone-set <n> [milestone] --repo R [--remove]
   gitea branch <issue> [name] --repo R [--base B]
-  gitea pr --repo R --base B --head H --title T [--body MD] [--draft] [--label a,b] [--assignee u] [--reviewer u] [--milestone M] [--image p]
+  gitea pr --repo R --base B --head H --title T [--body MD] [--draft] [--label a,b] [--assignee u] [--reviewer u] [--milestone M] [--project name|id] [--image p]
   gitea pr-edit <n> --repo R [--title T] [--body MD] [--append]
   gitea pr-merge <n> --repo R [--style merge|rebase|rebase-merge|squash|fast-forward-only] [--title T] [--message M] [--delete-branch] [--force]
   gitea label-create <name> [--color #rrggbb] [--description D] (--repo R | --org O)

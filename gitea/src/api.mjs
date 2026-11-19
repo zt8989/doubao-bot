@@ -57,6 +57,23 @@ export function mapIssue(issue, { repo = "" } = {}) {
     updatedAt: issue.updated_at ?? "",
     url: issue.html_url ?? (repo ? `${loadGiteaSettings().baseUrl}/${repo}/issues/${issue.number}` : ""),
     pullRequest: issue.pull_request ? { merged: Boolean(issue.pull_request.merged), htmlUrl: issue.pull_request.html_url ?? "" } : null,
+    projects: (issue.projects ?? []).map((p) => mapProject(p, { owner: repo.split("/")[0] })),
+  }
+}
+
+export function mapProject(p, { owner = "", scope = "repo" } = {}) {
+  if (!p) return null
+  return {
+    id: Number(p.id) || null,
+    title: p.title ?? "",
+    scope,
+    state: p.state ?? "",
+    description: p.description ?? "",
+    cardType: p.card_type ?? "",
+    closedAt: p.closed_at ?? "",
+    createdAt: p.created_at ?? "",
+    updatedAt: p.updated_at ?? "",
+    url: owner && p.id ? `${loadGiteaSettings().baseUrl}/${owner}/projects/${p.id}` : "",
   }
 }
 
@@ -110,6 +127,7 @@ export function mapPull(pr, { repo = "" } = {}) {
     url: pr.html_url ?? (repo ? `${loadGiteaSettings().baseUrl}/${repo}/pulls/${pr.number}` : ""),
     labels: (pr.labels ?? []).map(labelName).filter(Boolean),
     assignees: (pr.assignees ?? []).map(userName).filter(Boolean),
+    projects: (pr.projects ?? []).map((p) => mapProject(p, { owner: repo.split("/")[0] })),
   }
 }
 
@@ -261,6 +279,54 @@ export async function viewPull(repo, number, { files = false, opts = {} } = {}) 
   return mapped
 }
 
+// 项目（Projects）：仓库级与组织级是两套列表，创建工单时两边的项目都能挂。
+export async function listProjects(repo, { state = "open", page = 1, limit = PAGE_LIMIT, opts = {} } = {}) {
+  const r = repoParts(repo)
+  const query = new URLSearchParams({ state, page: String(page), limit: String(limit) }).toString()
+  const rows = (await api(`/api/v1/repos/${enc(r.owner)}/${enc(r.repo)}/projects?${query}`, {}, opts)) ?? []
+  const out = rows.map((p) => mapProject(p, { owner: r.owner, scope: "repo" }))
+  try {
+    const orgRows = (await api(`/api/v1/orgs/${enc(r.owner)}/projects?${query}`, {}, opts)) ?? []
+    for (const p of orgRows) {
+      if (!out.some((x) => x.id === Number(p?.id))) out.push(mapProject(p, { owner: r.owner, scope: "org" }))
+    }
+  } catch (e) {
+    // owner 不是组织时该接口 404，忽略；鉴权/网络错误照常抛。
+    if (e?.code !== "not_found" && e?.status !== 404) throw e
+  }
+  return out
+}
+
+export async function resolveProjectIds(repo, values, { opts = {} } = {}) {
+  const wanted = (Array.isArray(values) ? values : String(values ?? "").split(","))
+    .map((v) => String(v).trim())
+    .filter(Boolean)
+  if (!wanted.length) return []
+  const projects = await listProjects(repo, { state: "all", limit: 100, opts })
+  const ids = []
+  for (const w of wanted) {
+    const hit = projects.find((p) => String(p.id) === w) ?? projects.find((p) => p.title === w)
+    if (!hit) {
+      throw new GiteaApiError(
+        `找不到项目 "${w}"，可选: ${projects.map((p) => `${p.title}=${p.id}`).join(", ") || "（仓库/组织下还没有项目）"}`,
+        { code: "argument_error" },
+      )
+    }
+    if (!ids.includes(hit.id)) ids.push(hit.id)
+  }
+  return ids
+}
+
+// 工单与合并请求共用：PATCH /issues/{n} 的 projects 字段会整体替换已有项目集合。
+export async function setIssueProjects(repo, number, projectIds, { opts = {} } = {}) {
+  const r = repoParts(repo)
+  const issue = await api(`/api/v1/repos/${enc(r.owner)}/${enc(r.repo)}/issues/${enc(number)}`, {
+    method: "PATCH",
+    body: { projects: (projectIds ?? []).map(Number) },
+  }, opts)
+  return mapIssue(issue, { repo: r.full })
+}
+
 export async function listLabels({ repo = "", org = "", opts = {} } = {}) {
   if (!repo && !org) throw new GiteaApiError("repo 和 org 至少提供一个", { code: "argument_error" })
   if (repo && org) throw new GiteaApiError("repo 和 org 只能提供一个", { code: "argument_error" })
@@ -354,7 +420,7 @@ async function resolveLabelIds(repo, labels, opts) {
 
 // ---- 写：工单 ----
 
-export async function createIssue(repo, { title, body = "", assignees = [], labels = [], milestone = null, dueDate = null, ref = "", opts = {} } = {}) {
+export async function createIssue(repo, { title, body = "", assignees = [], labels = [], milestone = null, projects = [], dueDate = null, ref = "", opts = {} } = {}) {
   const r = repoParts(repo)
   const payload = { title, body }
   if (assignees.length) payload.assignees = assignees
@@ -363,7 +429,10 @@ export async function createIssue(repo, { title, body = "", assignees = [], labe
   if (dueDate) payload.due_date = toRfc3339Date(dueDate)
   if (ref) payload.ref = ref
   const issue = await api(`/api/v1/repos/${enc(r.owner)}/${enc(r.repo)}/issues`, { method: "POST", body: payload }, opts)
-  return mapIssue(issue, { repo: r.full })
+  const mapped = mapIssue(issue, { repo: r.full })
+  // 建单接口的 projects 字段在部分版本不落库，建完统一用 PATCH issues 挂项目（与 PR 一致）。
+  if (projects.length && mapped.number) return setIssueProjects(r.full, mapped.number, projects, { opts })
+  return mapped
 }
 
 export async function editIssue(repo, number, patch, { opts = {} } = {}) {
@@ -546,7 +615,7 @@ function sameSet(a, b) {
 
 // ---- 写：合并请求 ----
 
-export async function createPull(repo, { base, head, title, body = "", labels = [], assignees = [], milestone = null, reviewers = [], draft = false, opts = {} } = {}) {
+export async function createPull(repo, { base, head, title, body = "", labels = [], assignees = [], milestone = null, projects = [], reviewers = [], draft = false, opts = {} } = {}) {
   const r = repoParts(repo)
   const payload = { base, head, title: draft ? `WIP: ${title}` : title, body }
   if (labels.length) payload.labels = await resolveLabelIds(r.full, labels, opts)
@@ -554,11 +623,18 @@ export async function createPull(repo, { base, head, title, body = "", labels = 
   if (milestone) payload.milestone = Number(milestone)
   if (reviewers.length) payload.reviewers = reviewers
   const pr = await api(`/api/v1/repos/${enc(r.owner)}/${enc(r.repo)}/pulls`, { method: "POST", body: payload }, opts)
+  // CreatePullRequestOption 没有 projects 字段，PR 也是 issue，建完之后用 issues 接口挂项目。
+  let projectsOut = []
+  if (projects.length && pr?.number) {
+    const updated = await setIssueProjects(r.full, Number(pr.number), projects, { opts })
+    projectsOut = updated?.projects ?? []
+  }
   return {
     number: Number(pr?.number) || null,
     prNumber: Number(pr?.number) || null,
     title: pr?.title ?? title,
     url: pr?.html_url ?? "",
+    projects: projectsOut,
     raw: pr,
   }
 }

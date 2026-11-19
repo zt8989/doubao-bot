@@ -40,6 +40,7 @@ cli({
       assignees: pull.assignees,
       comments: pull.comments ?? [],
       files: pull.files ?? [],
+      projects: pull.projects ?? [],
       url: pull.url,
     };
   }),
