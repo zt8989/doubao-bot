@@ -220,6 +220,7 @@ test("服务里 prPoll：起服务后能手动跑一轮，状态里带 PR 计数
 
     server = await startServer({ cfg, book, dws, gitea, log: () => {} })
     const r = await server.prPoll()
+    await server.worker.idle()
     assert.equal(r.notified, 1)
     assert.equal(opened.length, 1)
     assert.match(opened[0].prompt, /demo\/demo#4/)

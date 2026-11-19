@@ -5,7 +5,7 @@ import os from "node:os"
 import path from "node:path"
 import { Book } from "../src/book.mjs"
 import { inspectorOnce } from "../src/inspector.mjs"
-import { handleRequest } from "../src/service.mjs"
+import { handleRequest, startServer } from "../src/service.mjs"
 import { DwsDriver } from "../src/dwsdrv.mjs"
 
 function fixture(over = {}) {
@@ -174,20 +174,53 @@ test("投递失败不刷新成功时间，满24小时才重建检查会话", asy
   }
 })
 
-test("inspect RPC：立即投递由服务注入的检查智能体入口", async () => {
+test("inspect RPC：立即写入检查智能体 Inbox", async () => {
   const f = fixture()
   try {
     let calls = 0
     const ctx = {
       cfg: f.cfg,
       state: f.state,
-      inspector: async () => { calls++; return { ok: true, action: "queued", convId: "inspector-rpc" } },
+      inspector: async () => { calls++; return { ok: true, action: "inbox", convId: "inspector-rpc" } },
     }
     const out = await handleRequest(ctx, { id: "test", cmd: "inspect" })
     assert.equal(out.ok, true)
     assert.equal(out.convId, "inspector-rpc")
     assert.equal(calls, 1)
   } finally {
+    fs.rmSync(f.dir, { recursive: true, force: true })
+  }
+})
+
+test("服务 Schedule 只写 Inbox，Worker 消费后才唤醒检查会话", async () => {
+  const f = fixture()
+  Object.assign(f.cfg, {
+    inspector: { enabled: true, intervalSeconds: 600, recreateAfterHours: 24 },
+    prWatch: { enabled: false },
+    mail: { enabled: false },
+    workHours: { enabled: false },
+    pickup: { maxRunning: 2 },
+    inbox: { schedulePollMs: 60000, pollMs: 60000 },
+    service: {
+      http: { port: 0, portFile: path.join(f.dir, "service.port"), db: path.join(f.dir, "console.db") },
+      pidFile: path.join(f.dir, "foreman.pid"),
+      logFile: path.join(f.dir, "service.log"),
+      handshakeTimeoutMs: 500,
+      stopTimeoutMs: 500,
+    },
+    repos: [],
+  })
+  let server
+  try {
+    server = await startServer({ cfg: f.cfg, dws: f.dws, log() {} })
+    assert.equal(f.opened.length, 0, "Schedule 同步时不得直接调用 Agent")
+    assert.equal(f.queued.length, 0)
+    server.schedules.tick(new Date())
+    await server.worker.idle()
+    assert.equal(f.opened.length, 1, "Worker 消费后才创建检查会话")
+    assert.equal(server.inbox.counts().done, 1)
+  } finally {
+    if (server) await server.close()
     fs.rmSync(f.dir, { recursive: true, force: true })
   }
 })

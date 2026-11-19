@@ -38,8 +38,8 @@ import { inflightIssues } from "./planner.mjs"
 import { inspectorOnce } from "./inspector.mjs"
 import { listPulls, mergePr, closeIssue, createPr, commentIssue } from "./gitea.mjs"
 import { ConsoleStore } from "./console.mjs"
+import { InboxStore, AgentWorker, ScheduleRunner } from "./inbox.mjs"
 import { listSchedules, applySchedules, persistSchedules, cronOf } from "./schedules.mjs"
-import { nextCronTime } from "./cron.mjs"
 import { startOperation, finishOperation } from "./operations.mjs"
 import { startConsoleHttp } from "./consolehttp.mjs"
 import { fileURLToPath } from "node:url"
@@ -755,6 +755,8 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   const dbFile = path.resolve(String(httpCfg.db || "~/.foreman/console.db").replace(/^~/, os.homedir()))
   const consoleStore = new ConsoleStore(dbFile)
   consoleStore.recoverOperations()
+  const inbox = new InboxStore(consoleStore.db)
+  ctx.inbox = inbox
   // workflow 里的清理、归档也走同一本操作日志。
   engine.consoleStore = consoleStore
   engine.session.consoleStore = consoleStore
@@ -815,10 +817,28 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   ctx.prPoll = doPrPoll
   const doPickup = async (opts = {}) => pickupOnce(ctx, opts)
   ctx.pickup = doPickup
-  const doInspector = async () => inspectorOnce(ctx)
-  ctx.inspector = async () => inspectorOnce(ctx, { force: true })
-  // PR 扫描只把候选 queue 给检查智能体；是否新建合并助手由它通过 pr assign 决策。
-  ctx.notifyInspector = async (text) => inspectorOnce(ctx, { force: true, notice: text })
+  let worker
+  let scheduler
+  const enqueueInspector = ({ notice = "", scheduled = false } = {}) => {
+    const text = String(notice ?? "").trim()
+    const kind = scheduled ? "inspector" : "inspector.notice"
+    const dedupeKey = scheduled
+      ? `inspector:manual:${Date.now()}`
+      : `inspector:notice:${crypto.createHash("sha256").update(text).digest("hex")}`
+    const event = inbox.enqueue({
+      kind, text, dedupeKey,
+      coalesceKey: scheduled ? "schedule:inspector" : "",
+      expiresAt: scheduled ? new Date(Date.now() + Number(cfg.inspector?.intervalSeconds ?? 600) * 1000).toISOString() : "",
+    })
+    return {
+      ok: true, action: "inbox", eventId: event.id, status: event.status,
+      convId: String(new Book(cfg.stateFile).data.inspector?.convId ?? ""),
+    }
+  }
+  const doInspector = async () => enqueueInspector({ scheduled: true })
+  ctx.inspector = async () => enqueueInspector({ scheduled: true })
+  // PR 候选只持久化到 Inbox；Worker 负责合并、投递、失败重试，扫描器不直接调用 Agent。
+  ctx.notifyInspector = async (text) => enqueueInspector({ notice: text })
   // 验收邮件轮询：读收件箱，按主题里的 [FM-…] 把回复认回 PR 并注回会话。
   // 回复可能在半夜到，所以这条定时器**不受工作时间窗限制**（只读收件箱，不打扰谁）。
   const doMailPoll = async () => {
@@ -854,78 +874,44 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   }
   // 合并不再有定时任务（合并通道已取消）：`foreman pr merge` 当场执行，合完直接返回。
 
-  // 他人 PR 扫描、验收邮件与检查智能体由 cron 驱动；执行收工和自动接单不再挂代码定时器。
-  // 老的 intervalSeconds 仍会读，但没配 cron 时折成分钟级 cron（见 cronOf）。合并通道已取消。
-  const armSchedules = () => {
-    for (const k of ["prInterval", "prKick", "pickupInterval", "pickupKick", "mailInterval", "mailKick", "inspectorInterval", "inspectorKick"]) {
-      if (state[k]) clearTimeout(state[k])
-      state[k] = null
+  // 三条 Schedule 都只写 SQLite Inbox；Worker 在同进程消费，不依赖 SQL Trigger 唤醒。
+  worker = new AgentWorker({
+    store: inbox,
+    log,
+    pollMs: Number(cfg.inbox?.pollMs ?? 1000),
+    retryMs: Number(cfg.inbox?.retrySeconds ?? 30) * 1000,
+    leaseMs: Number(cfg.inbox?.leaseSeconds ?? 900) * 1000,
+    handlers: {
+      inspector: ({ scheduled, notices }) => inspectorOnce(ctx, { force: true, scheduled, notices }),
+      prWatch: () => doPrPoll(),
+      mail: () => doMailPoll(),
+    },
+  })
+  ctx.inboxWorker = worker
+  inbox.onChange = () => worker.wake()
+  const syncScheduleState = (items) => {
+    const ids = { prWatch: "pr", mail: "mail", inspector: "inspector" }
+    for (const [id, key] of Object.entries(ids)) {
+      state[key].nextAt = items.find((item) => item.id === id)?.nextAt || ""
     }
-    state.pr.nextAt = ""
-    state.pickup.nextAt = ""
-    state.mail.nextAt = ""
-    state.inspector.nextAt = ""
-
-    const TIMERS = {
-      pr: ["prInterval", "他人 PR 扫描"],
-      mail: ["mailInterval", "验收邮件轮询"],
-      inspector: ["inspectorInterval", "检查智能体巡检"],
-    }
-    const armOne = (kind, expr, run) => {
-      const [timerKey, label] = TIMERS[kind]
-      let next
-      try {
-        next = nextCronTime(expr)
-      } catch (e) {
-        log(`${label}的 cron 不合法（${expr}）：${e.message}`)
-        return
-      }
-      if (!next) {
-        log(`${label}的 cron 两年内没有触发点：${expr}`)
-        return
-      }
-      state[kind].nextAt = next.toISOString()
-      state[timerKey] = setTimeout(() => {
-        state[timerKey] = null
-        // 邮件轮询不受工作时间窗限制：验收回复可能半夜到，读收件箱不打扰谁。
-        if (kind === "mail" || inWorkHours(cfg)) run().catch((e) => log(`${label}异常：${e.message}`))
-        if (!state.closed) armOne(kind, expr, run)
-      }, Math.max(0, next.getTime() - Date.now()))
-      state[timerKey].unref?.()
-    }
-
-    // PR 监听：显式 opt-in（cfg.prWatch.enabled===true）才起；默认关。
-    if (cfg.prWatch?.enabled === true) {
-      armOne("pr", cronOf(cfg, "prWatch"), doPrPoll)
-      state.prKick = setTimeout(() => {
-        if (!inWorkHours(cfg)) return
-        doPrPoll().catch((e) => log(`PR 扫描异常：${e.message}`))
-      }, 1000)
-      state.prKick.unref?.()
-    }
-
-    // 自动接单已交由检查智能体决策：这里不再挂 pickup 定时器。
-    // 检查智能体：每 10 分钟 queue 同一条会话；24 小时未成功投递由 inspectorOnce 轮换。
-    if (cfg.inspector?.enabled === true) {
-      armOne("inspector", cronOf(cfg, "inspector"), doInspector)
-      state.inspectorKick = setTimeout(() => {
-        doInspector().catch((e) => log(`检查智能体巡检异常：${e.message}`))
-      }, 1000)
-      state.inspectorKick.unref?.()
-    }
-
-    // 验收邮件轮询：mail.enabled===true 才起；起服务 1s 后先收一轮，不用等下一个 cron 点。
-    if (cfg.mail?.enabled === true) {
-      armOne("mail", cronOf(cfg, "mail"), doMailPoll)
-      state.mailKick = setTimeout(() => {
-        doMailPoll().catch((e) => log(`验收邮件轮询异常：${e.message}`))
-      }, 1000)
-      state.mailKick.unref?.()
-    }
-
-    // 合并通道已取消：这里不再挂「合并」定时任务（合并由 pr merge 当场执行）。
   }
+  scheduler = new ScheduleRunner({
+    store: inbox,
+    allow: (schedule) => schedule.id !== "prWatch" || inWorkHours(cfg),
+    onChange: syncScheduleState,
+    onError: (error) => log(`Schedule 异常：${error.message}`),
+  })
+  ctx.inboxSchedules = scheduler
+  const armSchedules = () => {
+    scheduler.sync([
+      { id: "prWatch", kind: "prWatch", cron: cronOf(cfg, "prWatch"), enabled: cfg.prWatch?.enabled === true },
+      { id: "mail", kind: "mail", cron: cronOf(cfg, "mail"), enabled: cfg.mail?.enabled === true },
+      { id: "inspector", kind: "inspector", cron: cronOf(cfg, "inspector"), enabled: cfg.inspector?.enabled === true },
+    ])
+  }
+  worker.start()
   armSchedules()
+  scheduler.start(Number(cfg.inbox?.schedulePollMs ?? 1000))
 
   // 页面上启停定时任务：改内存 cfg → 落盘 config.json → 立刻重排定时器。
   const schedulesView = () => listSchedules(cfg, state)
@@ -962,6 +948,8 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     if (state.inspectorKick) clearTimeout(state.inspectorKick)
     if (state.mergeInterval) clearTimeout(state.mergeInterval)
     if (state.mergeKick) clearTimeout(state.mergeKick)
+    scheduler?.stop()
+    await worker?.stop()
     await new Promise((r) => consoleHttp.server.close(r))
     consoleStore.close()
     // 只删自己的端口文件（端口号对得上才删）。
@@ -978,7 +966,10 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   ctx.close = close
   ctx.poll = doPoll
 
-  return { server: consoleHttp.server, close, poll: doPoll, prPoll: doPrPoll, pickup: doPickup, inspector: doInspector, port, portFile: paths.portFile, http: ctx.httpUrl }
+  return {
+    server: consoleHttp.server, close, poll: doPoll, prPoll: doPrPoll, pickup: doPickup, inspector: doInspector,
+    worker, inbox, schedules: scheduler, port, portFile: paths.portFile, http: ctx.httpUrl,
+  }
 }
 
 // 本人 UI PR 的验收指派：检查智能体显式触发，Foreman 复核本人/UI/open 后按配置顺序轮询。
@@ -2529,6 +2520,15 @@ export async function handleRequest(ctx, req) {  const id = req?.id
       pollCount: ctx.state.pollCount,
       notifiedCount: ctx.state.notifiedCount,
       dwsErrors: ctx.state.dwsErrors,
+      inbox: {
+        counts: ctx.inbox?.counts() ?? {},
+        schedules: ctx.inbox?.schedules() ?? [],
+        worker: {
+          running: ctx.inboxWorker?.running === true,
+          runCount: Number(ctx.inboxWorker?.runCount ?? 0),
+          lastResult: ctx.inboxWorker?.lastResult ?? null,
+        },
+      },
       logFile: ctx.cfg.service.logFile,
       http: ctx.httpUrl || "",
       port: ctx.state.port ?? null,
@@ -2689,6 +2689,20 @@ export async function handleRequest(ctx, req) {  const id = req?.id
 
   if (cmd === "pr poll") {
     const r = await ctx.prPoll()
+    return ok(r)
+  }
+
+  if (cmd === "inbox list") {
+    return ok({
+      events: ctx.inbox?.list({ limit: Number(req.limit ?? 100), status: String(req.status ?? "") }) ?? [],
+      schedules: ctx.inbox?.schedules() ?? [],
+      counts: ctx.inbox?.counts() ?? {},
+    })
+  }
+
+  if (cmd === "worker run") {
+    if (typeof ctx.inboxWorker?.runOnce !== "function") return fail("worker-unavailable", "Worker 不在当前服务里")
+    const r = await ctx.inboxWorker.runOnce()
     return ok(r)
   }
 

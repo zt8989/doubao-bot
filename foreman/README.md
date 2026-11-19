@@ -114,11 +114,13 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 
 ## 常驻服务与检查智能体
 
-常驻服务保留三类定时器：**检查智能体巡检、他人 PR 扫描、验收邮件**。执行会话收工轮询和自动接单定时器已删除，收口后的代码自动补单也已删除。
+常驻服务在同一个 Node 进程里运行 **Schedule → SQLite Inbox → 单 Worker**，保留三类持久 Schedule：检查智能体巡检、他人 PR 扫描、验收邮件。执行会话收工轮询和自动接单定时器已删除，收口后的代码自动补单也已删除。
 
-- 每 `inspector.intervalSeconds`（默认 600 秒）向同一条检查会话 `steer` 一次；首次 `openNew` 创建。
-- 以最后一次成功投递为轮换基准；从未成功时从首次失败计时，连续 `inspector.recreateAfterHours`（默认 24 小时）未成功才新建检查会话。
-- 定时器只投递，不读取工单状态自行派单。检查智能体负责健康检查、必要时 `hand --fresh` 重派独立编排、用 `issue settle` 修复本地完成状态，以及每轮通过 `foreman tasks --json` 找出 `done/cleaned` 残留并执行 `foreman clean --all`。接单前必须独立统计全部在飞工单：`planned/handed/working/pr-open/needs-human/blocked/failed/escalated` 都占槽，合计最多 `pickup.maxRunning`（默认 2），不是每轮新增 2 张；dry-run 只看候选优先级，不能作为空余容量依据。达到上限后禁止用 `run/pickup/hand/orch start/dispatch` 接新单，每次接单后重新计数。
+- Schedule 到期只推进 `next_at` 并写 `agent_inbox`，**不直接给 Agent 发消息**；推进 Schedule 与写事件在同一 SQLite 事务里完成。PR 扫描和邮件轮询是 Worker 执行的代码任务，扫描发现候选后再写 `inspector.notice`。
+- `agent_inbox` 是投递事实源：相同来源的活跃事件去重；同一 Schedule 未开始的旧事件被新事件替换；过期 pending 直接丢弃；处理失败 30 秒后重试，重启通过租约恢复 processing。
+- Worker 收到同进程写入后直接 `wake()`，1 秒轮询只负责漏唤醒与重启恢复。巡检和多条 PR 通知合并成一次检查智能体运行；首次 `openNew` 创建，后续复用同一条会话，底层仍是 `dws msg --mode queue`。
+- 以最后一次成功投递为轮换基准；从未成功时从首次失败计时，连续 `inspector.recreateAfterHours`（默认 24 小时）未成功才新建检查会话。Inbox 的 done 只表示 Worker 已成功交给 dws，不表示 Agent 已处理完。
+- Schedule 不读取工单状态自行派单，Worker 也不替检查智能体做业务决策。检查智能体负责健康检查、必要时 `hand --fresh` 重派独立编排、用 `issue settle` 修复本地完成状态，以及每轮通过 `foreman tasks --json` 找出 `done/cleaned` 残留并执行 `foreman clean --all`。接单前必须独立统计全部在飞工单：`planned/handed/working/pr-open/needs-human/blocked/failed/escalated` 都占槽，合计最多 `pickup.maxRunning`（默认 2），不是每轮新增 2 张；dry-run 只看候选优先级，不能作为空余容量依据。达到上限后禁止用 `run/pickup/hand/orch start/dispatch` 接新单，每次接单后重新计数。
 - `watch poll` 保留为检查智能体/人工按需入口：处理已收工执行会话、推进账本、push/开 PR、steer 回本单编排。
 - **notify 节点当前只落痕、不投递**：判定照做、指纹照记，但不新建会话、不 `dws notify`。
 
@@ -128,7 +130,9 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 foreman serve                 # 前台跑（Ctrl-C 停）
 foreman serve --daemon        # 后台跑，输出进 service.log
 foreman ping                  # 在不在：pid / version / uptime / 在听几条
-foreman status                # 在不在 + 监听明细 + lastPollAt / pollCount / notifiedCount / dwsErrors
+foreman status                # 在不在 + 监听明细 + Inbox/Schedule/Worker 状态
+foreman inbox list [--limit 100]  # 事件、投递状态、duplicate/superseded/expired 原因
+foreman worker run             # 手动消费一轮（排障；正常由 wake/轮询驱动）
 ```
 
 - **自动握手**：除 `serve` / `help` 外，任意子命令起来先读端口文件 `~/.foreman/service.port`，
@@ -147,15 +151,25 @@ foreman status                # 在不在 + 监听明细 + lastPollAt / pollCoun
 服务只有一条 HTTP 通道：CLI 的 RPC、控制台页面、控制台接口都在这一个端口上，不另起进程、没有 socket。
 
 ```json
-"service": {
-  "http": {
-    "host": "127.0.0.1",
-    "port": 7317,
-    "portFile": "~/.foreman/service.port",
-    "db": "~/.foreman/console.db"
+{
+  "service": {
+    "http": {
+      "host": "127.0.0.1",
+      "port": 7317,
+      "portFile": "~/.foreman/service.port",
+      "db": "~/.foreman/console.db"
+    }
+  },
+  "inbox": {
+    "pollMs": 1000,
+    "schedulePollMs": 1000,
+    "retrySeconds": 30,
+    "leaseSeconds": 900
   }
 }
 ```
+
+Inbox 与 ConsoleStore 共用 `~/.foreman/console.db` 的同一连接，新增 `agent_inbox` / `agent_schedules` 两表；不使用 SQLite Trigger 唤醒 Node，也不另起 Worker 进程。
 
 - 服务启动时把实际端口写成 `~/.foreman/service.port`（纯数字一行），CLI 就读这个文件。
 - CLI 走 `POST /api/rpc`（body 就是原来那一帧 `{id, cmd, ...}`），探活走 `GET /api/ping`。
@@ -193,7 +207,7 @@ foreman status                # 在不在 + 监听明细 + lastPollAt / pollCoun
   - 「定时任务」列出检查智能体巡检（`inspector.enabled`）、他人 PR 扫描（`prWatch.enabled`）、验收邮件（`mail.enabled`）、工作时间窗（`workHours.offUntil` 临时闭嘴）四项，带运行状态、上次时间、下次触发与已跑轮数；
   - 检查智能体、他人 PR 扫描、验收邮件的时间可编辑 **cron 表达式**；对应配置 `inspector.cron` / `prWatch.cron` / `mail.cron`。没配 cron 时兼容 `intervalSeconds`，折成分钟级表达式；
   - 点「开启/停止」或「保存时间」会 `POST /api/schedules`（如 `{"patch":{"inspector":{"enabled":true,"cron":"*/10 * * * *"}}}`）：先校验并改内存 cfg、再写回 `config.json`、然后立刻重排定时器，**不用重启服务**；非法 cron 返回 400，不会落盘；
-  - 检查智能体的「立即巡检」走 `POST /api/schedules/run`，等价于手动 `foreman inspect`；它只是提前 queue，不代替智能体决策。
+  - 检查智能体的「立即巡检」走 `POST /api/schedules/run`，等价于手动 `foreman inspect`；它只是提前写入 Inbox，由 Worker 投递，不代替智能体决策。
   - `GET /api/schedules` 返回同一份状态，脚本/CLI 也可用。
 - **「操作日志」页面**：派单、投递编排通知、建/合 PR、合并后清理、执行会话归档都会先记一条「进行中」，结束再更新为「成功 / 失败」；服务重启时未收尾的记录标为「已中断」，不会永远显示正在执行。支持按状态筛选，每 15 秒自动刷新。
   - 数据在同一个 `console.db` 的 `operations` 表；查询接口 `GET /api/operations?limit=100&status=running&action=merge`（后两个参数可省略）。
@@ -244,7 +258,7 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 - **notify 节点（`notice.delivered`）还在**：暂停 / 继续、累计执行次数、控制台状态照旧；
   但节点里**不再真的发通知**——不新建派单会话、不 `dws notify`、也不拼续接催办，
   只把指纹记进账本 `notified`、落一次节点痕（detail 写「通知已停用，未发送」）。
-- **PR 待合并仍然投递**：PR 扫描走的是 `deliver.mode`（`new` 新建一条 `foreman-合并-<时间戳>` 会话），
+- **PR 待合并仍然投递**：PR 扫描由 Worker 执行，候选写 `inspector.notice`；检查智能体显式 `pr assign` 后才新建 `foreman-合并-<时间戳>` 会话，
   不经 notify 节点，所以「扫到别人的 PR 交给合并助手核对」照常工作。
 - **合并结果不回执**：合完只落账本（`mergeAsk` / `mergeTask`）+ 控制台 `pr_merge`，
   关单、清工作区、归档执行会话与通知会话都在 `afterMerge` 里做完，然后收工；
@@ -280,15 +294,15 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 
 - 列表走 `gitea pull-list --repo <owner/name> --state open`（REST 列表，带回 `author`/`base`/`head`）。
 - 本人账号（`prWatch.ignoreAuthors`，当前 `233151`）的 PR 不进入他人合并助手链路。本人 PR 若涉及 UI，代码读取 PR 文件列表确认后，另发「本人 UI PR 待验收指派」给检查智能体；非 UI 仍只记 `skipped: "self"`。作者不明记 `skipped: "unknown-author"`，不进入候选。
-- 其余 PR 合成候选消息，通过 `dws msg --mode queue` 复用同一检查会话投递。检查智能体不主动读取 PR 列表，只处理代码送来的候选；决定处理时执行 `foreman pr assign <N> --repo R`，Foreman 再校验作者，确认为他人 PR 后才新建合并会话。
+- 其余 PR 合成候选消息，写入 `inspector.notice` Inbox；Worker 复用同一检查会话投递。检查智能体不主动读取 PR 列表，只处理代码送来的候选；决定处理时执行 `foreman pr assign <N> --repo R`，Foreman 再校验作者，确认为他人 PR 后才新建合并会话。
 - 本人 UI 候选由检查智能体执行 `foreman pr ui-assign <N> --repo R`；Foreman 复核 open、本人、UI 和既有指派人后，按 `prWatch.uiReviewers` 顺序轮询指派。当前顺序为周晓亮（`ywwb1328`）→ 张振豪（`ywwb1797`），只改 Gitea 指派人，不建合并助手、不合并；成功后才推进游标，重复执行幂等。
 - 有冲突的 PR 默认过滤（`prWatch.filterConflicts`，查 `pr-view` 的 `mergeNote`），不合也不报。
 - **扫描器不直接建合并助手、不合 PR**：分配入口会拒绝本人或作者不明的 PR，重复分配幂等。合并助手核对归属/基线、解冲突，可合就执行通知里的 `foreman pr merge`，不可合或需要拍板就用普通文字说明原因，不交 RESULT。
-- 去重记在 `state.json` 的 `prWatch` 键（`<repo>#<number>`）：他人候选发给检查智能体成功才盖 `notifiedAt`，分配合并助手后另记 `assignedTo` / `assignedConvId` / `assignedAt`；本人 UI 候选另记 `reviewNotifiedAt`，验收指派后记录 `reviewer` / `reviewAssignedAt`。
+- 去重分两层：Inbox 按通知正文 SHA-256 去重并负责失败重试；`state.json` 的 `prWatch` 键（`<repo>#<number>`）在候选持久化后盖 `notifiedAt`。分配合并助手后另记 `assignedTo` / `assignedConvId` / `assignedAt`；本人 UI 候选另记 `reviewNotifiedAt`，验收指派后记录 `reviewer` / `reviewAssignedAt`。重启由 SQLite 恢复未投完的事件。
 - 起服务 1s 后先扫一遍，之后按间隔跑。
 
 ```bash
-foreman pr poll                  # 立刻扫一轮，只把候选发给检查智能体
+foreman pr poll                  # 立刻扫一轮，只把候选写入检查智能体 Inbox
 foreman pr ui-assign <N> --repo R # 本人 UI PR 轮询指派周晓亮/张振豪验收（只指派，不合）
 foreman pr assign <N> --repo R   # 检查智能体显式分配一条他人 PR 给合并助手（幂等）
 foreman pr list                  # 看账本里见过/已通知的 PR
@@ -329,7 +343,7 @@ foreman doctor                        # 开了邮件会顺带查 agently-cli 授
 ## 命令
 
 ```bash
-foreman inspect                   # 立即 queue 检查智能体一轮；不代替它做决策
+foreman inspect                   # 立即写检查智能体 Inbox，由 Worker 投递；不代替它做决策
 foreman run --dry-run --once     # 只打印会捞哪条、交给谁；零副作用
 foreman run --once               # 跑一轮：捞到单交给编排会话（hand）
 foreman run --direct --once      # 这一轮自己派活（老行为，不交给编排）

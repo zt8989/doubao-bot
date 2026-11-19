@@ -151,6 +151,13 @@ export const DEFAULTS = {
   // 配了 products 就以它为准（顶层 repos 只在没配 products 时用，老配置不用改）。
   // products[].promptFile / projectDir 留空时回落到顶层 deliver 的同名配置。
   products: [],
+  // Always-on：Schedule / Inbox / Worker 同在 foreman serve 进程；写入后直接 wake，轮询只兜底。
+  inbox: {
+    pollMs: 1000,
+    schedulePollMs: 1000,
+    retrySeconds: 30,
+    leaseSeconds: 900,
+  },
   // 定时检查的工作时间窗：只在工作日 8:30–18:30 跑轮询（enabled:false 或整段省略 = 全天跑）。
   // offUntil 是临时闭嘴时间点，到点自动恢复。
   workHours: { enabled: false, days: [1, 2, 3, 4, 5], start: "08:30", end: "18:30", offUntil: "" },

@@ -94,7 +94,7 @@ async function deliver(ctx, rec, text, { now, action, reason = "" }) {
   return { ok: true, action, ...(reason ? { reason } : {}), convId, name, sentAt: at }
 }
 
-export async function inspectorOnce(ctx, { now = new Date(), force = false, notice = "" } = {}) {
+export async function inspectorOnce(ctx, { now = new Date(), force = false, notice = "", notices = null, scheduled = null } = {}) {
   const runtime = ctx.state?.inspector ?? (ctx.state ? (ctx.state.inspector = {}) : {})
   if (runtime.running) return { ok: true, skipped: "busy" }
   runtime.running = true
@@ -112,13 +112,20 @@ export async function inspectorOnce(ctx, { now = new Date(), force = false, noti
     const idleSince = Number.isFinite(lastSent) ? lastSent : Number.isFinite(failingSince) ? failingSince : createdAt
     const stale = Boolean(rec.convId) && Number.isFinite(idleSince) && now.getTime() - idleSince >= staleMs
     const action = !rec.convId || stale ? "created" : "queued"
-    const noticeText = String(notice ?? "").trim()
-    const snapshot = noticeText ? "" : await inspectionSnapshot(ctx)
-    const text = noticeText || [
-      "【Foreman · 检查智能体 · 10分钟巡检】",
-      "请检查任务是否正常运行；先按 tasks 核对全部在飞工单总数，达到上限时禁止接新，只有仍有容量才按优先级接单。状态处理由你决策，不要机械重派。",
-      snapshot,
-    ].join("\n\n")
+    const noticeList = notices === null
+      ? [String(notice ?? "").trim()].filter(Boolean)
+      : notices.map((item) => String(item ?? "").trim()).filter(Boolean)
+    const includeScheduled = scheduled === null ? noticeList.length === 0 : scheduled === true
+    const sections = []
+    if (includeScheduled) {
+      sections.push([
+        "【Foreman · 检查智能体 · 10分钟巡检】",
+        "请检查任务是否正常运行；先按 tasks 核对全部在飞工单总数，达到上限时禁止接新，只有仍有容量才按优先级接单。状态处理由你决策，不要机械重派。",
+        await inspectionSnapshot(ctx),
+      ].join("\n\n"))
+    }
+    sections.push(...noticeList)
+    const text = sections.join("\n\n")
     const out = await deliver(ctx, rec, text, { now, action, reason: stale ? "stale-24h" : "" })
     runtime.lastAt = out.sentAt
     runtime.count = Number(runtime.count ?? 0) + 1

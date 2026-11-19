@@ -26,7 +26,9 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman watch rm <会话id|标题> [-c] [--no-service]
   foreman watch poll [-c] [--no-service]
   foreman hand <owner/name>#<N> [--fresh]   --fresh 强制重派这条单的独立编排
-  foreman inspect                          立即 queue 检查智能体巡检一轮
+  foreman inspect                          立即写入检查智能体 Inbox，由 Worker 投递
+  foreman inbox list [--limit <N>]        看事件、Schedule 与 pending/done/dropped 计数
+  foreman worker run                       手动让 Worker 消费一轮（排障用）
   foreman issue settle <N> --repo R --note <完成依据>   仅本地完成，不关远端、不清工作区
   foreman pr list [-c] [--no-service]
   foreman pr poll [-c] [--no-service]
@@ -67,7 +69,7 @@ const HELP = `foreman — 接单编排 + 常驻服务
   watch add   登记一条监听（target 是会话 id 或侧边栏标题）
   watch list/rm/poll   看登记 / 删一条 / 立刻跑一轮（取证排障用）
   pr list     看 PR 监听账本（哪些 PR 见过/已通知）
-  pr poll     立刻扫一轮 PR，把他人候选与本人 UI 候选交给检查智能体
+  pr poll     立刻扫一轮 PR，把他人候选与本人 UI 候选写入检查智能体 Inbox
   pr ui-assign <N> --repo R  本人 UI PR 轮询指派给周晓亮/张振豪（只指派，不合）
   pr assign <N> --repo R   检查智能体核对候选后，显式创建这条 PR 的合并助手
   deliver     通知投递（老模型）：deliver.mode=new 每次新建一条会话；existing 才塞回已有会话。
@@ -92,7 +94,7 @@ run 以编排会话为中心：捞到单先交给编排会话（dws msg --mode s
 合并关单后由编排调 foreman clean 清 worktree 与会话。--direct 退回老行为（run 自己派活）。
 
 编排会话从哪来（工作会话与更新都绑它）：
-  1. 定时任务自动接单：foreman 起的那条全局编排会话（orch start，全局只有一条）；
+  1. 检查智能体接单：hand 按工单新建/复用独立编排；手工 orch start 仍可起全局兼容会话；
   2. 用户自主发起：发起那条会话自己就是编排——hand/dispatch/resume 自动取 MCP_VM_CONVERSATION_ID
      （或显式 --orchestrator <会话id|标题>，--no-orchestrator 关掉自动识别），
      工作会话的状态更新 steer 回这条发起方会话。
@@ -649,7 +651,7 @@ async function cmdSessions(pos, flags) {
 }
 
 // 调用方会话 = 谁发起的这张单。两种来源：
-//   1) 定时任务自动接单：发起的进程是服务本身，没有会话 → 返回空，由 foreman 用全局编排会话；
+//   1) 检查智能体接单：服务进程没有用户会话 → hand 按工单建独立编排；手工兼容场景才用全局编排；
 //   2) 用户在自己的豆包会话里发起：显式 --orchestrator <id|名称>，或自动取 MCP_VM_CONVERSATION_ID
 //      （在会话里跑时它就是发起方那条会话）。--no-orchestrator 关掉自动识别。
 function callerOrchestrator(flags = {}) {
@@ -681,6 +683,24 @@ async function cmdInspect(pos, flags) {
   const cfg = loadConfig(flags.config)
   const port = await resolvePort(cfg)
   const r = await callRaw(port, { id: "cli", cmd: "inspect" }, 300000)
+  if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
+  return out({ ok: true, ...r })
+}
+
+async function cmdInbox(pos, flags) {
+  const action = String(pos[0] ?? "list")
+  if (action !== "list") throw new Error("用法：foreman inbox list [--limit <N>]")
+  const cfg = loadConfig(flags.config)
+  const r = await callRaw(await resolvePort(cfg), { id: "cli", cmd: "inbox list", limit: Number(flags.limit ?? 100) }, 60000)
+  if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
+  return out({ ok: true, ...r })
+}
+
+async function cmdWorker(pos, flags) {
+  const action = String(pos[0] ?? "run")
+  if (action !== "run") throw new Error("用法：foreman worker run")
+  const cfg = loadConfig(flags.config)
+  const r = await callRaw(await resolvePort(cfg), { id: "cli", cmd: "worker run" }, 300000)
   if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
   return out({ ok: true, ...r })
 }
@@ -785,6 +805,10 @@ async function main() {
       return cmdHand(pos, flags)
     case "inspect":
       return cmdInspect(pos, flags)
+    case "inbox":
+      return cmdInbox(pos, flags)
+    case "worker":
+      return cmdWorker(pos, flags)
     case "dispatch":
       return cmdDispatch(pos, flags)
     case "resume":

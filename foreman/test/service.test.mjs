@@ -243,6 +243,32 @@ test("handleRequest：ping/status/unknown_cmd/bad_request", async () => {
   }
 })
 
+test("handleRequest：Inbox 可观测，Worker 可手动消费一轮", async () => {
+  const dir = tmpDir()
+  try {
+    let runs = 0
+    const ctx = {
+      ...mkCtx(mkCfg(dir)),
+      inbox: {
+        list: ({ limit }) => [{ id: limit, kind: "inspector", status: "pending" }],
+        schedules: () => [{ id: "inspector", nextAt: "next" }],
+        counts: () => ({ pending: 1 }),
+      },
+      inboxWorker: { runOnce: async () => ({ ok: true, claimed: 2, completed: ++runs }) },
+    }
+    const listed = await handleRequest(ctx, { id: "inbox", cmd: "inbox list", limit: 7 })
+    assert.equal(listed.ok, true)
+    assert.equal(listed.events[0].id, 7)
+    assert.deepEqual(listed.counts, { pending: 1 })
+    const ran = await handleRequest(ctx, { id: "worker", cmd: "worker run" })
+    assert.equal(ran.ok, true)
+    assert.equal(ran.completed, 1)
+    assert.equal(runs, 1)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("handleRequest：watch add/list/remove 落地到 book", async () => {
   const dir = tmpDir()
   try {
