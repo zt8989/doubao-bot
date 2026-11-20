@@ -890,7 +890,7 @@ class FmSchedules extends LitElement {
       <section class="panel">
         <div class="panel-head">
           <h2>Schedule</h2>
-          <div class="panel-side"><span class="hint">列表只读；进入详情或编辑后管理任务</span></div>
+          <div class="panel-side"><span class="hint">直接执行不受开关与排期限制；进入详情或编辑后管理任务</span></div>
         </div>
         ${this.messages()}
         <ul class="sched-list">
@@ -911,6 +911,7 @@ class FmSchedules extends LitElement {
                 ${s.count ? html`<span class="pr-note">已跑 ${s.count} 轮</span>` : ""}
               </div>
               <div class="sched-acts">
+                ${s.runnable ? html`<button class="ghost" ?disabled=${this.busy !== "" || s.running} @click=${() => emit(this, "schedule-run", { id: s.id })}>${this.busy === `run-${s.id}` ? "执行中…" : s.runLabel || "立即执行"}</button>` : ""}
                 <button class="ghost" @click=${() => this.showDetail(s.id)}>详情</button>
                 <button class="ghost" @click=${() => this.showEdit(s.id)}>编辑</button>
               </div>
