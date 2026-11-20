@@ -3,21 +3,24 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { pathToFileURL } from "node:url"
-import { agentExecutor, runConfiguredScript, scriptExecutor, SCHEDULE_SCRIPT_DIR } from "../src/core/executors.mjs"
+import { fileURLToPath, pathToFileURL } from "node:url"
+import { agentExecutor, runConfiguredScript, scriptExecutor } from "../src/core/executors.mjs"
+
+const SERVICE = fileURLToPath(new URL("../src/service.mjs", import.meta.url))
+const MAILFLOW = fileURLToPath(new URL("../src/mailflow.mjs", import.meta.url))
 
 const cfg = () => ({ prWatch: {}, mail: {}, router: {} })
 
-test("执行器默认配置指向独立的定时脚本目录，导出函数与脚本一致", async () => {
+test("执行器默认配置是包内脚本的绝对路径，导出函数与脚本一致", async () => {
   const config = cfg()
   const pickup = scriptExecutor(config, "pickup")
   const pr = scriptExecutor(config, "prWatch")
   const router = scriptExecutor(config, "router")
   const mail = scriptExecutor(config, "mail")
-  assert.deepEqual(pickup, { path: `${SCHEDULE_SCRIPT_DIR}/pickup.mjs`, exportName: "pickupPollOnce", args: {} })
-  assert.deepEqual(pr, { path: `${SCHEDULE_SCRIPT_DIR}/prwatch.mjs`, exportName: "prPollOnce", args: {} })
-  assert.deepEqual(router, { path: `${SCHEDULE_SCRIPT_DIR}/router.mjs`, exportName: "pollOnce", args: {} })
-  assert.deepEqual(mail, { path: `${SCHEDULE_SCRIPT_DIR}/mail.mjs`, exportName: "mailPollOnce", args: {} })
+  assert.deepEqual(pickup, { path: SERVICE, exportName: "pickupPollOnce", args: {} })
+  assert.deepEqual(pr, { path: SERVICE, exportName: "prPollOnce", args: {} })
+  assert.deepEqual(router, { path: SERVICE, exportName: "pollOnce", args: {} })
+  assert.deepEqual(mail, { path: MAILFLOW, exportName: "mailPollOnce", args: {} })
   for (const exec of [pickup, pr, router, mail]) {
     assert.ok(path.isAbsolute(exec.path), `脚本路径必须是绝对路径：${exec.path}`)
     const mod = await import(pathToFileURL(exec.path).href)
@@ -58,4 +61,10 @@ test("脚本加载与导出函数错误给出可定位的信息", async () => {
   await assert.rejects(() => runConfiguredScript({ cfg: config }, "mail"), /没有导出函数 missing/)
   config.mail.script.path = path.join(dir, "not-found.mjs")
   await assert.rejects(() => runConfiguredScript({ cfg: config }, "mail"), /加载定时脚本失败/)
+})
+
+test("脚本路径只认绝对路径，相对路径直接报错", async () => {
+  const config = cfg()
+  config.mail.script = { path: "src/mailflow.mjs", exportName: "mailPollOnce", args: {} }
+  await assert.rejects(() => runConfiguredScript({ cfg: config }, "mail"), /定时脚本必须是绝对路径/)
 })

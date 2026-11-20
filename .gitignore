@@ -4,6 +4,3 @@ node_modules/
 *.log
 foreman/console/dist/
 dist/
-
-# 定时任务入口脚本：单独维护、只留本地版本，不进本仓库
-/schedules/

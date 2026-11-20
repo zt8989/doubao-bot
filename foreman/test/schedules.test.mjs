@@ -7,7 +7,10 @@ import path from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { listSchedules, applySchedules, nextWorkdayStart, cronOf, hydrateSchedules, scheduleDefinitions, saveScheduleSettings } from "../src/core/schedules.mjs"
 import { InboxStore, ScheduleRunner } from "../src/core/inbox.mjs"
-import { SCHEDULE_SCRIPT_DIR } from "../src/core/executors.mjs"
+import { fileURLToPath } from "node:url"
+
+const SERVICE = fileURLToPath(new URL("../src/service.mjs", import.meta.url))
+const MAILFLOW = fileURLToPath(new URL("../src/mailflow.mjs", import.meta.url))
 import { validateCron, nextCronTime } from "../src/core/cron.mjs"
 import { inWorkHours } from "../src/util.mjs"
 import { startConsoleHttp } from "../src/consolehttp.mjs"
@@ -38,7 +41,7 @@ test("listSchedules：我的工单扫描与执行会话轮询都是持久脚本�
   assert.equal(pickup.enabled, true)
   assert.equal(pickup.cron, "*/30 * * * *")
   assert.equal(pickup.executor, "script")
-  assert.deepEqual(pickup.script, { path: `${SCHEDULE_SCRIPT_DIR}/pickup.mjs`, exportName: "pickupPollOnce", args: {} })
+  assert.deepEqual(pickup.script, { path: SERVICE, exportName: "pickupPollOnce", args: {} })
   assert.match(pickup.detail, /指派给 233151/)
   assert.match(pickup.detail, /ready-for-agent/)
   assert.match(pickup.detail, /router agent/)
@@ -53,21 +56,21 @@ test("listSchedules：我的工单扫描与执行会话轮询都是持久脚本�
   assert.equal(router.cron, "* * * * *")
   assert.equal(router.runLabel, "立即轮询")
   assert.equal(router.executor, "script")
-  assert.deepEqual(router.script, { path: `${SCHEDULE_SCRIPT_DIR}/router.mjs`, exportName: "pollOnce", args: {} })
+  assert.deepEqual(router.script, { path: SERVICE, exportName: "pollOnce", args: {} })
   assert.equal(router.agent, undefined)
   assert.match(router.detail, /代码轮询/)
   assert.match(router.detail, /不定时调用 Agent/)
   assert.match(router.detail, /不自动接单/)
   assert.equal(rows.find((r) => r.id === "prWatch").enabled, true)
   assert.equal(rows.find((r) => r.id === "prWatch").executor, "script")
-  assert.deepEqual(rows.find((r) => r.id === "prWatch").script, { path: `${SCHEDULE_SCRIPT_DIR}/prwatch.mjs`, exportName: "prPollOnce", args: {} })
+  assert.deepEqual(rows.find((r) => r.id === "prWatch").script, { path: SERVICE, exportName: "prPollOnce", args: {} })
   assert.equal(rows.find((r) => r.id === "prWatch").cron, "*/5 * * * *")
   // 验收邮件默认关（testers 还是占位符），cron 用 mail.pollSeconds。
   const mailRow = rows.find((r) => r.id === "mail")
   assert.equal(mailRow.enabled, false)
   assert.equal(mailRow.cron, "*/5 * * * *")
   assert.match(mailRow.detail, /[FM-…]/)
-  assert.deepEqual(mailRow.script, { path: `${SCHEDULE_SCRIPT_DIR}/mail.mjs`, exportName: "mailPollOnce", args: {} })
+  assert.deepEqual(mailRow.script, { path: MAILFLOW, exportName: "mailPollOnce", args: {} })
   assert.equal(rows.some((r) => ["merge", "planner"].includes(r.id)), false)
   assert.deepEqual(rows.filter((r) => r.runnable).map((r) => r.id), ["pickup", "prWatch", "mail", "router", "dreaming"])
   assert.equal(rows.find((r) => r.id === "workHours").runnable, false)

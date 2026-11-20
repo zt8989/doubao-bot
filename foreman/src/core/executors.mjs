@@ -5,21 +5,13 @@ import { builtinPrompt } from "../builtin-prompts.mjs"
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 
-// 入口脚本按绝对路径回导这个包：FOREMAN_HOME 指向当前运行副本（dist 或源码），
-// 转发脚本 import 到的就是同一个模块实例，不会另起一份、把 Book 之类的类判断串掉。
-process.env.FOREMAN_HOME ??= PACKAGE_ROOT
-
-// 脚本型定时任务的入口脚本不在包内：单独一个目录、单独做本地版本，由 foreman 按绝对路径加载。
-// 换机器/换目录用环境变量 FOREMAN_SCHEDULE_DIR 覆盖。
-export const SCHEDULE_SCRIPT_DIR = String(
-  process.env.FOREMAN_SCHEDULE_DIR || "/Users/zhouteng/Documents/workspace/doubao-bot/schedules"
-).replace(/\/+$/, "")
-
+// 脚本型定时任务一律按绝对路径加载：入口就在本包的 src 里，按当前运行副本（dist 或源码）定位，
+// 不配相对路径，两份副本也不会互相解析到对方的文件上。
 const SCRIPT_DEFAULTS = {
-  pickup: { path: `${SCHEDULE_SCRIPT_DIR}/pickup.mjs`, exportName: "pickupPollOnce", args: {} },
-  prWatch: { path: `${SCHEDULE_SCRIPT_DIR}/prwatch.mjs`, exportName: "prPollOnce", args: {} },
-  mail: { path: `${SCHEDULE_SCRIPT_DIR}/mail.mjs`, exportName: "mailPollOnce", args: {} },
-  router: { path: `${SCHEDULE_SCRIPT_DIR}/router.mjs`, exportName: "pollOnce", args: {} },
+  pickup: { path: `${PACKAGE_ROOT}/src/service.mjs`, exportName: "pickupPollOnce", args: {} },
+  prWatch: { path: `${PACKAGE_ROOT}/src/service.mjs`, exportName: "prPollOnce", args: {} },
+  mail: { path: `${PACKAGE_ROOT}/src/mailflow.mjs`, exportName: "mailPollOnce", args: {} },
+  router: { path: `${PACKAGE_ROOT}/src/service.mjs`, exportName: "pollOnce", args: {} },
 }
 
 const object = (value) => value && typeof value === "object" && !Array.isArray(value)
@@ -65,9 +57,9 @@ export function normalizeAgentExecutor(value) {
 
 export async function runConfiguredScript(ctx, id, { manual = false } = {}) {
   const definition = scriptExecutor(ctx.cfg, id)
-  const file = path.isAbsolute(definition.path)
-    ? definition.path
-    : path.resolve(PACKAGE_ROOT, definition.path)
+  // 只认绝对路径：没有相对路径分支，配错就直接报，不去猜该按谁解析。
+  if (!path.isAbsolute(definition.path)) throw new Error(`定时脚本必须是绝对路径：${definition.path}`)
+  const file = definition.path
   let module
   try {
     module = await import(pathToFileURL(file).href)
