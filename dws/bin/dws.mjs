@@ -86,7 +86,7 @@ const HELP_BY_CMD = {
   ],
   status: [
     "dws status [会话名|任务id] [--json]",
-    "看会话状态（是否还在跑 / 是否已跑完）。需要连上豆包窗口；窗口里是别的任务时会报“不在当前窗口里”并给落盘摘要。",
+    "看会话状态（是否还在跑 / 是否已跑完）。只读侧边栏和本地会话 JSONL，不切换当前窗口；窗口连不上时仍可使用本地记录。",
   ],
   info: [
     "dws info [会话名|任务id] [--json] [--out <文件>]",
@@ -477,17 +477,18 @@ async function cmdStatus() {
   const target = pos[0]
   if (target) {
     const tgt = await resolveTarget({ book, session }, target)
-    const s = await session.convStatus(tgt.id)
+    const s = tgt.from === "local" ? await session.status(tgt.name) : await session.convStatus(tgt.id)
+    const r = s.reply ?? s
     if (flags.json) {
       return printJson({ ok: true, status: { ...s, name: tgt.name || tgt.id, convId: tgt.id, title: tgt.title || "" } })
     }
     say(
       [
         `任务 ${tgt.id}${tgt.title && tgt.from !== "local" ? `「${tgt.title}」` : ""}：${
-          s.streaming ? "正在生成" : s.finished ? "已跑完" : "还没开始"
+          r.streaming ? "正在生成" : r.finished ? "已跑完" : "还没开始"
         }`,
-        `  回复长度 ${s.chars} 字${s.error ? `，错误：${s.error}` : ""}${s.status ? `，状态 ${s.status}` : ""}`,
-        s.head ? `  最近回复：${s.head.slice(0, 100)}` : "",
+        `  回复长度 ${r.chars} 字${r.error ? `，错误：${r.error}` : ""}${r.status ? `，状态 ${r.status}` : ""}`,
+        r.head ? `  最近回复：${r.head.slice(0, 100)}` : "",
         `  看内容：dws info ${tgt.id}`,
       ]
         .filter(Boolean)
@@ -518,26 +519,20 @@ async function cmdStatus() {
     say(`${s.name}：${s.error}`)
     return
   }
-  if (!s.live) {
-    say(
-      [
-        `${s.session.name}：不在当前窗口里（${whyText(s.why)}）`,
-        `  任务 ${s.session.convId || "-"}，最后更新 ${s.session.updatedAt}`,
-        s.session.reply ? `  最后一次回复：${s.session.reply.chars} 字，${s.session.reply.head || ""}` : "",
-        `  续会话：dws send ${s.session.name} "继续"`,
-      ]
-        .filter(Boolean)
-        .join("\n")
-    )
+  const r = s.reply
+  if (!r) {
+    say(`${s.session.name}：任务 ${s.session.convId || "-"}，还没有可读取的回复`)
     return
   }
-  const r = s.reply
   say(
     [
       `${s.session.name}（任务 ${r.convId}）：${r.streaming ? "正在生成" : r.finished ? "已跑完" : "还没开始"}`,
       `  回复长度 ${r.chars} 字${r.error ? `，错误：${r.error}` : ""}${r.status ? `，状态 ${r.status}` : ""}`,
+      r.head ? `  最近回复：${r.head.slice(0, 100)}` : "",
       `  看内容：dws info ${s.session.name}`,
-    ].join("\n")
+    ]
+      .filter(Boolean)
+      .join("\n")
   )
 }
 

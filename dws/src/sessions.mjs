@@ -76,6 +76,83 @@ export function replySummary(reply) {
   }
 }
 
+// 从主 agent 的 trajectory.jsonl 读最后一次回复。只读文件尾部，容忍正在追加的半行；
+// 侧边栏负责 running，JSONL 只负责回复文本与“这一轮是否留下了最终回复”。
+export function readTrajectoryStatus(dataDir, convId) {
+  if (!dataDir || !convId) return null
+  const agentsDir = path.join(
+    dataDir,
+    "profile",
+    "Default",
+    ".doubao",
+    "agent_mode",
+    "workspace",
+    ".sessions",
+    String(convId),
+    "agents"
+  )
+  let files = []
+  try {
+    files = fs
+      .readdirSync(agentsDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && e.name.startsWith("m_"))
+      .map((e) => path.join(agentsDir, e.name, "system", "trajectory.jsonl"))
+      .filter((f) => fs.existsSync(f))
+      .map((file) => ({ file, mtimeMs: fs.statSync(file).mtimeMs }))
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+  } catch {
+    return null
+  }
+  if (!files.length) return null
+  const file = files[0].file
+  const stat = fs.statSync(file)
+  const size = stat.size
+  const start = Math.max(0, size - 512 * 1024)
+  const fd = fs.openSync(file, "r")
+  let text
+  try {
+    const buf = Buffer.alloc(size - start)
+    fs.readSync(fd, buf, 0, buf.length, start)
+    text = buf.toString("utf8")
+  } finally {
+    fs.closeSync(fd)
+  }
+  if (start) text = text.slice(text.indexOf("\n") + 1)
+  const records = []
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue
+    try {
+      records.push(JSON.parse(line))
+    } catch {
+      // 文件可能正在写入；最后半行留到下一次 status 再读。
+    }
+  }
+  const contentOf = (m) => {
+    if (typeof m?.content === "string") return m.content
+    if (Array.isArray(m?.content)) return m.content.map((x) => x?.text ?? "").join("\n")
+    return ""
+  }
+  let lastUser = -1
+  records.forEach((m, i) => {
+    if (m?.role === "user") lastUser = i
+  })
+  const turn = records.slice(lastUser + 1)
+  const assistants = turn.filter((m) => m?.role === "assistant" && contentOf(m).trim())
+  const final = [...assistants].reverse().find((m) => !(m.tool_calls?.length > 0))
+  // 最终回复必须是当前轨迹里的最后一条完整记录；后面还有工具记录时仍是在执行中。
+  const finished = !!final && records.at(-1) === final
+  const latest = (finished ? final : assistants.at(-1)) ?? null
+  const reply = contentOf(latest)
+  return {
+    file,
+    updatedAt: stat.mtime.toISOString(),
+    finished,
+    chars: reply.length,
+    head: reply.slice(0, 160),
+    tail: reply.slice(-600),
+  }
+}
+
 export class SessionManager {
   constructor({ book, doubao = null, mode = "local", model = "auto", messageMode = "steer" }) {
     this.book = book
@@ -203,26 +280,28 @@ export class SessionManager {
     return { reattached: true, reply: opened.reply }
   }
 
+  // status 是只读操作：侧边栏判断 running，本地 JSONL 取回复，绝不切换窗口。
   async status(name) {
     const s = this.book.session(name)
     if (!s) return null
-    const a = await this.attached(name)
-    if (!a.attached) {
-      return { session: s, live: false, why: a.reason, message: a.message ?? "", pageConvId: a.convId ?? "" }
-    }
-    const r = await this.client.read()
-    this.book.record(name, { reply: replySummary(r) })
+    if (!s.convId) return { session: s, live: false, why: "no_task", message: "" }
+    const r = await this.convStatus(s.convId)
     return {
-      session: this.book.session(name),
-      live: true,
+      session: s,
+      live: r.live,
+      why: r.why ?? "",
+      message: r.message ?? "",
+      source: r.source,
+      updatedAt: r.updatedAt,
       reply: {
-        finished: !!r.finished,
-        streaming: !!r.reply && !r.finished,
-        chars: (r.text ?? "").length,
+        finished: r.finished,
+        streaming: r.streaming,
+        chars: r.chars,
         status: r.status,
         reason: r.reason,
         error: r.error,
         convId: r.convId,
+        head: r.head,
       },
     }
   }
@@ -260,17 +339,40 @@ export class SessionManager {
   }
 
   async convStatus(convId, signal) {
-    await this.client.goto(convId, signal)
-    const r = await this.client.read(signal)
+    const id = String(convId)
+    let tasks = null
+    let sidebarError = null
+    try {
+      tasks = await this.client.tasks(signal)
+    } catch (e) {
+      sidebarError = e
+    }
+    const running = tasks?.find((t) => String(t.id) === id)?.running === true
+    const trace = readTrajectoryStatus(this.client.app?.dataDir, id)
+    const local = Object.values(this.book.data.sessions ?? {}).find((s) => String(s.convId ?? "") === id)
+    const cached = local?.reply ?? null
+    const finished = !running && (trace ? trace.finished : !!cached?.finished)
+    const chars = trace?.chars || cached?.chars || 0
+    const head = trace?.head || cached?.head || ""
+    const source = [tasks ? "sidebar" : "", trace ? "jsonl" : cached ? "state" : ""]
+      .filter(Boolean)
+      .join("+")
+    const cachedOutcome = !trace || finished
     return {
-      convId,
-      finished: !!r.finished,
-      streaming: !!r.reply && !r.finished,
-      chars: (r.text ?? "").length,
-      status: r.status,
-      reason: r.reason,
-      error: r.error,
-      head: (r.text ?? "").slice(0, 160),
+      convId: id,
+      finished,
+      streaming: running,
+      running: tasks ? running : null,
+      chars,
+      status: !running && cachedOutcome ? cached?.status ?? "" : "",
+      reason: !running && cachedOutcome ? cached?.reason ?? "" : "",
+      error: !running && cachedOutcome ? cached?.error ?? "" : "",
+      head,
+      updatedAt: trace?.updatedAt ?? cached?.at ?? local?.updatedAt ?? "",
+      live: tasks !== null,
+      source,
+      why: sidebarError?.code ?? "",
+      message: sidebarError?.message ?? "",
     }
   }
 

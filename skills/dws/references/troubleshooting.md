@@ -32,7 +32,6 @@ dws start                  # 要拉起豆包查登录态与窗口用这个（doc
 | `doubao_no_window` | 起来了但没有聊天页 | 确认没被登录页/更新弹窗挡住；`dws start` 复跑 |
 | 会话说「菜单里没有模型」 | 豆包模型菜单改版，`models.json` 里的入口对不上 | 先用 `--model auto`；仍不行更新 `<profile>/models.json`（结构在 `src/doubao.mjs`） |
 | 按钮点了没反应 / 找不到输入框 | 页面改版，`data-testid` 变了 | 改 `src/doubao.mjs` 里的选择器；这是 UI 驱动的已知代价 |
-| `status` 报「不在当前窗口里（窗口里是另一个任务）」 | 单窗口，当前只挂着别的任务 | 正常现象：`dws use <任务id>` 切过去，或直接看落盘的 `replySummary`；`send` 会自动新开任务并带 handoff |
 | 调 `dws run` / `retry` / `tasks` 报「未知命令」 | 这三条已从 dws 删掉（dws 只管会话） | 不是坏了；要编排请在外部组合别的工具 |
 
 ## 3. 会话与本地状态
