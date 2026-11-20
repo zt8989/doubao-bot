@@ -194,7 +194,7 @@ test("手动接单：run.lock 被别人占着就拒绝，不硬派", async () =>
   fs.rmSync(lockFile, { force: true })
 })
 
-test("决策单提示词：先判断再决定动不动手，并说明这次没人监听", async () => {
+test("决策单提示词：先调研，切换 ready-for-agent 后才能编码，不确定可发邮件", async () => {
   const { decisionKickoff } = await import("../src/prompts.mjs")
   const p = decisionKickoff({
     repo: repoCfg.repo,
@@ -205,10 +205,16 @@ test("决策单提示词：先判断再决定动不动手，并说明这次没�
   })
   assert.match(p, /决策会话/)
   assert.match(p, /needs-info/)
+  assert.match(p, /这一步只做调研，不改业务代码/)
   assert.match(p, /可选方案和你的推荐/)
+  assert.match(p, /foreman send --type mail/)
+  assert.match(p, /--label-add ready-for-agent/)
+  assert.match(p, /ready-for-human 已移除后，才能开始编码/)
+  assert.match(p, /标签切换或核验失败时停止编码/)
+  assert.doesNotMatch(p, /只使用只读能力/, "决策单需要允许修改本单标签")
   assert.match(p, /没有人监听/)
   assert.match(p, /直接给出最终回复/)
-  assert.match(p, /\/tmp\/wt/, "仍给工作区：判断下来能做就能直接改")
+  assert.match(p, /\/tmp\/wt/, "仍给工作区：调研后确认可做并完成标签切换才改")
 })
 
 test("手动接单：带 needs-info 标签走决策单（dry-run 验证提示词与标记）", async () => {

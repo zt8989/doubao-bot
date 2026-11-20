@@ -14,6 +14,11 @@ export const WORKER_SKILL_SPEC = `技能调用时机：
 - 需要读取或核对工单、评论、标签或 PR 时调用 gitea 技能，只使用只读能力；
 - 需要与所属编排智能体或发起方会话沟通时调用 dws 技能，只联系所属编排或发起方，不直接联系其他编码智能体。`
 
+export const DECISION_SKILL_SPEC = `技能调用时机：
+- 需要读取或核对工单、评论、标签或 PR 时调用 gitea 技能；确认可以编码后，只用它修改本单标签，其它工单字段与无关标签保持原样；
+- 需要请用户决策时调用 foreman 技能，只使用 foreman send --type mail 发送邮件；
+- 需要与发起方会话沟通时调用 dws 技能，不直接联系其他编码智能体。`
+
 // 从原 checkout 而不是 worktree 读根目录约定：worktree 可能基于较旧基线，原工程约定以 repos[].dir 为准。
 // 没有文件或空文件时不占提示词；文件存在但读失败要停止派单，不能悄悄丢掉工程约定。
 export function originalAgentDocs(repos = []) {
@@ -97,7 +102,7 @@ export function kickoff({ repo, issue, worktree, branch, base, workspaces, faile
 }
 
 // 「决策单」提示词：带 needs-info / needs-human / ready-for-human / wontfix / agent-blocked 这类标签的工单，
-// 手动接单时不按「改完 commit」派，而是让 agent 自己判断该不该做、怎么做。
+// 手动接单时先调研；确认可做后必须先切换到 ready-for-agent，再编码；不确定时可发邮件请用户决策。
 // 这类单不登记监听、不绑编排会话：没有人在它跑完后接结果，所以结论必须在会话里写完整。
 export function decisionKickoff({ repo, issue, base, workspaces = [], labels = [], attempt = 1 }) {
   const list = normalizeWorkspaces({ repo, base, workspaces })
@@ -115,17 +120,18 @@ export function decisionKickoff({ repo, issue, base, workspaces = [], labels = [
     `工单正文：`,
     (issue.body ?? "").trim() || "（正文为空，按标题理解）",
     ``,
-    `这张单带着「需要人参与 / 信息不足」类标签，所以这次不是直接派活，是请你先判断再决定动不动手：`,
-    `1. 先调用 gitea 技能读工单与评论，必要时翻代码，弄清它到底要什么。`,
-    `2. 信息不够、或有多种合理做法：先把缺的信息、可选方案和你的推荐写清楚；需要人回答的，通过 gitea 技能评论工单，等答复再动手。`,
-    `3. 判断下来确实能做、做法也明确：直接在指定工作区里做，改完自己跑相关测试并 commit，结束本轮；push、开 PR、合并、关工单由外部流程接手。`,
-    `4. 判断下来不该做（重复、已解决、方向不对）：说明理由并给出建议，工单状态与标签保持原状，由人工处理。`,
-    `5. 这次没有人监听你跑完后的状态：结论、疑问、建议都写在会话里，写清依据和下一步。`
+    `这张单当前不是可直接编码状态。先调研，再决定是否编码；只有先把本单切换为 ready-for-agent，才能修改业务代码：`,
+    `1. 先调用 gitea 技能读工单与评论，必要时翻代码，弄清目标、验收条件、改动范围和依赖。这一步只做调研，不改业务代码。`,
+    `2. 信息不够、存在多种合理做法或方向不确定：保持工单标签和业务代码原状，写清调研结论、缺的信息、可选方案和你的推荐；可用 foreman send --type mail --to <已确认的用户邮箱> --subject "[待决策] ${key}" --body "<调研结论、待决策问题、可选方案和推荐>" 发邮件请用户决策，未得到决策前不进入编码。`,
+    `3. 调研后确认确实能做、做法也明确：先调用 gitea 技能执行 issue-edit ${issue.number} --repo ${repo} --label-add ready-for-agent，并用 --label-remove 移除本单现有的 needs-info、needs-human、ready-for-human、wontfix、agent-blocked 状态标签；保留其它无关标签。重新读取工单，确认 ready-for-agent 已存在且 ready-for-human 已移除后，才能开始编码；标签切换或核验失败时停止编码并说明原因。`,
+    `4. 标签核验通过后，在指定工作区里实现，改完自己跑相关测试并 commit，结束本轮；push、开 PR、合并、关工单由外部流程接手。`,
+    `5. 判断下来不该做（重复、已解决、方向不对）：说明理由并给出建议，工单状态与标签保持原状，由人工处理。`,
+    `6. 这次没有人监听你跑完后的状态：调研结论、标签切换结果、疑问和建议都写在会话里，写清依据和下一步。`
   )
   if (list.length) {
     lines.push(
       ``,
-      `工作区（一工程一个，各自独立，各仓库主 checkout 保持原样）：`,
+      `工作区（一工程一个，各自独立，各仓库主 checkout 保持原样；只有完成第 3 步的标签切换与核验后才能在这里编码）：`,
       ...list.flatMap((w, i) => [
         `${i + 1}. ${w.repo}`,
         `   工作区：${w.worktree}`,
@@ -133,7 +139,7 @@ export function decisionKickoff({ repo, issue, base, workspaces = [], labels = [
       ])
     )
   }
-  lines.push(``, WORKER_SKILL_SPEC, ``, FINAL_REPLY_SPEC)
+  lines.push(``, DECISION_SKILL_SPEC, ``, FINAL_REPLY_SPEC)
   return lines.join("\n")
 }
 
