@@ -277,6 +277,11 @@ Inbox、Outbox 与 ConsoleStore 共用 `~/.foreman/console.db` 的同一连接�
     到点由服务用 `dws open --no-wait` 新开一条 `foreman-<id>-<时间戳>` 会话，把提示词作为首句投递；
     不投给 router agent、不写 Inbox，跑完在会话里直接给最终回复。id 不能与内置任务重名。
     页面编辑区可改开关、cron 与提示词，保存同样走 `POST /api/schedules`；「立即执行」走 `POST /api/schedules/run`。
+  - **脚本型定时任务的入口脚本不在包内**：`pickup` / `prWatch` / `router` / `mail` 四项按绝对路径加载仓库根的 `schedules/`
+    （`pickup.mjs` / `prwatch.mjs` / `router.mjs` / `mail.mjs`，各自导出同名入口函数，实现仍 import 包内模块）。
+    目录地址在 `src/core/executors.mjs` 的 `SCHEDULE_SCRIPT_DIR`，可用环境变量 `FOREMAN_SCHEDULE_DIR` 覆盖；
+    这样 dist 与源码两份副本不会各自按相对路径解析出不同脚本。入口脚本 import 包时读 `FOREMAN_HOME`（启动时自动设为当前运行副本），
+    保证拿到的是同一个模块实例。`/schedules/` 在本仓库 `.gitignore` 里，目录自己 git init、只留本地历史、不配 remote。
 - **「操作日志」页面**：派单、投递编排通知、建/合 PR、合并后清理、执行会话归档都会先记一条「进行中」，结束再更新为「成功 / 失败」；服务重启时未收尾的记录标为「已中断」，不会永远显示正在执行。支持按状态筛选，每 15 秒自动刷新。
   - 数据在同一个 `console.db` 的 `operations` 表；查询接口 `GET /api/operations?limit=100&status=running&action=merge`（后两个参数可省略）。
   - 同时写一份到 `service.log`，前缀为 `[操作]`；日志写不进去不会阻断派单或合并主流程。

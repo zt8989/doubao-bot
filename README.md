@@ -15,6 +15,7 @@ doubao-bot/
 ├── gitea/                # gitea 包：REST 客户端 + CLI（bin/gitea.mjs，23 条命令）
 ├── adapters/gitea/       # opencli 的 gitea 适配器（REST，复用 gitea/src/api.mjs，只作补充）
 ├── skills/               # dws / foreman / gitea 三个技能
+├── schedules/            # 定时任务入口脚本（本地 git、不配 remote；本仓库 .gitignore 掉）
 └── package.json          # 只有 test / link:adapter 两个脚本，不放任何 CLI
 ```
 
