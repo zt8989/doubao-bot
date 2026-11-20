@@ -124,7 +124,14 @@ class FmChat extends LitElement {
   }
 
   render() {
-    const messages = this.conversation?.messages || []
+    const rawMessages = this.conversation?.messages || []
+    const messages = rawMessages.map((message, index) => ({
+      ...message,
+      finished: message.role === "assistant" && index < rawMessages.length - 1 ? true : message.finished,
+    }))
+    if (this.conversation?.running && messages.at(-1)?.finished !== false) {
+      messages.push({ id: "awaiting-router-reply", role: "assistant", text: "", finished: false })
+    }
     const pendingMessages = this.conversation?.pendingMessages || []
     return html`<section class="panel chat-panel">
       <div class="chat-head">

@@ -83,7 +83,7 @@ export function createChatWorkflow(ctx) {
         messages,
         pending,
         pendingMessages,
-        running: Boolean(last && (last.role === "user" || last.finished === false)),
+        running: Boolean(last && (last.role !== "assistant" || last.finished === false)),
       }
     },
   }

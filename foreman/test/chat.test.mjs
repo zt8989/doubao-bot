@@ -91,6 +91,24 @@ test("Chat 读取 Router Agent 会话，并区分用户、回复和 Foreman 事�
   assert.deepEqual(conversation.pendingMessages, [])
 })
 
+test("最后一条是 Foreman 事件时，Chat 仍保持正在回复状态", async (t) => {
+  const f = fixture()
+  t.after(() => fs.rmSync(f.dir, { recursive: true, force: true }))
+  await f.chat.send({ text: "你好", clientId: "browser-message-event" })
+  const worker = new AgentWorker({ store: f.store, handlers: { "chat.message": (batch) => f.chat.deliver(batch) } })
+  await worker.runOnce()
+  f.ctx.dws.info = async () => ({
+    messages: [
+      { id: "a1", role: "assistant", text: "先收到", finished: false },
+      { id: "e1", role: "user", text: "Foreman 事件：任务已更新" },
+    ],
+  })
+
+  const conversation = await f.chat.messages()
+  assert.deepEqual(conversation.messages.map((message) => message.role), ["assistant", "event"])
+  assert.equal(conversation.running, true)
+})
+
 test("HTTP /api/chat 提供读会话与写入 Inbox 的统一入口", async (t) => {
   const calls = []
   const h = await startConsoleHttp({
