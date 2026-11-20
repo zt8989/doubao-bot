@@ -103,7 +103,7 @@ class FmSidebar extends LitElement {
       { id: "inbox", label: "Inbox" },
       { id: "outbox", label: "Outbox" },
       { id: "tasks", label: "Tasks" },
-      { id: "schedules", label: "设置" },
+      { id: "schedules", label: "Schedule" },
       { id: "operations", label: "操作日志" },
     ]
     return html`
@@ -889,7 +889,7 @@ class FmSchedules extends LitElement {
     return html`
       <section class="panel">
         <div class="panel-head">
-          <h2>设置</h2>
+          <h2>Schedule</h2>
           <div class="panel-side"><span class="hint">列表只读；进入详情或编辑后管理任务</span></div>
         </div>
         ${this.messages()}
