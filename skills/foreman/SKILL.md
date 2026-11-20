@@ -46,7 +46,7 @@ description: 接单编排 CLI（项目 foreman，命令 foreman）：**以工单
 | --- | --- | --- |
 | 起编排会话 | `foreman orch start` | 手工兼容入口；router agent接单不要调用，hand 会按工单自动新建 |
 | 交工单 | `foreman hand <owner/name>#N` | 把工单正文 steer 进编排会话，账本记 `handed`；不建工作区。确认原编排失联时才加 `--fresh` 重派独立编排 |
-| 分配工作 | `foreman dispatch <owner/name>#N --prompt "<编排指令>" [--repo <工程名|owner/name>]...` | **编排调用，提示词必填**：默认只建工单所在仓，额外工程必须重复传 `--repo`，正文提到依赖仓不会自动建；开工作会话后把会话 id 绑回编排。`--prompt` 注入工单分析、任务范围、依赖与验收要求，直接随派单首句进入（长指令用 `--file <路径>`），头部自动带完整工单 ID 与 URL；留空拒绝派单。已派过就 steer 同一条续跑，注入内容也合进这条消息 |
+| 分配工作 | `foreman dispatch <owner/name>#N --prompt "<编排指令>" [--repo <工程名|owner/name>]...` | **编排调用，提示词必填**：默认只建工单所在仓，额外工程必须重复传 `--repo`，正文提到依赖仓不会自动建；开工作会话后把会话 id 绑回编排。`--prompt` 注入工单分析、任务范围、依赖与验收要求，直接随派单首句进入（长指令用 `--file <路径>`），头部自动带完整工单 ID 与 URL；各原工程 `repos[].dir/AGENTS.md` 全文也随首句、重派和 `resume` 注入（文件存在且非空时）；留空拒绝派单。已派过就 steer 同一条续跑，注入内容也合进这条消息 |
 | 看链路 | `foreman orch show` | 每条编排会话（含发起方会话）绑了哪些工作会话、最近 steer 了什么 |
 | 收工后开 PR | 编排决策后 `foreman pr open` | 工作会话只给普通最终回复；编排核对提交与自测后决定 push/建 PR，PR 号/链接进账本（工作会话不碰这些） |
 | 失败续跑 | `foreman resume <执行会话id>` | 在**指定工作会话**里 `dws msg --mode steer`，**不新开、不传工单号** |

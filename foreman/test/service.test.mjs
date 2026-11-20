@@ -460,8 +460,14 @@ test("CLI 参数：重复 --repo 保留全部值，单个参数行为不变", ()
 test("dispatch RPC：达到定时巡检上限后，agent 仍能派且 ctx 不带 book 也不崩", async () => {
   const dir = tmpDir()
   try {
-    const repo = { repo: "yyzl/demo", name: "demo", dir, base: "sit-20261126", product: "demo" }
-    const repoB = { repo: "yyzl/demo-b", name: "demo-b", dir, base: "sit-20261126", product: "demo" }
+    const repoDir = path.join(dir, "demo")
+    const repoBDir = path.join(dir, "demo-b")
+    fs.mkdirSync(repoDir, { recursive: true })
+    fs.mkdirSync(repoBDir, { recursive: true })
+    fs.writeFileSync(path.join(repoDir, "AGENTS.md"), "# demo 原工程约定\n先跑 demo 单测。\n")
+    fs.writeFileSync(path.join(repoBDir, "AGENTS.md"), "# demo-b 原工程约定\n先跑 demo-b 单测。\n")
+    const repo = { repo: "yyzl/demo", name: "demo", dir: repoDir, base: "sit-20261126", product: "demo" }
+    const repoB = { repo: "yyzl/demo-b", name: "demo-b", dir: repoBDir, base: "sit-20261126", product: "demo" }
     const cfg = mkCfg(dir, {
       worktreeDir: path.join(dir, "worktrees"),
       repos: [repo, repoB],
@@ -490,6 +496,7 @@ test("dispatch RPC：达到定时巡检上限后，agent 仍能派且 ctx 不带
     assert.match(r.prompt.split("\n").slice(0, 4).join("\n"), /工单链接：http:\/\/gitea\/yyzl\/demo\/issues\/7/)
     assert.match(r.prompt, /编排智能体补充指令/)
     assert.match(r.prompt, /只负责登录页前端；先复用现有请求封装，完成后跑前端单测。/)
+    assert.match(r.prompt, /### yyzl\/demo[\s\S]*# demo 原工程约定\n先跑 demo 单测。/)
 
     const explicit = await handleRequest(ctx, {
       id: "t-explicit", cmd: "dispatch", issue: "yyzl/demo#8", repos: ["demo-b"],
@@ -497,6 +504,8 @@ test("dispatch RPC：达到定时巡检上限后，agent 仍能派且 ctx 不带
     })
     assert.equal(explicit.ok, true)
     assert.deepEqual(explicit.workspaces.map((w) => w.repo), ["yyzl/demo", "yyzl/demo-b"])
+    assert.match(explicit.prompt, /### yyzl\/demo[\s\S]*# demo 原工程约定/)
+    assert.match(explicit.prompt, /### yyzl\/demo-b[\s\S]*# demo-b 原工程约定\n先跑 demo-b 单测。/)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

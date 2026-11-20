@@ -429,6 +429,7 @@ foreman hand <owner/name>#N [--fresh]  # 默认复用本单编排；确认原编
 foreman dispatch <owner/name>#N (--prompt <编排指令> | --file <指令文件>) [--repo <工程名|owner/name>]...
                                  # 默认只建工单所在仓；额外工程重复传 --repo，正文提到不会自动建
                                  # 提示词必填：编排分析、任务范围与验收随首句注入，头部带完整工单 ID 和 URL；重派随 steer 发送
+                                 # 首句、重派和 resume 都附各原工程 repos[].dir/AGENTS.md 全文（文件存在且非空时）
 foreman resume <执行会话id>   # 原会话可修正时：按会话 id steer 续跑（不新开、不传工单号）
                                  # 上面三条都支持 --orchestrator <会话id>：绑到发起方会话（不传取 MCP_VM_CONVERSATION_ID）
 foreman clean <owner/name>#N     # 合并关单后清 worktree / 分支 / 工作会话（幂等）

@@ -1,4 +1,6 @@
 // 提示词与结果采集：执行会话只提交代码并给普通最终回复，业务结论由编排智能体判断。
+import fs from "node:fs"
+import path from "node:path"
 import { slugify } from "./util.mjs"
 import { builtinPrompt } from "./builtin-prompts.mjs"
 
@@ -7,6 +9,34 @@ export const FINAL_REPLY_SPEC = `结束时直接给出最终回复，用自然�
 - 跑过哪些测试及结果；跑不了就说明原因；
 - 未能完成时，写清缺少的信息、阻塞原因或下一步建议。
 最终结果由编排智能体结合提交、diff、测试和工单统一判断。`
+
+// 从原 checkout 而不是 worktree 读根目录约定：worktree 可能基于较旧基线，原工程约定以 repos[].dir 为准。
+// 没有文件或空文件时不占提示词；文件存在但读失败要停止派单，不能悄悄丢掉工程约定。
+export function originalAgentDocs(repos = []) {
+  const sections = []
+  for (const repo of repos) {
+    const dir = String(repo?.dir ?? "").trim()
+    if (!dir) continue
+    const file = path.join(dir, "AGENTS.md")
+    let content
+    try {
+      content = fs.readFileSync(file, "utf8")
+    } catch (e) {
+      if (e?.code === "ENOENT") continue
+      throw new Error(`读原工程 AGENTS.md 失败：${file}（${e.message}）`)
+    }
+    if (!content.trim()) continue
+    sections.push(`### ${String(repo?.repo ?? repo?.name ?? dir).trim()}\n源文件：${file}\n\n${content.trim()}`)
+  }
+  if (!sections.length) return ""
+  return `原工程 AGENTS.md（按工程遵守；工作区内更深层目录的约定仍按目录层级适用）：\n\n${sections.join("\n\n")}`
+}
+
+export function withAgentDocs(text, docs = "") {
+  const content = String(docs ?? "").trim()
+  if (!content) return text
+  return `${String(text ?? "").trim()}\n\n---\n\n${content}`
+}
 
 export function issueBranch(issue, title) {
   const hasCJK = /[\u3400-\u9fff]/.test(String(title ?? ""))
@@ -32,7 +62,6 @@ export function kickoff({ repo, issue, worktree, branch, base, workspaces, faile
     `改完就 commit，然后结束本轮：push、开 PR、合并、关工单、动 worktree 由外部流程接手。`,
     `提交信息用中文，首行写 “fix(#${issue.number}): <一句话>”，正文写清改法与验证方式；工作区保持干净，手上有改动就一并提交。`,
     `工单、分支、PR 用 Gitea CLI 查（只读）：gitea issue-view --repo ${repo} ${issue.number} 看工单与评论，gitea search --repo ${repo} 列工单，gitea pull-list --repo ${repo} 看相关 PR；令牌自动取（GITEA_TOKEN 或本机默认凭据文件）。查完就回到改代码、跑测试、commit；写工单、push、PR、合并、收口由外部流程执行。`,
-    `先读各仓库里的 AGENTS.md / docs/agents/ 约定（如果有），按仓库自己的规矩来。`,
     multi
       ? `改完必须自己在每个动过的工程里跑相关测试；某个工程跑不了就在最终回复里写清是哪个工程、为什么。`
       : `改完必须自己跑相关测试；跑不了就在最终回复里写清原因。`,

@@ -12,7 +12,7 @@ import fs from "node:fs"
 import { Book } from "./book.mjs"
 import { builtinPrompt } from "./builtin-prompts.mjs"
 import { nowIso, expandHome } from "./util.mjs"
-import { resume } from "./prompts.mjs"
+import { originalAgentDocs, resume, withAgentDocs } from "./prompts.mjs"
 import { git, worktreeRemove, statusPorcelain } from "./gitx.mjs"
 import * as realGitea from "./gitea.mjs"
 
@@ -361,14 +361,18 @@ export async function resumeWorker(ctx, { sessionId } = {}) {
   const repo = String(key).split("#")[0]
   const number = Number(String(key).split("#")[1])
   const ws = Array.isArray(rec.workspaces) ? rec.workspaces : []
-  const text = resume({
+  const workspaces = ws.length ? ws : rec.worktree ? [{ repo, branch: rec.branch ?? "", worktree: rec.worktree }] : []
+  const workspaceRepos = new Set(workspaces.map((w) => w.repo))
+  const docRepos = (cfg.repos ?? []).filter((r) => workspaceRepos.has(r.repo))
+  if (!docRepos.length) docRepos.push(...(cfg.repos ?? []).filter((r) => r.repo === repo))
+  const text = withAgentDocs(resume({
     issue: { number, title: String(rec.title ?? "") },
     attempt: Number(rec.attempts ?? 0) + 1,
     base: String((cfg.repos ?? []).find((r) => r.repo === repo)?.base ?? ""),
     failure: String(rec.lastFailure ?? ""),
     repo,
-    workspaces: ws.length ? ws : rec.worktree ? [{ repo, branch: rec.branch ?? "", worktree: rec.worktree }] : [],
-  })
+    workspaces,
+  }), originalAgentDocs(docRepos))
   await ctx.dws.steer(target, text)
   book.clearIdle(target)
   book.clearGone(target)

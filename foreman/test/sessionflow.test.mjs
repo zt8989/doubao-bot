@@ -197,10 +197,12 @@ test("dispatch：工作会话 id 绑到编排会话（账本 + 会话记录都�
     const cfg = mkCfg(dir)
     const repo = mkRepo(dir, "demo")
     cfg.repos = [repo]
+    fs.writeFileSync(path.join(repo.dir, "AGENTS.md"), "# 原工程约定\n统一使用 npm test 验证。\n")
     // 预置 worktree，让 createWorktree 走 reused，不碰真实 git。
     const wt = path.join(cfg.worktreeDir, repo.name, "fix-issue-7")
     fs.mkdirSync(wt, { recursive: true })
     fs.writeFileSync(path.join(wt, ".git"), "gitdir: .\n")
+    fs.writeFileSync(path.join(wt, "AGENTS.md"), "# 不应读取 worktree 里的替代约定\n")
 
     const issue = { number: 7, title: "镜像页", body: "", labels: [], assignees: [], url: "" }
     const dws = mkDws()
@@ -241,6 +243,9 @@ test("dispatch：工作会话 id 绑到编排会话（账本 + 会话记录都�
     assert.ok(!dws.calls.openNew[0].prompt.includes("【foreman · 编排会话 · 收到工单】"), "直接 dispatch 不能再让编排重复派单")
     assert.match(dws.calls.openNew[1].prompt, /编排智能体补充指令/)
     assert.match(dws.calls.openNew[1].prompt, /本单只需改 demo 的镜像页；不要改接口，完成后跑页面单测。/)
+    assert.match(dws.calls.openNew[1].prompt, /原工程 AGENTS\.md[\s\S]*# 原工程约定\n统一使用 npm test 验证。/)
+    assert.doesNotMatch(dws.calls.openNew[1].prompt, /不应读取 worktree 里的替代约定/)
+    assert.doesNotMatch(dws.calls.openNew[1].prompt, /先读各仓库里的 AGENTS|再读工作区里更深层的 AGENTS/, "由分配流程直接读原文，不提醒 agent 再读")
     assert.equal(dws.calls.steer.length, 0, "首次派单的编排指令要随首句进入，不能再补 steer")
     assert.equal(orchestratorTarget(book), "", "直接派单也不该创建全局编排")
     assert.deepEqual(workerOf(book, key).convId, out[0].convId)
@@ -262,6 +267,7 @@ test("再派一次同一张单：steer 同一条工作会话，不新开第二�
     const cfg = mkCfg(dir)
     const repo = mkRepo(dir, "demo")
     cfg.repos = [repo]
+    fs.writeFileSync(path.join(repo.dir, "AGENTS.md"), "# 重派也要携带的原工程约定\n")
     const wt = path.join(cfg.worktreeDir, repo.name, "fix-issue-7")
     fs.mkdirSync(wt, { recursive: true })
     fs.writeFileSync(path.join(wt, ".git"), "gitdir: .\n")
@@ -300,6 +306,7 @@ test("再派一次同一张单：steer 同一条工作会话，不新开第二�
     assert.match(dws.calls.steer[0].text, /单测没过/)
     assert.match(dws.calls.steer[0].text, /编排智能体补充指令/)
     assert.match(dws.calls.steer[0].text, /只修复失败单测暴露的问题，不要扩大改动范围。/)
+    assert.match(dws.calls.steer[0].text, /原工程 AGENTS\.md[\s\S]*# 重派也要携带的原工程约定/)
     assert.equal(second[0].resumed, true)
     assert.equal(issuePatches.length, 1, "右侧分支没变时重复派单不能重复 PATCH")
   } finally {
@@ -311,7 +318,9 @@ test("resume：只按工作会话 id 定位并 steer 续跑，绝不新开", asy
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-resume-"))
   try {
     const cfg = mkCfg(dir)
-    cfg.repos = [mkRepo(dir, "demo")]
+    const repo = mkRepo(dir, "demo")
+    cfg.repos = [repo]
+    fs.writeFileSync(path.join(repo.dir, "AGENTS.md"), "# 续跑也要携带的原工程约定\n")
     const book = new Book(cfg.stateFile)
     book.setIssue("yyzl/demo#7", {
       state: "failed",
@@ -331,6 +340,7 @@ test("resume：只按工作会话 id 定位并 steer 续跑，绝不新开", asy
     assert.equal(dws.calls.steer.length, 1)
     assert.equal(dws.calls.steer[0].target, "conv-worker-1")
     assert.match(dws.calls.steer[0].text, /单测没过/)
+    assert.match(dws.calls.steer[0].text, /原工程 AGENTS\.md[\s\S]*# 续跑也要携带的原工程约定/)
     assert.equal(new Book(cfg.stateFile).notified["conv-worker-1"].idle, false, "resume 必须唤醒监听，允许读取下一次 RESULT")
     assert.equal(new Book(cfg.stateFile).issue("yyzl/demo#7").state, "working")
   } finally {

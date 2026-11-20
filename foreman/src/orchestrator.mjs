@@ -15,7 +15,7 @@ import {
   statusPorcelain,
   worktreeRemove,
 } from "./gitx.mjs"
-import { decisionKickoff, doneComment, holdComment, issueBranch, kickoff, prBody, resume } from "./prompts.mjs"
+import { decisionKickoff, doneComment, holdComment, issueBranch, kickoff, originalAgentDocs, prBody, resume, withAgentDocs } from "./prompts.mjs"
 import { findWorkspace, reposForIssue, workspacePath } from "./workspaces.mjs"
 import { Book } from "./book.mjs"
 import { startOperation, finishOperation } from "./operations.mjs"
@@ -226,6 +226,7 @@ export async function handleIssue(ctx, repoCfg, summary) {
   // 默认只建主仓工作区；额外工程由编排通过 dispatch --repo 显式指定。
   // 正文里的工程名只作上下文，不再自动等同于改动范围；漏建由编排用 `foreman ws add` 补开。
   const targets = reposForIssue(issue, cfg.repos, repoCfg, { extraRepos: ctx.extraRepos ?? [] })
+  const agentDocs = originalAgentDocs(targets)
 
   // dry-run：只打印会建在哪、会发什么，零副作用。
   if (ctx.dryRun) {
@@ -244,7 +245,7 @@ export async function handleIssue(ctx, repoCfg, summary) {
           attempt: (prev.attempts ?? 0) + 1,
           lastFailure: prev.lastFailure ?? "",
         })
-    const prompt = withDispatchPrompt(basePrompt, dispatchPrompt)
+    const prompt = withDispatchPrompt(withAgentDocs(basePrompt, agentDocs), dispatchPrompt)
     log(
       `[dry-run] ${key}\n  工程 ${plan.length} 个：${plan.map((w) => `${w.repo} → ${w.worktree}（${w.branch}）`).join("；")}\n  会话：${name}\n  首句：\n${prompt}`
     )
@@ -343,7 +344,7 @@ export async function handleIssue(ctx, repoCfg, summary) {
   const boundTarget = bound.convId || bound.name || book.session(name)?.convId || ""
   let convId = bound.convId || book.session(name)?.convId || ""
   const resumeText = withDispatchPrompt(
-    resume({ issue, attempt, base: repoCfg.base, failure: prev.lastFailure ?? "", repo: repoCfg.repo, workspaces }),
+    withAgentDocs(resume({ issue, attempt, base: repoCfg.base, failure: prev.lastFailure ?? "", repo: repoCfg.repo, workspaces }), agentDocs),
     dispatchPrompt,
   )
   // 决策单首句：走另一套提示词，让 agent 自己判断要不要做、缺什么信息。
@@ -358,7 +359,7 @@ export async function handleIssue(ctx, repoCfg, summary) {
         attempt,
         lastFailure: prev.lastFailure ?? "",
       })
-  const kickoffText = withDispatchPrompt(baseKickoff, dispatchPrompt)
+  const kickoffText = withDispatchPrompt(withAgentDocs(baseKickoff, agentDocs), dispatchPrompt)
   try {
     if (boundTarget) {
       // 决策单续跑也发决策提示词：上一次的「继续改」口径会把 agent 又推回去直接写代码。
