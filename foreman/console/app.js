@@ -1228,18 +1228,6 @@ class FmConsole extends LitElement {
     return this
   }
 
-  // 左侧导航的吸附位置跟着顶栏真实高度走（顶栏一行 / 窄屏换行都能对上），
-  // 免得写死 px 让侧边栏在滚动第一下跳一下。
-  _syncTopbarHeight() {
-    const bar = this.querySelector("fm-head .topbar")
-    const h = bar ? Math.round(bar.getBoundingClientRect().height) : 0
-    if (h > 0) document.documentElement.style.setProperty("--fm-topbar-h", `${h}px`)
-  }
-
-  updated() {
-    this._syncTopbarHeight()
-  }
-
   connectedCallback() {
     super.connectedCallback()
     try {
