@@ -25,15 +25,15 @@ router agent决定接单时，每张工单都有**自己的一条编排智能体
               ↓（编排读工单，自己决定怎么派）
          dispatch：建一工程一工作区 + 开工作会话，会话 id 绑回编排（issues[键].agentConvId / .orchestrator）
               ↓
-         工作会话只改代码、自测、commit 并给普通最终回复；router agent发现收工后按需 watch poll
+         编码智能体改代码、自测、commit，push 非保护工作分支并开 PR；主智能体监听 PR 事件
               ↓
          状态与最终回复写入 task.update Inbox → Worker queue 给本单编排，不解析 RESULT、不自动开 PR
               ↓
-         编排核对提交、diff、测试与工单，统一决定 pr open / resume / pr merge / clean
+         主智能体触发对抗审查并原样汇总结论；阻断项交编码智能体修复，无阻断则发邮件通知验收
               ↓
          失败/卡住 → 编排先归因：原会话能修正才 resume <执行会话id>；需要协作就补派并登记归属
               ↓
-         编排核对 → pr merge（合并即关单）→ clean：清 worktree、本地分支、工作会话与监听（幂等）
+         人类/独立验收系统最终验收与合并（保护分支须人工批准和 CI 通过）→ clean 清 worktree、会话与监听
 ```
 
 - **按单独立**：router agent或人工接单时 `ensureIssueOrchestrator` 按工单幂等——这张单已有 `convId` 就复用，不重复开；不同工单绝不共用。确认原编排失联时才用 `foreman hand <键> --fresh` 重派独立编排。
@@ -74,8 +74,8 @@ dws 开会话，把工单 + 边界 + 普通最终回复要求一次发进去（�
 
 run 到这里就返回：**不在进程里等回复、不解析 RESULT、不验收、不 push/PR、不直接通知编排**。
 代码不再按 `pollSeconds` 定时读取执行会话；router agent发现会话已收工后按需执行 `foreman watch poll`，状态变化与普通最终回复写入 `task.update` Inbox。Worker 再 queue 给本单编排，成功投递后才消费回复指纹并标记 idle。
-是否已完成、是否 push/开 PR、续跑、合并、修改工单业务状态与收尾，都由编排智能体核对提交、diff、测试和工单后统一决定；Foreman 不根据最终回复自动补这些业务动作。
-`verify` / `publish` 的旧代码路径不作为当前入口；需要开 PR 时由编排显式执行 `foreman pr open`。
+编码智能体负责非保护分支 push 与 PR；主智能体负责监听 PR、触发对抗审查、原样汇总结论、发验收邮件和维护状态机，不代写代码、不开 PR、不合并。最终验收与合并由人类/独立验收系统完成，保护分支要求人工批准和 CI 通过；Foreman 不根据最终回复自动补这些业务动作。
+`verify` / `publish` 的旧代码路径不作为当前入口；编码智能体需要开 PR 时显式执行 `foreman pr open`。
 
 worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for-human` / `agent-blocked`），返回 blocked。
 
@@ -104,8 +104,8 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 - 会话层也分开：**派单会话**（`foreman-派单-<时间戳>`，读派单提示词，只做续跑/接单）与**合并会话**
   （`foreman-合并-<时间戳>`，读合并提示词，判断可合性 + 解冲突 + 直接执行 `foreman pr merge`）。账本 `sessions.kind` 记 `deliver:dispatch` / `deliver:merge`，
   `sessions.notice` 记触发类型。
-- 派单判定完一条会话，**不当场合并、不入队、不自动开 PR**：`watch poll` 只把最终回复交给所属编排；
-  编排核对后显式 `foreman pr open` / `foreman pr merge`，每次续跑仍使用原工作会话。
+- 派单侧收到最终回复时**不当场合并、不入队、不自动开 PR**：`watch poll` 只把最终回复交给所属编排；
+  编码智能体显式 push 非保护分支、调用 `foreman pr open`，主智能体再触发对抗审查与验收通知，每次续跑仍使用原工作会话。
 - 合并结果不另开会话、也不回执：`foreman pr merge` 触发的合并只落账本 + 控制台
   （`mergeAsk` / `mergeTask` / `pr_merge`），关单 / 清工作区 / 归档做完即收工。
   命令本身**同步回包**（`merged` / `alreadyMerged` / `closed` / `cleanup` / `worktree` / `elapsedMs` / `summary`），
@@ -342,7 +342,7 @@ router agent决定执行 `run` / `pickup` 时也会先读侧边栏，但**默认
 - `watch poll` 把 `running/gone/finished/settled` 状态写入 `task.update`；完成状态同时保留 `dws.info` 的普通最终回复原文，不解析 RESULT，也不把 finished/settled 当成工单完成。
 - 入箱时按 `issues[键].orchestrator` → 补派 `parent` / 显式 `notifyTo` → 全局编排 → router agent的顺序确定并固化归属；Worker 按事件里的归属 `dws msg --mode queue` 投递，不广播、不新建派单会话、不 steer。
 - 同一任务的 pending 更新合并为最新状态；不同任务逐条投递。失败保留事件并重试，重启由 SQLite 租约恢复；Worker 成功交给 dws 后才消费 `(会话, 指纹)` 并落 `idle`。
-- 编排收到最终回复后核对提交、diff、测试和工单，自行决定 `pr open`、`resume`、`pr merge`、`clean` 或修改工单业务状态。代码不自动 push、开 PR 或补业务结论。
+- 主智能体收到最终回复后核对交付并监听 PR，触发对抗审查、原样汇总结论、通知验收和维护状态机；编码智能体自行 push 非保护分支并 `pr open`，经主智能体 `resume` 后按审查意见修复。最终验收与合并由人类/独立验收系统完成，主智能体不代开 PR、不合并、不改审查结论。
 - notify 节点的暂停开关仍会阻止任务事件入箱；PR 扫描与验收邮件仍走各自 Inbox 事件。`--no-notify` 仍表示这一轮不登记监听，因此不会产生该执行会话的 `task.update`。
 
 ### 服务没在跑时，结论没人判

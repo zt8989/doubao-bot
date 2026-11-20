@@ -280,9 +280,9 @@ export function ticketText({ repo, issue, orchestrator = "", fresh = false } = {
     "",
     "下一步（你只做决策，不写代码）：",
     `1. foreman dispatch --issue ${key} --prompt "<工单分析、这条编码会话的任务范围、依赖与验收要求>" —— 建一工程一工作区、开工作会话，编排指令随首句进入，会话 id 会绑回这条会话；`,
-    `2. 工作会话只修改、测试、commit 并给普通最终回复（不输出 RESULT，不 push、不开 PR、不碰工单）；状态与最终回复会经 task.update Inbox 由 Worker queue 进来并带执行会话 id。失败先按编排提示词归因处理，需要原会话续跑时 foreman resume <执行会话id>（不要传工单号）；`,
-    `3. 最终回复不是业务结论。你核对提交、diff、测试和工单后，决定是否 push、是否 foreman pr open；Foreman 不会自动 push、自动开 PR 或自动推进工单业务状态；`,
-    `4. 核对 PR 后 foreman pr merge <N> --repo <PR 所在仓库>（合并即关单），合完 foreman clean --issue ${key}。`
+    `2. 编码智能体负责工作分支、修改、测试、commit、非保护分支 push 和 PR，填写模板、关联工单并附测试结果，不合并；状态与最终回复会经 task.update Inbox 由 Worker queue 进来并带执行会话 id。需要修复时 foreman resume <执行会话id>（不要传工单号）；`,
+    `3. 监听 PR 事件并触发对抗审查；原样汇总结构化问题与阻断/非阻断结论，有阻断就交编码智能体修复并复审，不修改审查结论；`,
+    `4. 无阻断后发邮件通知验收，最终验收与合并由人类/独立验收系统完成，保护分支要求人工批准和 CI 通过；确认合并后 foreman clean --issue ${key}。`
   )
   return lines.join("\n")
 }
@@ -391,11 +391,13 @@ export function nextStepLine({ issueKey = "", result = null, sessionId = "" } = 
       : Number(result?.pr)
         ? [{ repo: String(issueKey).split("#")[0], pr: Number(result.pr) }]
         : []
-    if (!prs.length) return `下一步：核对改动后 foreman pr merge <N> --repo <PR 仓库>；合完 foreman clean --issue ${issueKey}`
+    if (!prs.length) return "下一步：确认编码智能体已 push 并创建 PR；没有 PR 就把缺失原因退回原编码会话补齐，主智能体不代开。"
     return [
-      "下一步：逐条核对后 foreman pr merge <N> --repo <PR 所在仓库>（合并即关单）：",
-      ...prs.map((p) => `- ${p.repo}#${p.pr}：foreman pr merge ${p.pr} --repo ${p.repo}`),
-      `全合完：foreman clean --issue ${issueKey}`,
+      "下一步：逐条监听以下 PR 并触发对抗审查：",
+      ...prs.map((p) => `- ${p.repo}#${p.pr}`),
+      "原样汇总结构化问题与阻断/非阻断结论；有阻断就交编码智能体修复并复审，无阻断则发邮件通知验收。",
+      "最终验收与合并由人类/独立验收系统完成；保护分支须人工批准且 CI 通过，主智能体不合并。",
+      `确认全部 PR 已由人类/独立验收系统合并后：foreman clean --issue ${issueKey}`,
     ].join("\n")
   }
   if (status === "need_decision") {

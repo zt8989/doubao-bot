@@ -1,6 +1,6 @@
 ---
 name: foreman
-description: 接单编排 CLI（项目 foreman，命令 foreman）：**以工单绑定的编排会话为中心**——持久 Schedule 每 5 分钟筛选 open、指派给 `pickup.me` 且带 `ready-for-agent` 的工单，把候选写入 SQLite Inbox，不直接派单；router agent按实时容量和现有优先级对通知中的工单 `hand`，再由本单编排 `dispatch` 编码智能体。另有代码每 1 分钟轮询执行会话，Worker 先按事件 type 处理、无法识别时交路由 Agent，24 小时未成功投递才换会话。捞到工单用 `foreman hand` steer 给它；它再调 `foreman dispatch` 分配工作（建一工程一工作区 + 开工作会话，会话 id 绑回本单编排）。PR 扫描把他人候选写入 `pr.merge` Inbox，由 Worker 直接建合并助手会话（不经路由，`pr assign` 仅作人工补派），本人 UI 候选写入router agent Inbox，由它 `pr ui-assign` 在周晓亮、张振豪之间轮询指派验收并附 PR 链接。**标准工作会话不认识 foreman**：它只读工单、改工作区、跑测试、commit 并给普通最终回复（不 push、不开 PR、不碰工单、不输出 RESULT）；**决策会话例外**：先调研，确认可做后必须用 gitea 把本单切换为 `ready-for-agent` 并核验，再编码；不确定时仅用 `foreman send --type mail` 发邮件请用户决策。代码定时执行 `watch poll`，router agent或人工可补跑，只把收工（`finished`/`settled`）写成 `task.update` 事件（`running` 与 `gone` 只落本地账本、不投递，gone 多为正常归档），Worker 再 queue 给任务所属编排。是否开 PR、续跑、合并、修改工单业务状态与收尾全部由编排判断；push/建 PR 用 `foreman pr open`，合并走 `foreman pr merge`，合完 `foreman clean` 清 worktree 与会话。Gitea 的读、建单/改单/评论/关单、dws 会话、herdr 一律直连。**全链路异步**：`hand`/`dispatch`/`resume` 是投递动作，发出去就返回（秒级），工作会话常跑 30–60 分钟（实测 50 分钟）才 commit 收工——**派完就走，别等回复、别轮询会话、别重派**。当用户说自动接单、接工单、把工单派给豆包、看某条工单处理到哪、把卡住的单放回队列，或提到 foreman 时报 app_busy / locked / pr-open 时使用。**一工程一工作区**：跨工程的工单每个工程各建一个 worktree、各一条 PR，缺工程用 `foreman ws add` 现开。
+description: 接单编排 CLI（项目 foreman，命令 foreman）：**以工单绑定的编排会话为中心**——持久 Schedule 每 5 分钟筛选 open、指派给 `pickup.me` 且带 `ready-for-agent` 的工单，把候选写入 SQLite Inbox，不直接派单；router agent按实时容量和现有优先级对通知中的工单 `hand`，再由本单编排 `dispatch` 编码智能体。另有代码每 1 分钟轮询执行会话，Worker 先按事件 type 处理、无法识别时交路由 Agent，24 小时未成功投递才换会话。捞到工单用 `foreman hand` steer 给它；它再调 `foreman dispatch` 分配工作（建一工程一工作区 + 开工作会话，会话 id 绑回本单编排）。PR 扫描把他人候选写入 `pr.merge` Inbox，由 Worker 直接建合并助手会话（不经路由，`pr assign` 仅作人工补派），本人 UI 候选写入router agent Inbox，由它 `pr ui-assign` 在周晓亮、张振豪之间轮询指派验收并附 PR 链接。**标准工作会话只用 foreman 开 PR**：它读工单、改工作区、跑测试、commit，推送派单指定的非保护分支并用 `foreman pr open` 开 PR，填写模板、关联工单、附测试结果；不合并、不碰工单状态、不输出 RESULT；**决策会话例外**：先调研，确认可做后必须用 gitea 把本单切换为 `ready-for-agent` 并核验，再编码；不确定时仅用 `foreman send --type mail` 发邮件请用户决策。代码定时执行 `watch poll`，router agent或人工可补跑，只把收工（`finished`/`settled`）写成 `task.update` 事件（`running` 与 `gone` 只落本地账本、不投递，gone 多为正常归档），Worker 再 queue 给任务所属编排。编码智能体负责非保护分支 push 和 `foreman pr open`；主智能体负责派单、监听 PR、触发对抗审查、原样汇总结论、发验收邮件和维护状态机，不代写代码、不开 PR、不合并；最终验收与合并由人类/独立验收系统完成，确认合并后用 `foreman clean` 清 worktree 与会话。Gitea 的读、建单/改单/评论/关单、dws 会话、herdr 一律直连。**全链路异步**：`hand`/`dispatch`/`resume` 是投递动作，发出去就返回（秒级），工作会话常跑 30–60 分钟（实测 50 分钟）才 commit 收工——**派完就走，别等回复、别轮询会话、别重派**。当用户说自动接单、接工单、把工单派给豆包、看某条工单处理到哪、把卡住的单放回队列，或提到 foreman 时报 app_busy / locked / pr-open 时使用。**一工程一工作区**：跨工程的工单每个工程各建一个 worktree、各一条 PR，缺工程用 `foreman ws add` 现开。
 ---
 
 # foreman：接单编排
@@ -48,9 +48,9 @@ description: 接单编排 CLI（项目 foreman，命令 foreman）：**以工单
 | 交工单 | `foreman hand <owner/name>#N` | 把工单正文 steer 进编排会话，账本记 `handed`；不建工作区。确认原编排失联时才加 `--fresh` 重派独立编排 |
 | 分配工作 | `foreman dispatch <owner/name>#N --prompt "<编排指令>" [--repo <工程名|owner/name>]...` | **编排调用，提示词必填**：默认只建工单所在仓，额外工程必须重复传 `--repo`，正文提到依赖仓不会自动建；开工作会话后把会话 id 绑回编排。`--prompt` 注入工单分析、任务范围、依赖与验收要求，直接随派单首句进入（长指令用 `--file <路径>`），头部自动带完整工单 ID 与 URL；各原工程 `repos[].dir/AGENTS.md` 全文也随首句、重派和 `resume` 注入（文件存在且非空时）；留空拒绝派单。已派过就 steer 同一条续跑，注入内容也合进这条消息 |
 | 看链路 | `foreman orch show` | 每条编排会话（含发起方会话）绑了哪些工作会话、最近 steer 了什么 |
-| 收工后开 PR | 编排决策后 `foreman pr open` | 工作会话只给普通最终回复；编排核对提交与自测后决定 push/建 PR，PR 号/链接进账本（工作会话不碰这些） |
+| 收工后开 PR | 编码智能体 push 非保护工作分支并调用 `foreman pr open` | 填写 PR 模板、关联工单、附测试结果；PR 号/链接进账本，主智能体不代开 |
 | 失败续跑 | `foreman resume <执行会话id>` | 在**指定工作会话**里 `dws msg --mode steer`，**不新开、不传工单号** |
-| 合并 | `foreman pr merge <N> --repo R` | 合并即关单；结果 steer 回这条单的编排会话 |
+| 验收与合并 | 人类/独立验收系统 | 主智能体触发对抗审查、原样汇总结论并发验收邮件；保护分支要求人工批准和 CI 通过 |
 | 清尾 | `foreman clean <owner/name>#N`（或 `--all`） | 清 worktree、本地分支、工作会话、监听与这张单的编排会话（幂等；编排会话在正跑时留给服务下一轮收） |
 
 - 上表里 `hand` / `dispatch` / `resume` **全是异步投递**：命令返回（`handed` / `dispatched`）就等于这一步做完了，别接着等；从投递到普通最终回复回来常 30–60 分钟（见上面「异步」节）。
@@ -65,8 +65,8 @@ description: 接单编排 CLI（项目 foreman，命令 foreman）：**以工单
 
 | 动作 | 命令 | 为什么非它不可 |
 | --- | --- | --- |
-| 建 PR | 编排核对后 `foreman pr open` | 工作会话只 commit 并给普通最终回复；编排核对提交、diff 与测试后显式 push/开 PR。Foreman 负责账本与「哪条单、哪个工程」的对应，不再从最终回复自动触发 |
-| 合并 PR | `foreman pr merge` | 每张 PR 只合一次的幂等（`mergeAsk`）+ 合完一次收干净：工单 `done`、关单、摘执行会话监听、删 worktree 与本地分支；PR 已合（回 `EMPTY_RESULT`「无需重复合并」）也按已合并收尾，不当失败；日志/控制台/回包都写明 `工程 <仓库> · worktree <路径>`（没有工作区写「无 worktree」） |
+| 建 PR | 编码智能体 push 后 `foreman pr open` | 编码智能体填写模板、关联工单、附测试结果；主智能体不代开。Foreman 负责账本与「哪条单、哪个工程」的对应，不从最终回复自动触发 |
+| 合并 PR | 人类/独立验收系统执行 `foreman pr merge` | 主智能体与编码智能体不合并；每张 PR 只合一次的幂等（`mergeAsk`）+ 合完一次收干净：工单 `done`、关单、摘执行会话监听、删 worktree 与本地分支；PR 已合（回 `EMPTY_RESULT`「无需重复合并」）也按已合并收尾，不当失败；日志/控制台/回包都写明 `工程 <仓库> · worktree <路径>`（没有工作区写「无 worktree」） |
 | 补开工作区 | `foreman ws add` | 一工程一工作区：执行会话要改表外的工程，就现开一个工作区（幂等、记账本 `workspaces`），收尾才清得掉 |
 
 **其余一律直连，不经 foreman**：
@@ -97,7 +97,7 @@ description: 接单编排 CLI（项目 foreman，命令 foreman）：**以工单
 - **边界按工程写**：每个工程只在自己那条工作区里改；不许跨到别的工程目录、不许动各仓库主 checkout、不许动别的目录。
 - **PR 也按工程**：每个工程各自 push、各自 `foreman pr open --repo <该工程> --head <分支> --issue N --issue-repo <工单所在仓库>` 开一条；`--issue-repo` 账本靠它把几个工程的 PR 记到同一张单的 `prs[]` 上。
 - **收尾也按工程**：每条 PR 合完只清它自己那个工程的工作区；**所有工程的 PR 都合完才关单**（没合完的 close 节点只记一句「还有 n 个工程的 PR 没合」，工单继续 `pr-open`）。
-- **多工程 PR 逐条核对**：所有 PR 都由编排核对后逐条 `foreman pr merge`；代码不根据工作会话最终回复自动开 PR 或自动合并，半合时保留另一条 PR 与对应工作区继续处理。
+- **多工程 PR 逐条审查**：编码智能体逐工程 push 并开 PR；主智能体逐条触发对抗审查、原样汇总结论，阻断项交编码智能体修复。全部无阻断后通知人类/独立验收系统验收合并；半合时保留另一条 PR 与对应工作区继续处理。
 
 补开工作区的命令（跟建 PR、合并一样要经 foreman，因为要写账本）：
 
@@ -221,12 +221,12 @@ foreman doctor [--start]              # --start 才真的连豆包窗口读状�
 0. **会话中心（默认）先交给本单编排**：捞到单不直接建工作区，而是 `ensureIssueOrchestrator`（这张单独立一条编排会话，按单幂等）+ `dws msg --mode steer` 把工单交进去，账本记 `handed` 与 `orchestrator`；编排读完调 `foreman dispatch` 才走下面 2、3 步。失败/卡住由编排先归因：原会话可修正就 `foreman resume <执行会话id>`，需要其他智能体就补派并登记监听，完成后由 Worker queue 回原会话；合完调 `foreman clean`。
 1. `gitea search --label <id>` 拉 open 工单，按 `pickup` 过滤（排除人工标签、已处理的、到重试上限的），**三档排序**：我的（作者是 `pickup.me`）→ 无人认领 → 他人，同档最老先接（`pickup.priority` 可改顺序）。
 2. 默认只建工单所在仓；编排确认跨工程后，通过 `dispatch --repo <工程名|owner/name>` 显式声明的每个工程才各建一个工作区：`herdr worktree create --cwd <该工程> --branch fix/issue-N --base origin/<base> --path ~/.foreman/worktrees/<该工程>/fix-issue-N --no-focus`。**一个工程一个工作区，不合并、不共用；正文提到工程名不再自动预建。**分支建好后 PATCH 原工单的 `ref`，指定详情页右侧的分支 / Git 标签，不发评论；多工程统一写主仓分支，分支不变的重派不重复 PATCH。
-3. `dws open --name foreman-<工单所在仓库>-<N>` 发 kickoff：把工单正文、**每个工程的工作区与分支清单**、边界（**一工程一工作区：每个工程只在自己那条工作区里改，不许跨目录、不许动主 checkout；缺工作区就在最终回复写「缺工作区：<owner/name>」**）、**「改完就 commit 然后结束」**（不 push、不开 PR、不合并、不关工单、不动 worktree 与会话——**标准工作会话不认识 foreman，提示词里也不出现 foreman 命令**；决策会话是例外，先调研，确认可做后必须用 gitea 把本单切换为 `ready-for-agent` 并核验，再编码；不确定时仅用 `foreman send --type mail` 发邮件请用户决策；标准工作会话想读工单细节用 `gitea issue-view --repo <仓库> <N>` 只读）和普通最终回复要求一次写进去，**不要求 `<RESULT>`**。
+3. `dws open --name foreman-<工单所在仓库>-<N>` 发 kickoff：把工单正文、**每个工程的工作区与分支清单**、边界（**一工程一工作区：每个工程只在自己那条工作区里改，不许跨目录、不许动主 checkout；缺工作区就在最终回复写「缺工作区：<owner/name>」**）、编码交付职责一次写进去：修改、测试、commit，**只推送派单指定的非保护工作分支**，逐工程用 `foreman pr open` 开 PR，填写模板、关联工单并附测试结果，不合并、不关工单、不动 worktree 与会话；后续按主智能体转来的对抗审查意见修复并更新原 PR。决策会话仍先调研，确认可做后用 gitea 切换并核验 `ready-for-agent`，不确定时仅用 `foreman send --type mail` 请用户决策。普通最终回复说明改动、提交、PR 链接和测试结果，**不要求 `<RESULT>`**。
 4. **这一条是异步的，派完就结束**：返回 `dispatched` 即收工——**不等回复、不解析 RESULT、不验收、不重派**。会话本身要跑很久（30–60 分钟是常态，实测 50 分钟收工），期间别去 `dws status` 盯它。router agent发现会话已收工后按需 `foreman watch poll`，用 `dws info` 读取普通最终回复，和 `running/gone/finished/settled` 状态一起写入 `task.update` Inbox；Worker 再 `dws msg --mode queue` 投给这张单绑定的编排会话（补派任务回 parent，完全无归属的旧任务才回退router agent）。Worker 成功投递后才消费回复指纹并落 idle，重启由 SQLite 恢复。**Foreman 不自动 push、不自动开 PR、不推进工单业务状态。**
-5. 收口由编排统一判断：最终回复只是输入，finished/settled 不等于业务成功，没有 `<RESULT>` 也不等于失败。编排按需核对 commit、diff、测试与工单，再决定是否 push、逐工程 `foreman pr open`、续跑、补派、修改工单状态或问人。合并仍然只有一条路：核对后 `foreman pr merge`，**工作会话不 push、不开 PR、不合并**。UI 工单必须等两名测试同学验收，验收通过才会合并。
+5. 主智能体监听 PR 事件并触发对抗审查；对抗审查智能体只读 PR diff、工单验收标准和测试结果，独立输出结构化问题与阻断/非阻断结论。主智能体原样汇总，不修改结论；有阻断就交编码智能体修复、补测、push 更新原 PR 并复审，无阻断就发邮件通知验收。最终验收与合并由人类/独立验收系统完成，保护分支要求人工批准和 CI 通过；主智能体不切分支、不开 PR、不合并、不代写代码。
 6. 最终回复说明缺信息或受阻时，由编排决定改单、续跑或交人处理，**worktree 留着**；人处理完 `foreman retry <仓库> <N>` 放回队列。
 
-普通最终回复至少写清：改了什么与提交、跑过的测试及结果；跑不了或未完成时写明原因与下一步建议。不要输出固定 `<RESULT>` 或状态标签，业务结论由编排智能体统一判断。
+普通最终回复至少写清：改了什么、提交与 PR 链接、跑过的测试及结果；跑不了或未完成时写明原因与下一步建议。不要输出固定 `<RESULT>` 或状态标签；主智能体只汇总交付与审查结果，不修改对抗审查结论，最终验收与合并由人类/独立验收系统决定。
 
 ## 状态与文件
 
@@ -244,7 +244,7 @@ foreman doctor [--start]              # --start 才真的连豆包窗口读状�
 - **执行会话轮询与 router agent `router`**：`enabled` 默认 true，`intervalSeconds` 默认 60，`recreateAfterHours` 默认 24。持久 Schedule 直接运行 `src/service.mjs#pollOnce`，普通检查完成不写 Inbox，状态变化写 `task.update`；脚本路径、导出函数与参数可在设置页编辑。router Agent 仅按需处理手动路由和有效事件，接单仍按 `pickup.priority` 和 `maxRunning` 决策。独立 `pickup` Schedule 由 `pickup.auto` 开关、按 `pickup.cron` 扫描我的 `ready-for-agent` 工单并写候选 Inbox，不直接派单；手动「立即扫描」只绕过开关与工作时间窗。`pickup.kickAfterDone` 不再生效。
 - **Outbox / Lark**：`outbox.pollMs` 默认 1000、`retrySeconds` 30、`leaseSeconds` 120、`maxAttempts` 8；`lark.bin` 默认 `lark-cli`，`lark.as` 默认 `user`（可配 `bot`）。外发状态用 `foreman outbox list` 查，不凭入队返回宣称已送达。
 - **`pickup.labelIds` 必须是数字 id**：REST 的 `labels` 参数只认名字，foreman 内部按 `label-list` 把 id 翻成名字、再按 id 精确过滤；id 写错会直接报 `not_found`。查 id 用 `label-list`（`ready-for-agent` = 5）。
-- **合并只走 `foreman pr merge`**：自动合并通道与 merge 定时器已取消。非 UI 单由编排核对后显式合并；UI 单还要两名测试同学回复「验收通过」，router agent不得绕过。
+- **合并只走 `foreman pr merge`**：由人类/独立验收系统在最终验收后执行，保护分支要求人工批准和 CI 通过；主智能体与编码智能体不得调用。UI 单仍须两名测试同学回复「验收通过」，router agent 不得绕过。
 - **续接调度**：`planner` 只保留旧配置/账本兼容，无定时器、不自动接单；续接由router agent判断。
 - **接单三档**：`pickup.priority` 默认 `["mine","unassigned","others"]`，`pickup.me` 从配置读（自己的 Gitea 账号）；「我的」按工单作者（`creator`）认定。`onlyUnassigned: true` 会把「他人」整档排除。**在飞工单（账本 `working` 且无 `lastFailure`）不再被捞单**：续跑只由编排 AI / `foreman retry` 触发，否则每轮巡检都会给同一张单重发一次「继续处理」；只有派单失败（有 `lastFailure`）且 `attempts < maxAttempts` 的才会在router agent/人工显式处理候选时重试。**自动 pickup Schedule 不使用这三档候选池**：它只认 `assignees` 包含 `pickup.me`，作者是我也不能替代指派。
 - **会话中心默认开**：`sessionFlow.enabled`（默认 `true`）——router agent/人工接单时每张工单各有一条编排会话，命名为 `<deliver.namePrefix>-<仓库>-<单号>-编排` 并写入 `issues[键].orchestrator`；`promptFile` 留空用内置 `src/builtin/orchestrator-prompt.md`，`projectDir` 留空回落 `deliver.projectDir`，`waitFirstReply` 默认 `false`。`pickup.handToOrchestrator`（默认 `true`）= router agent确认接单后先 `hand` 给本单编排，由它调 `dispatch`。用户从当前会话主动派单则直接绑定当前会话。关掉这两个开关（或 `run --direct`）退回老的多会话模型；`deliver.mode=new` 只影响合并会话的创建方式（PR 扫描直投与 `pr assign` 补派都走这条），扫描本身不直接建派单会话。
@@ -264,10 +264,10 @@ foreman doctor [--start]              # --start 才真的连豆包窗口读状�
 | 派完半小时一条消息都没有 | **多半是正常**：工作会话跑 30–60 分钟（实测 50 分钟）才 commit 并给普通最终回复，异步就是要等 | 别重派、别守 `dws status`；`foreman tasks` / `foreman orch show` 看进度，确认代码轮询在跑（`foreman status`），收工后由它写 `task.update`，Worker 再把最终回复 queue 给所属编排 |
 | 工单一直没人接 | 看 `foreman tasks`；`needs-human`/`blocked`/`escalated`/`pr-open` 都已停 | 人处理完 `foreman retry <仓库> <N>` |
 | 派单不派了、一直 `slots-full` | 已有 2 张单在跑（`pickup.maxRunning`），槽位满 | `foreman tasks` 看是哪两张；跑完/`retry` 后再催 `foreman pickup` |
-| 合并不发生、`pr` 一直挂着 | 还没显式 `pr merge`，或 UI 验收人数不足/回复未收齐 | 非 UI 核对后 `foreman pr merge <N> --repo R`；UI 看 `foreman mail requests`，不得绕过两名测试同学验收 |
+| 合并不发生、`pr` 一直挂着 | 对抗审查仍有阻断、等待最终验收，或 UI 验收人数不足/回复未收齐 | 主智能体只汇总结论并通知验收；由人类/独立验收系统执行 `foreman pr merge <N> --repo R`，UI 看 `foreman mail requests`，不得绕过两名测试同学验收 |
 | 一条也捞不到 | `labelIds` 配的 id 不对、`excludeLabels` 命中、已指派且 `onlyUnassigned` | `foreman run --dry-run --once` 看"open N 条，可接 M 条"，顺带看它给每张单列了几个工程的工作区 |
 | 跨工程单交 `need_decision`「要求改另一个仓库」 | 首句把边界写死在单一 worktree（老行为），或工程没认出来 | 看 `foreman tasks` / 账本 `workspaces` 有几条；不够就 `foreman ws add --repo <工程> --issue <单号>` 补开，再 `foreman retry` 放回 |
-| 工单合了一条 PR 还是 `pr-open`、没关单 | 一工程一工作区：还有别的工程的 PR 没合 | `foreman ws list --issue <单号>` 看 `prs`；逐条 `foreman pr merge <N> --repo <该工程>`，全合完 close 节点才关单 |
+| 工单合了一条 PR 还是 `pr-open`、没关单 | 一工程一工作区：还有别的工程的 PR 没合 | `foreman ws list --issue <单号>` 看 `prs`；由人类/独立验收系统逐条验收合并，全合完 close 节点才关单 |
 | 工作会话失败后又冒出一条新会话 | 走的不是 `resume`（直接 `dispatch` 时账本没绑上） | `foreman orch show` 看 `agentConvId`；用 `foreman resume <执行会话id>`，它只 steer 指定会话 |
 | 编排会话收不到更新 | 工单没绑定 `issues[键].orchestrator`，或 `openNew` 没拿到 convId | `foreman orch show` 看这张单的 orchestrator；空就重新 `foreman hand <owner/name>#N`，让它新建/复用本单编排 |
 | `clean` 说 worktree 保留 | 工作区有未提交改动（不删别人正在写的东西） | 进 worktree 看一眼，commit 或确认无需后重跑 `foreman clean` |

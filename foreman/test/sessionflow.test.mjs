@@ -83,7 +83,7 @@ test("编排会话幂等：账本里已有 convId 就复用，绝不开第二条
     assert.equal(dws.calls.openNew.length, 1)
     assert.match(dws.calls.openNew[0].name, /编排/)
     assert.match(dws.calls.openNew[0].prompt, /agent 主动 dispatch 不限在跑上限/)
-    assert.match(dws.calls.openNew[0].prompt, /按工程拆分任务/)
+    assert.match(dws.calls.openNew[0].prompt, /主智能体：创建工单、分配任务/)
     assert.match(dws.calls.openNew[0].prompt, /技能调用时机/)
     assert.ok(!dws.calls.openNew[0].prompt.includes("同时在跑最多"))
     assert.equal(dws.calls.openNew[0].noWait, true)
@@ -121,8 +121,10 @@ test("hand：编排职责与工单合进首句一次发出，不 steer，账本�
     assert.match(dws.calls.openNew[0].prompt, /改 demo 的镜像页/)
     assert.match(dws.calls.openNew[0].prompt, /foreman resume <执行会话id>/)
     assert.match(dws.calls.openNew[0].prompt, /task\.update Inbox/)
-    assert.match(dws.calls.openNew[0].prompt, /是否 foreman pr open/)
-    assert.doesNotMatch(dws.calls.openNew[0].prompt, /foreman 自己 push|工作会话 commit 之后，foreman/)
+    assert.match(dws.calls.openNew[0].prompt, /编码智能体负责工作分支/)
+    assert.match(dws.calls.openNew[0].prompt, /触发对抗审查/)
+    assert.match(dws.calls.openNew[0].prompt, /最终验收与合并由人类\/独立验收系统完成/)
+    assert.doesNotMatch(dws.calls.openNew[0].prompt, /是否 foreman pr open|核对 PR 后 foreman pr merge/)
     assert.ok(!dws.calls.openNew[0].prompt.includes("resume --issue"), "首句不能教编排按工单号续跑")
 
     const rec = new Book(cfg.stateFile).issue("yyzl/demo#7")
@@ -364,8 +366,11 @@ test("失败处理提示：带会话 id，由编排归因选择补派、续跑�
     issueKey: "yyzl/demo#7",
     result: { status: "done", prs: [{ repo: "yyzl/demo", pr: 12 }] },
   })
-  assert.match(done, /foreman pr merge 12 --repo yyzl\/demo/)
+  assert.match(done, /对抗审查/)
+  assert.match(done, /发邮件通知验收/)
+  assert.match(done, /人类\/独立验收系统/)
   assert.match(done, /foreman clean --issue yyzl\/demo#7/)
+  assert.doesNotMatch(done, /foreman pr merge/)
 })
 
 test("pollOnce：工作会话最终回复经 Inbox/Worker queue 给所属编排", async () => {

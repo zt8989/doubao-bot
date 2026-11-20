@@ -1,7 +1,7 @@
 {
   "name": "foreman",
   "version": "0.1.0",
-  "description": "接单编排：gitea REST 读工单、herdr 开 worktree、dws 跑豆包会话；验收通过后 push 并开 PR",
+  "description": "接单编排：gitea REST 读工单、herdr 开 worktree、dws 跑豆包会话；编码智能体 push 非保护分支并开 PR，主智能体组织对抗审查与验收",
   "type": "module",
   "bin": {
     "foreman": "bin/foreman.mjs"

@@ -1,22 +1,23 @@
-// 提示词与结果采集：执行会话只提交代码并给普通最终回复，业务结论由编排智能体判断。
+// 提示词与结果采集：编码会话负责非保护分支 push 与 PR；主智能体编排审查，人类/独立验收系统最终合并。
 import fs from "node:fs"
 import path from "node:path"
 import { slugify } from "./util.mjs"
 import { builtinPrompt } from "./builtin-prompts.mjs"
 
 export const FINAL_REPLY_SPEC = `结束时直接给出最终回复，用自然语言写清三件事：
-- 改了什么、提交是什么；
+- 改了什么、提交与 PR 链接是什么；PR 未开成时写明原因；
 - 跑过哪些测试及结果；跑不了就说明原因；
 - 未能完成时，写清缺少的信息、阻塞原因或下一步建议。
-最终结果由编排智能体结合提交、diff、测试和工单统一判断。`
+主智能体只汇总交付与审查结果，不修改对抗审查结论；最终验收与合并由人类/独立验收系统决定。`
 
 export const WORKER_SKILL_SPEC = `技能调用时机：
 - 需要读取或核对工单、评论、标签或 PR 时调用 gitea 技能，只使用只读能力；
+- 需要创建 PR 时调用 foreman 技能，只使用 pr open；不得调用 PR 合并能力；
 - 需要与所属编排智能体或发起方会话沟通时调用 dws 技能，只联系所属编排或发起方，不直接联系其他编码智能体。`
 
 export const DECISION_SKILL_SPEC = `技能调用时机：
 - 需要读取或核对工单、评论、标签或 PR 时调用 gitea 技能；确认可以编码后，只用它修改本单标签，其它工单字段与无关标签保持原样；
-- 需要请用户决策时调用 foreman 技能，只使用 foreman send --type mail 发送邮件；
+- 需要请用户决策时调用 foreman 技能，只使用 foreman send --type mail 发送邮件；编码完成后只用 pr open 创建 PR，不得调用 PR 合并能力；
 - 需要与发起方会话沟通时调用 dws 技能，不直接联系其他编码智能体。`
 
 // 从原 checkout 而不是 worktree 读根目录约定：worktree 可能基于较旧基线，原工程约定以 repos[].dir 为准。
@@ -68,11 +69,13 @@ export function kickoff({ repo, issue, worktree, branch, base, workspaces, faile
   const rules = [
     `一工程一工作区：只在自己那条工作区里改（上面按工程列好了）；各仓库主 checkout 和其他目录保持原样。`,
     `要改的工程不在上面：停手，在最终回复里写清「缺工作区：<owner/name>」，工作区由外面补开。`,
-    `改完就 commit，然后结束本轮：push、开 PR、合并、关工单、动 worktree 由外部流程接手。`,
+    `使用派单给出的工作分支；需要创建时从对应的 origin/<base> 创建。只允许推送到派单指定的非保护工作分支，基线与保护分支保持原样。`,
+    `改完就 commit，然后结束本轮：每个动过的工程分别 push 并开 PR，填写 PR 模板、关联工单并附测试结果；用 foreman pr open 建 PR，跨工程带 --issue-repo <工单所在仓库>。不合并 PR，关工单与最终验收由外部流程接手。`,
     `提交信息用中文，首行写 “fix(#${issue.number}): <一句话>”，正文写清改法与验证方式；工作区保持干净，手上有改动就一并提交。`,
     multi
       ? `改完必须自己在每个动过的工程里跑相关测试；某个工程跑不了就在最终回复里写清是哪个工程、为什么。`
       : `改完必须自己跑相关测试；跑不了就在最终回复里写清原因。`,
+    `收到主智能体转来的审查意见后，按对抗审查意见修复，补跑测试并提交、推送，更新原 PR；不另开重复 PR。`,
   ]
   const lines = [
     `【工作会话 · ${key} · 第 ${attempt} 次】`,
@@ -124,7 +127,7 @@ export function decisionKickoff({ repo, issue, base, workspaces = [], labels = [
     `1. 先调用 gitea 技能读工单与评论，必要时翻代码，弄清目标、验收条件、改动范围和依赖。这一步只做调研，不改业务代码。`,
     `2. 信息不够、存在多种合理做法或方向不确定：保持工单标签和业务代码原状，写清调研结论、缺的信息、可选方案和你的推荐；可用 foreman send --type mail --to <已确认的用户邮箱> --subject "[待决策] ${key}" --body "<调研结论、待决策问题、可选方案和推荐>" 发邮件请用户决策，未得到决策前不进入编码。`,
     `3. 调研后确认确实能做、做法也明确：先调用 gitea 技能执行 issue-edit ${issue.number} --repo ${repo} --label-add ready-for-agent，并用 --label-remove 移除本单现有的 needs-info、needs-human、ready-for-human、wontfix、agent-blocked 状态标签；保留其它无关标签。重新读取工单，确认 ready-for-agent 已存在且 ready-for-human 已移除后，才能开始编码；标签切换或核验失败时停止编码并说明原因。`,
-    `4. 标签核验通过后，在指定工作区里实现，改完自己跑相关测试并 commit，结束本轮；push、开 PR、合并、关工单由外部流程接手。`,
+    `4. 标签核验通过后，在指定工作区里实现，改完自己跑相关测试并 commit，结束本轮；只允许推送到派单指定的非保护工作分支，并用 foreman pr open 创建 PR，填写 PR 模板、关联工单、附测试结果；不合并 PR，关工单与最终验收由外部流程接手。`,
     `5. 判断下来不该做（重复、已解决、方向不对）：说明理由并给出建议，工单状态与标签保持原状，由人工处理。`,
     `6. 这次没有人监听你跑完后的状态：调研结论、标签切换结果、疑问和建议都写在会话里，写清依据和下一步。`
   )
@@ -151,7 +154,8 @@ export function resume({ issue, attempt, base = "", failure = "", repo = "", wor
     `继续工单 #${issue.number}（第 ${attempt} 次尝试）。`,
     failure ? `上一次的问题：${failure}` : "上一次没有跑完，接着当前工作区状态继续，已完成的提交直接沿用。",
     `${where}。要改的工程还没有工作区：在最终回复里写清「缺工作区：<owner/name>」，改动落在指定工作区内。`,
-    `改完就 commit，然后结束本轮；push、开 PR、合并、关工单、worktree 由外部流程接手。`,
+    `按对抗审查意见修复；没有审查意见时接着当前工作区状态继续。改完就 commit、补跑测试，然后结束本轮。`,
+    `只允许推送到派单指定的非保护工作分支；已有 PR 就 push 更新原 PR，没有 PR 就用 foreman pr open 创建并填写模板、关联工单、附测试结果；跨工程带 --issue-repo <工单所在仓库>。不合并 PR，关工单与最终验收由外部流程接手。`,
     ``,
     WORKER_SKILL_SPEC,
     ``,
@@ -174,7 +178,7 @@ export function handoff({ repo, issue, worktree, branch, workspaces }) {
 
 // deliverPrompt：每次新建会话的首句 = 编排提示词（配置给了路径就读运行时副本，没给用内置的）
 // + 产品 + 监控项目 + 触发原因 + 本次通知正文。
-// 关键：这是**编排**提示词，新会话只决定「续跑 / 继续接单 / 判合并」，
+// 关键：这是**编排**提示词，新会话只决定「派单 / 续跑 / 触发审查 / 通知验收」，
 // 不是「编排提示词 + 去完成这张工单」——实现永远在执行会话里，不在这条投递会话里。
 export function deliverPrompt({ fixed = "", projectDir = "", product = "", kind = "", text = "", running = null, maxRunning = null, lane = "" } = {}) {
   const laneName = lane === "merge" ? "merge" : "dispatch"
@@ -229,7 +233,7 @@ export function prBody({ issue, summary, tests, commits, stat, base = "" }) {
     tests ? `- 测试：${tests}` : "- 测试：会话未报告，人工复核",
     ``,
     `## Merge Danger`,
-    `- 由接单会话自行 push 并开 PR；一工程一工作区，改动只落在该工程自己的 worktree 内，没有 force push、没有手改基线；foreman 不合并。`,
+    `- 编码智能体只推送非保护工作分支并创建、更新 PR，不合并；保护分支由人类/独立验收系统在人工批准且 CI 通过后合并。`,
     ``,
     `## 验收判据`,
     `- [x] 工作区干净（无未提交改动）`,

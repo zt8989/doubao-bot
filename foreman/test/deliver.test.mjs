@@ -41,7 +41,9 @@ test("readFixedPrompt：配置没给路径就用内置提示词；给了路径�
   try {
     // 没配 promptFile：用代码内置的派单提示词（不再要求外部 md）。
     assert.match(readFixedPrompt({}), /派单会话提示词/)
-    assert.match(readFixedPrompt({}), /最终回复由你统一判断/)
+    assert.match(readFixedPrompt({}), /不修改审查结论/)
+    assert.match(readFixedPrompt({}), /对抗审查智能体/)
+    assert.match(readFixedPrompt({}), /人类\/独立验收系统/)
     assert.match(readFixedPrompt({}, "", { lane: "merge" }), /合并助手/)
     assert.match(readFixedPrompt({}, "", { lane: "merge" }), /按通知给出的命令逐条合并/)
     assert.match(readFixedPrompt({}, "", { lane: "merge" }), /按回包内容直接汇报/)
@@ -64,6 +66,15 @@ test("内置智能体提示词只描述职责与技能调用时机", () => {
     assert.match(prompt, /## 职责/, `${name} 缺少职责说明`)
     assert.match(prompt, /## 技能调用时机/, `${name} 缺少技能调用时机`)
     assert.doesNotMatch(prompt, /每\s*\d+\s*分钟|定时任务|定时器|Schedule|cron/i, `${name} 不应描述具体定时任务`)
+    if (["orchestrator", "dispatch"].includes(name)) {
+      assert.match(prompt, /主智能体：创建工单、分配任务、监听 PR 事件、触发对抗审查、汇总审查结果、发邮件通知验收、维护状态机/, `${name} 主智能体职责不一致`)
+      assert.match(prompt, /不切分支、不提 PR、不合并、不修改审查结论、不代写代码/, `${name} 主智能体边界不一致`)
+      assert.match(prompt, /编码智能体：创建分支、提交代码、发起 PR、填写 PR 模板、关联工单、附测试结果；按审查意见修复/, `${name} 编码智能体职责不一致`)
+      assert.match(prompt, /只允许推送到非保护分支，不合并 PR/, `${name} 编码智能体边界不一致`)
+      assert.match(prompt, /对抗审查智能体：只读 PR diff、工单验收标准和测试结果，输出结构化问题与阻断\/非阻断结论/, `${name} 审查智能体职责不一致`)
+      assert.match(prompt, /不能改代码、不能提 PR、不能合并/, `${name} 审查智能体边界不一致`)
+      assert.match(prompt, /人类\/独立验收系统：最终验收与合并。保护分支要求人工批准和 CI 通过/, `${name} 验收职责不一致`)
+    }
   }
 })
 
@@ -170,7 +181,7 @@ test("deliverNewSession：没配固定提示词就用内置的，照常开会话
 
     assert.equal(calls.length, 1)
     assert.match(calls[0].prompt, /派单会话提示词/)
-    assert.match(calls[0].prompt, /最终回复由你统一判断/)
+    assert.match(calls[0].prompt, /不修改审查结论/)
     assert.match(calls[0].prompt, /监控项目：\/w\/win-ai-stack/)
     assert.equal(out.convId, "conv-builtin")
   } finally {

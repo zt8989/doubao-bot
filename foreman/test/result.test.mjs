@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { parseResult, issueBranch, kickoff } from "../src/prompts.mjs"
+import { parseResult, issueBranch, kickoff, resume } from "../src/prompts.mjs"
 
 test("取最后一个 RESULT 块（前面可能贴过历史块）", () => {
   const text = [
@@ -52,7 +52,7 @@ test("分支名：中文标题不加拼音 slug，英文标题加", () => {
   assert.equal(issueBranch({ number: 12 }, "add retry to cdp client"), "fix/issue-12-add-retry-to-cdp-client")
 })
 
-test("kickoff 写死一工程一工作区的边界（工作会话只 commit，不碰 foreman）", () => {
+test("kickoff 写死编码智能体职责：非保护分支 push、开 PR、按审查意见修复", () => {
   const p = kickoff({
     repo: "yyzl/win-ai-harness",
     issue: { number: 255, title: "沙盒模式", body: "正文" },
@@ -64,7 +64,11 @@ test("kickoff 写死一工程一工作区的边界（工作会话只 commit，�
   assert.match(p, /工作区：\/tmp\/wt\/fix-issue-255/)
   assert.match(p, /工单键：yyzl\/win-ai-harness#255/)
   assert.match(p, /改完就 commit/)
-  assert.match(p, /push、开 PR、合并、关工单、动 worktree 由外部流程接手/)
+  assert.match(p, /只允许推送到派单指定的非保护工作分支/)
+  assert.match(p, /foreman pr open/)
+  assert.match(p, /填写 PR 模板、关联工单并附测试结果/)
+  assert.match(p, /不合并 PR/)
+  assert.match(p, /按对抗审查意见修复/)
   assert.match(p, /缺工作区：<owner\/name>/)
   assert.match(p, /gitea 技能/)
   assert.match(p, /dws 技能/)
@@ -72,11 +76,25 @@ test("kickoff 写死一工程一工作区的边界（工作会话只 commit，�
   assert.match(p, /结束时直接给出最终回复/)
   assert.match(p, /直接给出最终回复/)
   assert.doesNotMatch(p, /<RESULT>/, "不再要求结构化 RESULT 协议")
-  // 工作会话不该知道 foreman 的任何东西
-  assert.ok(!/foreman/i.test(p), `工作会话提示词里不该出现 foreman：\n${p}`)
+  assert.doesNotMatch(p, /push、开 PR、合并、关工单、动 worktree 由外部流程接手/)
 })
 
-test("kickoff 多工程：每个工程一条工作区，不给 foreman 命令", () => {
+test("resume 保持编码智能体交付边界，并接续审查修复", () => {
+  const p = resume({
+    issue: { number: 255, title: "沙盒模式" },
+    attempt: 2,
+    repo: "yyzl/win-ai-harness",
+    workspaces: [{ repo: "yyzl/win-ai-harness", worktree: "/tmp/wt", branch: "fix/issue-255" }],
+    failure: "审查发现缺少异常分支测试",
+  })
+  assert.match(p, /只允许推送到派单指定的非保护工作分支/)
+  assert.match(p, /按对抗审查意见修复/)
+  assert.match(p, /更新原 PR/)
+  assert.match(p, /不合并 PR/)
+  assert.doesNotMatch(p, /push、开 PR、合并、关工单、worktree 由外部流程接手/)
+})
+
+test("kickoff 多工程：每个工程一条工作区、一条 PR，关联原工单", () => {
   const p = kickoff({
     repo: "yyzl/win-ai-harness",
     issue: { number: 284, title: "镜像页", body: "改 win-ai-harness/web 与 yyjz-oa-frontend/apps/admin" },
@@ -92,7 +110,9 @@ test("kickoff 多工程：每个工程一条工作区，不给 foreman 命令", 
   assert.match(p, /2\. yyzl\/yyjz-oa-frontend[\s\S]*工作区：\/w\/yyjz-oa-frontend\/fix-issue-284/)
   assert.match(p, /yyjz-oa-cloud：不是 git 仓库/)
   assert.match(p, /缺工作区：<owner\/name>/)
-  assert.ok(!/foreman|--issue-repo/i.test(p), `多工程提示词里也不该出现 foreman：\n${p}`)
+  assert.match(p, /每个动过的工程分别 push 并开 PR/)
+  assert.match(p, /--issue-repo/)
+  assert.match(p, /不合并 PR/)
 })
 
 test("RESULT 的 prs[]：一个工程一条，顺便补 pr / prUrl", () => {

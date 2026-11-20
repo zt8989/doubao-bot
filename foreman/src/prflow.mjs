@@ -1,6 +1,5 @@
-// 工作会话只负责「改完就 commit」：push 分支、开 PR 都由 foreman 补。
-// 这样工作会话完全不需要知道 foreman 的存在（它只读工单、改工作区、提交、结束），
-// PR 编号与链接由 foreman 记进账本，编排会话读到 PR 再决定合不合。
+// 编码智能体通过这里推送非保护工作分支并创建 PR。
+// PR 编号与链接由 foreman 记进账本，主智能体监听 PR、触发对抗审查，最终验收与合并交给人类/独立验收系统。
 import { Book } from "./book.mjs"
 import { prBody } from "./prompts.mjs"
 import { commitsAhead, diffStat, pushBranch, recentCommits, statusPorcelain } from "./gitx.mjs"
@@ -51,7 +50,7 @@ export async function openPrsForIssue(ctx, { issueKey, summary = "", tests = "" 
       const commits = await git.recentCommits(wt, repoCfg.base)
       const stat = await git.diffStat(wt, repoCfg.base)
       await git.pushBranch(wt, branch)
-      log(`${key}：已 push ${ws.repo} ${branch}（foreman 代工作会话推）`)
+      log(`${key}：已 push ${ws.repo} ${branch}（编码智能体通过 foreman 推送）`)
       const pr = await gitea.createPr({
         repo: ws.repo,
         base: repoCfg.base,
