@@ -795,8 +795,7 @@ class FmQueue extends LitElement {
             .page=${this.page || 1}
             .total=${this.total ?? rows.length}
             .pageSize=${this.pageSize || PAGE_SIZE}
-          ></fm-pagination>
-          <div class="panel-foot pagination-note">每 15 秒自动刷新 · 点击「详情」查看完整 payload</div>`
+          ></fm-pagination>`
           : html`<div class="empty">
               <div class="empty-title">${this.busy === "loading" ? `正在读取 ${title}…` : "当前分类没有记录"}</div>
               <div class="empty-sub">${kind === "outbox" ? "外发意图入队后会出现在这里" : "持久事件写入后会出现在这里"}</div>
@@ -1107,7 +1106,7 @@ class FmSchedules extends LitElement {
 
 /* ---------------- 操作日志 ---------------- */
 class FmOperations extends LitElement {
-  static properties = { operations: { attribute: false }, filter: { type: String } }
+  static properties = { operations: { attribute: false }, filter: { type: String }, page: { type: Number } }
   createRenderRoot() {
     return this
   }
@@ -1115,6 +1114,7 @@ class FmOperations extends LitElement {
     const all = this.operations || []
     const current = this.filter || "all"
     const rows = current === "all" ? all : all.filter((o) => o.status === current)
+    const paged = pageSlice(rows, this.page)
     const filters = [
       ["all", "全部"],
       ["running", "进行中"],
@@ -1137,9 +1137,9 @@ class FmOperations extends LitElement {
             </div>
           </div>
         </div>
-        ${rows.length ? html`
+        ${paged.rows.length ? html`
           <ul class="operation-list">
-            ${rows.map((o) => html`
+            ${paged.rows.map((o) => html`
               <li class=${"operation " + o.status}>
                 <span class="op-time mono">${o.startedAtClock || "—"}</span>
                 <span class=${"dot " + (o.status === "running" ? "on" : o.status === "failed" || o.status === "interrupted" ? "off" : "done")}></span>
@@ -1153,7 +1153,13 @@ class FmOperations extends LitElement {
                   <span class="pr-note">${o.finishedAtClock ? `结束 ${o.finishedAtClock}` : "仍在执行"}</span>
                 </div>
               </li>`)}
-          </ul>`
+          </ul>
+          <fm-pagination
+            scope="operations"
+            .page=${paged.page}
+            .total=${paged.total}
+            .pageSize=${PAGE_SIZE}
+          ></fm-pagination>`
           : html`<div class="empty"><div class="empty-title">这个分类下还没有操作日志</div><div class="empty-sub">派单或合并后会实时出现在这里</div></div>`}
       </section>`
   }
@@ -1194,6 +1200,7 @@ class FmConsole extends LitElement {
     completeNote: { type: String },
     completeError: { type: String },
     opFilter: { type: String },
+    opPage: { type: Number },
     schedBusy: { type: String },
     schedError: { type: String },
     schedNote: { type: String },
@@ -1241,6 +1248,7 @@ class FmConsole extends LitElement {
     this.completeNote = ""
     this.completeError = ""
     this.opFilter = "all"
+    this.opPage = 1
     this.schedBusy = ""
     this.schedError = ""
     this.schedNote = ""
@@ -1293,6 +1301,7 @@ class FmConsole extends LitElement {
     this._onScheduleRun = (e) => this.runScheduleNow(e.detail.id)
     this._onOpFilter = (e) => {
       this.opFilter = e.detail.filter
+      this.opPage = 1
     }
     this._onQueueFilter = (e) => {
       const kind = e.detail.queue === "outbox" ? "outbox" : "inbox"
@@ -1310,6 +1319,8 @@ class FmConsole extends LitElement {
         this.taskPage = Math.max(1, Number(page) || 1)
       } else if (scope === "candidates") {
         this.candidatePage = Math.max(1, Number(page) || 1)
+      } else if (scope === "operations") {
+        this.opPage = Math.max(1, Number(page) || 1)
       }
     }
     this.addEventListener("theme-set", this._onTheme)
@@ -1666,7 +1677,7 @@ class FmConsole extends LitElement {
           : this.view === "schedules"
           ? html`<fm-schedules .schedules=${this.schedules} .workHours=${this.workHours} .busy=${this.schedBusy} .error=${this.schedError} .note=${this.schedNote}></fm-schedules>`
           : this.view === "operations"
-          ? html`<fm-operations .operations=${this.operations} .filter=${this.opFilter}></fm-operations>`
+          ? html`<fm-operations .operations=${this.operations} .filter=${this.opFilter} .page=${this.opPage}></fm-operations>`
           : this.view === "inbox"
           ? html`<fm-queue
               kind="inbox"
