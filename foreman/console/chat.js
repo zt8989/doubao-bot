@@ -166,6 +166,9 @@ class FmChat extends LitElement {
           ?disabled=${this.busy}
           @input=${(event) => { this.draft = event.target.value }}
           @keydown=${(event) => {
+            // IME 组字时的 Enter 是选词上屏（keyCode 229 兼容部分 WebView），
+            // 不 preventDefault、不发送，交给输入法。
+            if (event.isComposing || event.keyCode === 229) return
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault()
               this.send()
