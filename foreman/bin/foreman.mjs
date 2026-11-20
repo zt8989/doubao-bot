@@ -101,6 +101,11 @@ const HELP = `foreman — 接单编排 + 常驻服务
   issue comment|close   评论/关单（可选：用它才会记账，直接 gitea 也行）
   --no-service  跳过自动握手与拉起（逃生口）
 
+测试环境：
+  FOREMAN_CONFIG_DIR=<目录> foreman serve
+              从该目录读取 config.json；未显式配置的 state、SQLite、pid、日志、端口文件与记忆目录都隔离到该目录。
+              监听端口仍由 config.json 的 service.http.port 配置；显式 -c <配置> 优先于环境目录。
+
 run 以编排会话为中心：捞到单先交给编排会话（dws msg --mode steer），由它调 foreman dispatch 分配工作；
 工作会话的状态变化与普通最终回复写入 task.update Inbox，Worker 再 queue 回这条编排会话；代码不解析 RESULT、
 不自动 push/开 PR。失败先由编排归因，原会话可修正时 foreman resume <执行会话id>，需要其他智能体协作时补派并登记监听。

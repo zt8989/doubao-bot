@@ -227,8 +227,16 @@ function merge(base, over) {
   return out
 }
 
-export function resolveConfigPath(explicit) {
+function configDirFromEnv(explicit, env) {
+  if (explicit && explicit !== true) return ""
+  const raw = String(env.FOREMAN_CONFIG_DIR ?? "").trim()
+  return raw ? path.resolve(expandHome(raw)) : ""
+}
+
+export function resolveConfigPath(explicit, env = process.env) {
   if (explicit && explicit !== true) return expandHome(explicit)
+  const configDir = configDirFromEnv(explicit, env)
+  if (configDir) return path.join(configDir, "config.json")
   const local = path.resolve("foreman.json")
   if (fs.existsSync(local)) return local
   return expandHome("~/.foreman/config.json")
@@ -252,8 +260,9 @@ export function normalizeRepos(cfg) {
   })
 }
 
-export function loadConfig(explicit) {
-  const file = resolveConfigPath(explicit)
+export function loadConfig(explicit, env = process.env) {
+  const configDir = configDirFromEnv(explicit, env)
+  const file = resolveConfigPath(explicit, env)
   let user = {}
   if (fs.existsSync(file)) {
     try {
@@ -266,6 +275,18 @@ export function loadConfig(explicit) {
   const cfg = merge(DEFAULTS, normalizedUser)
   // 旧 inspector 配置只作内存别名；新配置与公开文案使用 router。
   cfg.inspector = cfg.router
+  // 测试目录只替换未显式配置的运行路径；业务凭证与 worktree 仍按原配置共享。
+  if (configDir) {
+    const userService = isObj(normalizedUser.service) ? normalizedUser.service : {}
+    const userHttp = isObj(userService.http) ? userService.http : {}
+    const userMemory = isObj(normalizedUser.memory) ? normalizedUser.memory : {}
+    if (userMemory.dir === undefined) cfg.memory.dir = path.join(configDir, "memory")
+    if (userService.pidFile === undefined) cfg.service.pidFile = path.join(configDir, "foreman.pid")
+    if (userService.logFile === undefined) cfg.service.logFile = path.join(configDir, "service.log")
+    if (userHttp.portFile === undefined) cfg.service.http.portFile = path.join(configDir, "service.port")
+    if (userHttp.tokenFile === undefined) cfg.service.http.tokenFile = path.join(configDir, "console.token")
+    if (userHttp.db === undefined) cfg.service.http.db = path.join(configDir, "console.db")
+  }
   cfg.configPath = fs.existsSync(file) ? file : ""
   for (const key of ["pollSeconds", "timeoutMinutes", "maxAttempts", "perRepoPerRound"]) {
     const n = Number(cfg[key])
@@ -300,7 +321,7 @@ export function loadConfig(explicit) {
   if (!path.isAbsolute(cfg.stateFile)) cfg.stateFile = path.resolve(path.dirname(file), cfg.stateFile)
 
   // 服务三路径：同 stateFile 的解析规则（~ 展开；相对路径落到配置文件同目录）。
-  const baseDir = fs.existsSync(file) ? path.dirname(file) : process.cwd()
+  const baseDir = configDir || (fs.existsSync(file) ? path.dirname(file) : process.cwd())
 
   // 记忆目录按配置文件解析；长度上限必须为正数，避免 NaN 让写入校验静默失效。
   cfg.memory = isObj(cfg.memory) ? cfg.memory : {}
