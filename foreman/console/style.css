@@ -554,7 +554,7 @@ table.tasks tbody tr:hover { background: color-mix(in srgb, var(--accent) 4%, tr
 .pr-note { font-size: 11.5px; color: var(--dimmer); font-family: var(--mono); }
 
 /* ---------- 历史 ---------- */
-.day-wrap { display: flex; align-items: center; gap: 6px; }
+.meta-item.day-wrap { display: flex; align-items: center; gap: 6px; height: 33px; padding-top: 2px; padding-bottom: 2px; }
 
 .day-label { font-size: 11.5px; color: var(--dimmer); }
 
@@ -579,7 +579,7 @@ html[data-theme="dark"] .date-pick { color-scheme: dark; }
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
-.day-today { margin-left: 0; padding: 3px 8px; font-size: 11.5px; }
+.day-today { height: 26px; margin-left: 0; padding: 0 8px; font-size: 11.5px; line-height: 1; }
 .day-today.is-placeholder { visibility: hidden; pointer-events: none; }
 
 /* ---------- 扫描记录 ---------- */
