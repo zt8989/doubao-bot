@@ -224,7 +224,8 @@ test("服务里 prPoll：起服务后能手动跑一轮，状态里带 PR 计数
     assert.equal(r.notified, 1)
     assert.equal(opened.length, 1)
     assert.match(opened[0].prompt, /demo\/demo#4/)
-    assert.match(opened[0].prompt, /foreman pr assign 4 --repo demo\/demo/)
+    assert.match(opened[0].prompt, /foreman pr merge 4 --repo demo\/demo/)
+    assert.doesNotMatch(opened[0].prompt, /foreman pr assign 4 --repo demo\/demo/, "他人 PR 不再经路由中转")
 
     const again = await server.prPoll()
     assert.equal(again.notified, 0)
@@ -276,7 +277,7 @@ test("服务里 prPoll：sessionFlow 开启时 PR 仍只交router agent，不 st
   }
 })
 
-test("PR 扫描只把他人候选交给router agent，不直接创建合并助手", async () => {
+test("PR 扫描把他人候选直投合并会话，自己的和作者不明的仍在扫描阶段排除", async () => {
   const dir = tmpDir()
   try {
     const cfg = baseCfg(dir)
@@ -294,32 +295,34 @@ test("PR 扫描只把他人候选交给router agent，不直接创建合并助�
     const out = await prWatchOnce({
       cfg, gitea, dws: {}, log: () => {},
       inspect: async (text) => { inspected.push(text); return { ok: true, convId: "inspector-1" } },
-      deliver: async () => { delivered.push(true); return { convId: "merge-should-not-open" } },
+      deliver: async (args) => { delivered.push(args); return { session: "foreman-合并-72", convId: "merge-72" } },
     })
     assert.equal(out.notified, 1)
-    assert.equal(out.via, "inspector")
-    assert.equal(inspected.length, 1)
-    assert.match(inspected[0].text, /demo\/demo#72/)
-    assert.match(inspected[0].text, /foreman pr assign 72 --repo demo\/demo/)
-    assert.match(inspected[0].text, /233151.*不分配.*不合并/)
-    assert.doesNotMatch(inspected[0].text, /demo\/demo#70|demo\/demo#71/)
-    assert.doesNotMatch(inspected[0].text, /合并：foreman pr merge/)
-    assert.equal(delivered.length, 0, "扫描阶段不能新建合并助手")
+    assert.equal(out.via, "merge-direct")
+    assert.equal(inspected.length, 0, "他人 PR 不再惊动 router agent")
+    assert.equal(delivered.length, 1)
+    assert.match(delivered[0].text, /demo\/demo#72/)
+    assert.match(delivered[0].text, /foreman pr merge 72 --repo demo\/demo/)
+    assert.doesNotMatch(delivered[0].text, /demo\/demo#70|demo\/demo#71/)
+    assert.equal(delivered[0].kind, "PR待合并")
+    assert.equal(delivered[0].lane, "merge")
     const seen = new Book(cfg.stateFile).prSeen
     assert.equal(seen["demo/demo#70"].skipped, "self")
     assert.equal(seen["demo/demo#71"].skipped, "unknown-author")
-    assert.equal(seen["demo/demo#72"].notifiedTo, "inspector-1")
+    assert.equal(seen["demo/demo#72"].notifiedTo, "foreman-合并-72")
+    assert.equal(seen["demo/demo#72"].assignedTo, "foreman-合并-72")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test("服务 PR 扫描固定走router agent，即使配置了 deliver 也不直接建合并会话", async () => {
+test("服务 PR 扫描把他人 PR 直投合并会话，不再绕路由", async () => {
   const dir = tmpDir()
   try {
     const cfg = baseCfg(dir)
     cfg.deliver = { mode: "new" }
     const inspected = []
+    const delivered = []
     const ctx = {
       cfg,
       state: { pr: { polling: false, pollCount: 0, notifiedCount: 0, pending: 0 } },
@@ -330,12 +333,14 @@ test("服务 PR 扫描固定走router agent，即使配置了 deliver 也不直�
       },
       dws: {},
       notifyInspector: async (text) => { inspected.push(text); return { ok: true, convId: "inspector-1" } },
-      deliver: async () => { throw new Error("扫描不能直接 deliver 合并会话") },
+      deliver: async (args) => { delivered.push(args); return { session: "foreman-合并-73", convId: "merge-73" } },
     }
     const out = await prPollOnce(ctx)
     assert.equal(out.notified, 1)
-    assert.equal(out.via, "inspector")
-    assert.equal(inspected.length, 1)
+    assert.equal(out.via, "merge-direct")
+    assert.equal(inspected.length, 0, "他人 PR 不再经路由中转")
+    assert.equal(delivered.length, 1)
+    assert.equal(delivered[0].lane, "merge")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -454,7 +459,7 @@ test("pr assign：只给他人 PR 分配合并助手，自己的和作者不明�
   }
 })
 
-test("PR 候选遇到检查会话 busy 时不记已通知，下一轮继续补发", async () => {
+test("合并会话投递失败时不记已通知，下一轮继续补发", async () => {
   const dir = tmpDir()
   try {
     const cfg = baseCfg(dir)
@@ -464,7 +469,7 @@ test("PR 候选遇到检查会话 busy 时不记已通知，下一轮继续补�
     }
     const out = await prWatchOnce({
       cfg, gitea, dws: {}, log: () => {},
-      inspect: async () => ({ ok: true, skipped: "busy" }),
+      deliver: async () => { throw new Error("dws 打不开合并会话") },
     })
     assert.equal(out.notified, 0)
     assert.equal(out.failedNotify, true)

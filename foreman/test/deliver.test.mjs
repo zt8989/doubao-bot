@@ -207,7 +207,7 @@ test("prWatchOnce：给了 deliver 就新建会话投递，不再通知已有会
 
     const r = await prWatchOnce({ cfg, gitea, dws, log: () => {}, deliver })
     assert.equal(r.notified, 1)
-    assert.equal(r.via, "new-session")
+    assert.equal(r.via, "merge-direct")
     assert.equal(notified, 0, "不该再往已有会话里塞消息")
     assert.equal(delivered.length, 1)
     assert.match(delivered[0].text, /demo\/demo#2/)
@@ -215,7 +215,8 @@ test("prWatchOnce：给了 deliver 就新建会话投递，不再通知已有会
 
     const seen = new Book(cfg.stateFile).prSeen
     assert.equal(seen["demo/demo#2"].notifiedTo, "foreman-PR待合并-20261112-0905")
-    assert.equal(seen["demo/demo#2"].via, "new-session")
+    assert.equal(seen["demo/demo#2"].via, "merge-assistant")
+    assert.equal(seen["demo/demo#2"].assignedTo, "foreman-PR待合并-20261112-0905")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

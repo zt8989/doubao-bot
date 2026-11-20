@@ -1,5 +1,5 @@
-// PR 监听：代码定时扫 open PR 及其更新；候选只 queue 给 router agent，扫描不启动 Agent、不合 PR。
-// 他人候选走 pr assign，本人 UI 候选走 pr ui-assign；新增或编辑评论走 pr.updates，由 router agent 决策。
+// PR 监听：代码定时扫 open PR 及其更新。他人候选直投合并会话（不进路由），
+// 本人 UI 候选与新增/编辑评论才交 router agent（pr ui-assign / pr.updates 决策）。
 import crypto from "node:crypto"
 import { nowIso } from "./util.mjs"
 import { Book } from "./book.mjs"
@@ -335,35 +335,67 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
     fresh.push(...keep)
   }
 
+  // 两条通道各走各的：他人 PR 直投合并会话，一张单只过一次手，不再经路由中转；
+  // 本人 UI 候选与 PR 评论更新仍交 router agent 决策（要不要指派验收、评论变化怎么处理）。
+  const useMerge = fresh.length > 0 && typeof deliver === "function"
   const useInspect = typeof inspect === "function"
-  const usePush = !useInspect && typeof push === "function"
-  const useNew = !useInspect && !usePush && typeof deliver === "function"
+  const usePush = !useMerge && typeof push === "function"
   const uiToSend = useInspect ? uiFresh : []
   const updatedToSend = useInspect ? updatedFresh : []
+  // 没有合并通道时，他人候选仍退回路由中转（测试与旧调用方保持原行为）。
+  const freshByRouter = fresh.length > 0 && !useMerge && !usePush && useInspect
+
   if (!fresh.length && !uiToSend.length && !updatedToSend.length) {
     return { ok: true, checked, notified: 0, uiNotified: 0, updatedNotified: 0, conflicting, target, pending: uiFresh.length + updatedFresh.length }
   }
-  if (!useInspect && !usePush && !useNew && !target) {
+  if (!useMerge && !useInspect && !usePush && !target) {
     log("PR 扫描：有候选但找不到通知目标（账本里没有调用方会话），这轮不发，等有了再报")
     return { ok: true, checked, notified: 0, updatedNotified: 0, target: "", pending: fresh.length + updatedFresh.length }
   }
 
-  let sentTo = target
-  let convId = ""
-  try {
-    if (useInspect) {
-      const candidates = [...fresh, ...uiToSend]
-      const hasAssignmentCandidates = candidates.length > 0
+  const prJson = (list) => list.map((pr) => ({
+    key: pr.key, repo: pr.repo, number: Number(pr.number), title: String(pr.title ?? ""),
+    url: String(pr.url ?? ""), author: String(pr.author ?? ""), ui: pr.ui === true,
+  }))
+
+  // 1) 他人 PR：整批投一条合并会话。账本同时记 assignedTo，人工或路由再 pr assign 会幂等跳过。
+  let mergeTo = ""
+  let mergeConvId = ""
+  let mergeFailed = false
+  if (fresh.length) {
+    try {
+      if (useMerge) {
+        // 一轮跨多个仓库时取不到单一产品提示词，回落全局 deliver。
+        const repo = fresh.every((pr) => pr.repo === fresh[0].repo) ? fresh[0].repo : ""
+        const out = await deliver({ text: prNotifyText(fresh), kind: "PR待合并", repo, lane: "merge" })
+        mergeTo = String(out?.session ?? "").trim()
+        mergeConvId = String(out?.convId ?? "").trim()
+        if (!mergeTo) throw new Error("合并会话创建成功返回但没有会话名")
+      } else if (usePush) {
+        mergeTo = (await push(prNotifyText(fresh))) || target
+      } else if (!freshByRouter) {
+        mergeTo = target
+        await dws.notify(target, prNotifyText(fresh))
+      }
+    } catch (e) {
+      log(`PR 扫描：他人 PR 投递失败，下轮补发：${e.message}`)
+      mergeFailed = true
+    }
+  }
+
+  // 2) 本人 UI 候选与评论更新：只交 router agent；没有 inspect 时这轮不发。
+  const inspectCandidates = [...(freshByRouter ? fresh : []), ...uiToSend]
+  let inspectTo = ""
+  let inspectFailed = false
+  if (useInspect && (inspectCandidates.length || updatedToSend.length)) {
+    try {
       const out = await inspect({
-        type: hasAssignmentCandidates ? "pr.candidates" : "pr.updates",
-        text: [prInspectorText(fresh, cfg, uiToSend), prUpdateInspectorText(updatedToSend)].filter(Boolean).join("\n\n"),
+        type: inspectCandidates.length ? "pr.candidates" : "pr.updates",
+        text: [prInspectorText(freshByRouter ? fresh : [], cfg, uiToSend), prUpdateInspectorText(updatedToSend)].filter(Boolean).join("\n\n"),
         json: {
           checked,
           conflicting,
-          prs: candidates.map((pr) => ({
-            key: pr.key, repo: pr.repo, number: Number(pr.number), title: String(pr.title ?? ""),
-            url: String(pr.url ?? ""), author: String(pr.author ?? ""), ui: pr.ui === true,
-          })),
+          prs: prJson(inspectCandidates),
           updates: updatedToSend.map((pr) => ({
             key: pr.key, repo: pr.repo, number: Number(pr.number), title: String(pr.title ?? ""),
             url: String(pr.url ?? ""), author: String(pr.author ?? ""),
@@ -373,46 +405,50 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
         },
       })
       if (out?.ok === false || out?.skipped) throw new Error(out.error || `router agent接收 PR 候选失败：${out.skipped}`)
-      sentTo = String(out?.convId ?? out?.session ?? "").trim() || "router agent"
-      convId = String(out?.convId ?? "").trim()
-    } else if (usePush) {
-      // 会话中心：同一条编排会话读所有待合并 PR，不新建、不起第二条会话。
-      sentTo = (await push(prNotifyText(fresh))) || target
-    } else if (useNew) {
-      // 一轮可能跨多个仓库：全部来自同一个仓库才按产品取提示词，否则回落全局 deliver。
-      const repo = fresh.every((pr) => pr.repo === fresh[0].repo) ? fresh[0].repo : ""
-      const out = await deliver({ text: prNotifyText(fresh), kind: "PR待合并", repo, lane: "merge" })
-      sentTo = out?.session || out?.convId || ""
-      convId = String(out?.convId ?? "")
-    } else {
-      await dws.notify(target, prNotifyText(fresh))
+      inspectTo = String(out?.convId ?? out?.session ?? "").trim() || "router agent"
+    } catch (e) {
+      log(`PR 扫描：交给 router agent 失败，下轮补发：${e.message}`)
+      inspectFailed = true
     }
-  } catch (e) {
-    log(`PR 扫描：通知 ${sentTo || "新会话"} 失败，下轮补发：${e.message}`)
-    return { ok: true, checked, notified: 0, uiNotified: 0, updatedNotified: 0, conflicting, target, failedNotify: true, pending: fresh.length + uiToSend.length + updatedToSend.length }
   }
-  const via = useInspect ? "inspector" : usePush ? "steer-orchestrator" : useNew ? "new-session" : "existing"
+
+  // 只记真发出去的那部分；失败的下轮补发，不推进去重。
   const book2 = new Book(cfg.stateFile)
-  for (const pr of fresh) book2.markPrSeen(pr.key, { ...pr, notifiedTo: sentTo, via })
+  if (fresh.length && mergeTo && !mergeFailed) {
+    for (const pr of fresh) {
+      book2.markPrSeen(pr.key, {
+        ...pr, notifiedTo: mergeTo, via: useMerge ? "merge-assistant" : "orchestrator",
+        ...(useMerge ? { assignedTo: mergeTo, assignedConvId: mergeConvId, assignedAt: nowIso() } : {}),
+      })
+    }
+  }
   for (const pr of uiToSend) {
-    book2.markPrSeen(pr.key, { ...pr, skipped: "self", ui: true, reviewNotifiedTo: sentTo, via: "inspector-ui" })
+    if (inspectFailed) break
+    book2.markPrSeen(pr.key, { ...pr, skipped: "self", ui: true, reviewNotifiedTo: inspectTo, via: "inspector-ui" })
   }
   for (const pr of updatedToSend) {
-    book2.markPrSeen(pr.key, { ...pr, ...prUpdateBookFields(pr.updateSnapshot), updateRoutedTo: sentTo, via: "inspector-update" })
+    if (inspectFailed) break
+    book2.markPrSeen(pr.key, { ...pr, ...prUpdateBookFields(pr.updateSnapshot), updateRoutedTo: inspectTo, via: "inspector-update" })
   }
-  // 新建的投递会话登记进 notices：它报过的 PR 全合完之后由服务自动归档，
+  // 新建的合并会话登记进 notices：它报过的 PR 全合完之后由服务自动归档，
   // 不然这些「PR待合并」会话会一条条留在侧边栏里（既没人读、也没人收）。
-  // steer 进编排会话不新建会话，不登记 notices。
-  if (useNew && sentTo) {
-    book2.markNotice(sentTo, { name: sentTo, convId, kind: "PR待合并", prs: fresh.map((p) => p.key) })
+  if (useMerge && mergeTo && !mergeFailed) {
+    book2.markNotice(mergeTo, { name: mergeTo, convId: mergeConvId, kind: "PR待合并", prs: fresh.map((p) => p.key) })
   }
-  const inspectedPrs = [...fresh, ...uiToSend]
-  const routed = [...inspectedPrs, ...updatedToSend]
-  log(useInspect
-    ? `PR 扫描：${routed.length} 条候选已交给router agent ${sentTo} 处理（${routed.map((p) => `${p.repo}#${p.number}`).join("、")}）`
-    : `PR 扫描：${fresh.length} 条新 PR 已交给 ${sentTo || "编排会话"} 合并（${fresh.map((p) => `${p.repo}#${p.number}`).join("、")}）`)
+  if (mergeFailed || inspectFailed) log(`PR 扫描：部分投递失败，下轮补发（他人 PR ${mergeFailed ? "失败" : "正常"}、路由 ${inspectFailed ? "失败" : "正常"}）`)
+  else if (fresh.length && useMerge) log(`PR 扫描：${fresh.length} 条新 PR 已直投合并会话 ${mergeTo}（${fresh.map((p) => `${p.repo}#${p.number}`).join("、")}）`)
+
+  const delivered = (mergeFailed ? 0 : fresh.length) + (inspectFailed ? 0 : uiToSend.length + updatedToSend.length)
   return {
-    ok: true, checked, notified: routed.length, uiNotified: uiToSend.length, updatedNotified: updatedToSend.length, conflicting,
-    target: sentTo || target, via, prs: inspectedPrs.map((p) => p.key), updates: updatedToSend.map((p) => p.key), at: nowIso(),
+    ok: true, checked, notified: delivered,
+    uiNotified: inspectFailed ? 0 : uiToSend.length,
+    updatedNotified: inspectFailed ? 0 : updatedToSend.length,
+    conflicting,
+    target: mergeTo || inspectTo || target,
+    via: useMerge ? "merge-direct" : usePush ? "steer-orchestrator" : freshByRouter ? "inspector" : "existing",
+    failedNotify: mergeFailed || inspectFailed,
+    prs: [...(mergeFailed ? [] : fresh), ...(inspectFailed ? [] : uiToSend)].map((p) => p.key),
+    updates: inspectFailed ? [] : updatedToSend.map((p) => p.key),
+    at: nowIso(),
   }
 }

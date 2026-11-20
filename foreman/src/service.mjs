@@ -1271,7 +1271,8 @@ export async function pickupPollOnce(ctx, { force = false } = {}) {
   }
 }
 
-// PR 扫描一轮：配置里每个仓库列 open PR → 过滤作者 → 去重 → 只通知 router agent 分配。
+// PR 扫描一轮：配置里每个仓库列 open PR → 过滤作者 → 去重 → 他人 PR 直投合并会话，
+// 本人 UI 候选与评论更新才写 router agent Inbox。
 // force 是页面上的「立即执行」：即使 prWatch.enabled 是 false（默认关）也扫这一轮。
 export async function prPollOnce(ctx, { force = false } = {}) {
   const { state, cfg, dws, gitea, log } = ctx
@@ -1287,8 +1288,8 @@ export async function prPollOnce(ctx, { force = false } = {}) {
     state.pr.target = target
     let out
     try {
-      // 扫描结果只交 router agent；合并助手由它显式 pr assign，代码不直接新建。
-      out = await prWatchOnce({ cfg, gitea, dws, log, target, inspect: notifyRouter })
+      // 他人 PR 直投合并会话，一张单只过一次手；本人 UI 候选与评论更新才交 router agent。
+      out = await prWatchOnce({ cfg, gitea, dws, log, target, inspect: notifyRouter, deliver: ctx.deliver })
     } catch (e) {
       log(`PR 扫描失败：${e.message}`)
       return { ok: false, error: e.message }
