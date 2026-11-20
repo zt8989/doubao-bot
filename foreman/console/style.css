@@ -936,8 +936,6 @@ footer {
   color: var(--dimmer);
 }
 
-.dot-sep { color: var(--line); }
-
 .ghost {
   margin-left: auto;
   appearance: none;

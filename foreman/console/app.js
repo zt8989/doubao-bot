@@ -1114,31 +1114,15 @@ class FmOperations extends LitElement {
 /* ---------------- 页脚 ---------------- */
 class FmFoot extends LitElement {
   static properties = {
-    data: { attribute: false },
     busy: { type: String },
   }
   createRenderRoot() {
     return this
   }
   render() {
-    const d = this.data
-    const st = d?.storage
     const btnText = this.busy === "busy" ? "扫描中…" : this.busy === "ok" ? "已同步" : this.busy === "fail" ? "同步失败" : "立即扫描"
     return html`
       <footer>
-        <span>数据源 · ${st ? `${st.driver} · ${st.file.split("/").pop()}` : "—"}</span>
-        <span class="dot-sep">·</span>
-        <span>账本更新 · ${d?.generatedAtClock || "—"}</span>
-        <span class="dot-sep">·</span>
-        <span>快照生成 · ${d?.generatedAtClock || "—"}</span>
-        <span class="dot-sep">·</span>
-        <span>
-          ${st ? `SQLite · 去重键 ${st.uniqueKey} · 快照 ${st.rows.polls} 次` : "SQLite · —"}
-        </span>
-        <span class="dot-sep">·</span>
-        <span>
-          ${`API · /api/snapshot · ${d?.isToday === false ? `${d.day} · ` : ""}${d?.tasks?.length ?? 0} 单 / ${d?.prs?.length ?? 0} PR`}
-        </span>
         <button class="ghost" ?disabled=${this.busy === "busy"} @click=${() => emit(this, "refresh")}>
           ${btnText}
         </button>
@@ -1722,7 +1706,7 @@ class FmConsole extends LitElement {
               </section>`}
         </main>
       </div>
-      <fm-foot .data=${this.data} .busy=${this.busy}></fm-foot>`
+      <fm-foot .busy=${this.busy}></fm-foot>`
   }
 }
 
