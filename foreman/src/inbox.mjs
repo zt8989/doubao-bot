@@ -112,10 +112,15 @@ export class InboxStore {
     if (!String(kind || "").trim()) throw new Error("Inbox 事件缺少 kind")
     const at = iso(now)
     if (dedupeKey) {
-      const duplicate = this.db.prepare(`SELECT id FROM agent_inbox WHERE dedupe_key = ? AND status IN ${ACTIVE} LIMIT 1`).get(dedupeKey)
+      // PR 扫描会重放同一候选；done 的 pr.candidates 事件也必须挡重，
+      // 防止 state.json 游标失效时同一通知在下一轮重新入队。
+      const prNotice = kind === "router.notice" && payload?.type === "pr.candidates"
+      const statuses = prNotice ? "('pending', 'processing', 'done')" : ACTIVE
+      const duplicate = this.db.prepare(`SELECT id, status FROM agent_inbox WHERE dedupe_key = ? AND status IN ${statuses} ORDER BY id DESC LIMIT 1`).get(dedupeKey)
       if (duplicate) {
-        const id = this.insert({ kind, text, payload, dedupeKey, coalesceKey, availableAt, expiresAt, status: "dropped", reason: "duplicate" }, at)
-        return { id, status: "dropped", reason: "duplicate", duplicateOf: Number(duplicate.id) }
+        const reason = duplicate.status === "done" ? "duplicate-delivered" : "duplicate"
+        const id = this.insert({ kind, text, payload, dedupeKey, coalesceKey, availableAt, expiresAt, status: "dropped", reason }, at)
+        return { id, status: "dropped", reason, duplicateOf: Number(duplicate.id) }
       }
     }
     let superseded = 0

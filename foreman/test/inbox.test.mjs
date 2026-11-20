@@ -44,6 +44,29 @@ test("同一 Schedule 连续到期只保留最新事件，旧事件标记 supers
   assert.deepEqual(batch.map((event) => event.id), [latest.id])
 })
 
+test("PR 通知 done 后同键不再入队，避免每轮扫描重复投递", () => {
+  const { store } = fixture()
+  const payload = { type: "pr.candidates", text: "同一条 PR 通知", json: { prs: [] } }
+  const dedupeKey = "router:notice:3fd5a1b43bf3cecd2391369bbfd3a7a4b9a821a007f114c6df7dc17cdaf9c7ac"
+  const first = store.enqueue({ kind: "router.notice", text: "同一条 PR 通知", payload, dedupeKey })
+  store.complete([first.id])
+
+  const duplicate = store.enqueue({ kind: "router.notice", text: "同一条 PR 通知", payload, dedupeKey })
+  assert.equal(duplicate.status, "dropped")
+  assert.equal(duplicate.reason, "duplicate-delivered")
+  assert.equal(store.list().filter((event) => event.status === "pending").length, 0)
+})
+
+test("普通通知 done 后仍允许同键再次入队", () => {
+  const { store } = fixture()
+  const first = store.enqueue({ kind: "router.notice", text: "每日巡检", dedupeKey: "daily:summary" })
+  store.complete([first.id])
+
+  const next = store.enqueue({ kind: "router.notice", text: "每日巡检", dedupeKey: "daily:summary" })
+  assert.equal(next.status, "pending")
+  assert.notEqual(next.id, first.id)
+})
+
 test("Worker 丢弃过期事件，并把巡检与多条 PR 通知合成一次运行", async () => {
   const { store } = fixture()
   store.enqueue({ kind: "inspector", availableAt: "2026-11-19T00:00:00.000Z", expiresAt: "2026-11-18T23:59:00.000Z" })
