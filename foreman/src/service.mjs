@@ -35,7 +35,7 @@ import { acceptanceGate, detectUiChange, mailPollOnce, requestAcceptance, mailAc
 import { inflightIssues } from "./planner.mjs"
 import { routerOnce } from "./router.mjs"
 import { dreamOnce } from "./dreaming.mjs"
-import { listPulls, mergePr, closeIssue, createPr, commentIssue } from "./gitea.mjs"
+import { listPulls, viewPr, mergePr, closeIssue, createPr, commentIssue } from "./gitea.mjs"
 import { ConsoleStore } from "./console.mjs"
 import { InboxStore, AgentWorker, ScheduleRunner } from "./inbox.mjs"
 import { OutboxStore, OutboxDispatcher } from "./outbox.mjs"
@@ -703,7 +703,7 @@ export async function pickIssue(ctx, { repo = "", number = 0 } = {}) {
 // 起服务：HTTP 单通道（CLI 的 RPC + 控制台页面同一个端口），端口写到文件里给 CLI 读。
 // book 参数只用于初始加载，poll/write 时一律 new Book 重开。
 // gitea 只在 PR 监听里用，测试可直接注入假的 { listPulls }。
-export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea = { listPulls, mergePr, closeIssue, createPr, commentIssue }, mail = null }) {
+export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea = { listPulls, viewPr, mergePr, closeIssue, createPr, commentIssue }, mail = null }) {
   const paths = servicePaths(cfg)
   fs.mkdirSync(path.dirname(paths.pidFile), { recursive: true })
   fs.mkdirSync(path.dirname(paths.logFile), { recursive: true })

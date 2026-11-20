@@ -61,6 +61,13 @@ export class Book {
       assignedTo: pr.assignedTo ?? prev.assignedTo ?? "",
       assignedConvId: pr.assignedConvId ?? prev.assignedConvId ?? "",
       assignedAt: pr.assignedAt ?? prev.assignedAt ?? "",
+      // 代码扫描 PR 更新的状态指纹；只有路由成功才推进变化后的指纹。
+      updateFingerprint: pr.updateFingerprint ?? prev.updateFingerprint ?? "",
+      updateHeadSha: pr.updateHeadSha ?? prev.updateHeadSha ?? "",
+      updateLatestCommentId: pr.updateLatestCommentId ?? prev.updateLatestCommentId ?? "",
+      updatePrUpdatedAt: pr.updatePrUpdatedAt ?? prev.updatePrUpdatedAt ?? "",
+      updateRoutedTo: pr.updateRoutedTo ?? prev.updateRoutedTo ?? "",
+      updateRoutedAt: pr.updateRoutedTo ? nowIso() : prev.updateRoutedAt ?? "",
       merged: pr.merged ?? prev.merged ?? false,
       mergeError: pr.mergeError ?? prev.mergeError ?? "",
     }

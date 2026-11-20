@@ -546,6 +546,66 @@ test("prWatchOnce：filterConflicts=false 时冲突单照报", async () => {
   }
 })
 
+test("prWatchOnce：代码检测 PR 更新，首次建基线，变化后交 router agent 决策且不重复", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = baseCfg(dir)
+    const view = {
+      repo: "demo/demo", number: 400, title: "统一列宽", author: "233151", state: "open",
+      url: "http://x/pulls/400", mergeable: true, headSha: "head-a", updatedAt: "2026-11-20T01:26:31Z",
+      comments: [{ id: 6986, author: "ywwb1797", body: "验证没问题，可以合并" }],
+    }
+    const gitea = {
+      listPulls: async () => [{ repo: "demo/demo", number: 400, title: "统一列宽", author: "233151", url: "http://x/pulls/400", state: "open" }],
+      viewPr: async () => view,
+    }
+    const inspected = []
+    const inspect = async (event) => { inspected.push(event); return { ok: true, convId: "router-1" } }
+
+    let out = await prWatchOnce({ cfg, gitea, dws: {}, log: () => {}, inspect })
+    assert.equal(out.updatedNotified, 0, "首次扫描只建立基线，不路由历史状态")
+    assert.equal(inspected.length, 0)
+    assert.ok(new Book(cfg.stateFile).prSeen["demo/demo#400"].updateFingerprint)
+
+    out = await prWatchOnce({ cfg, gitea, dws: {}, log: () => {}, inspect })
+    assert.equal(out.updatedNotified, 0, "相同状态指纹不重复通知")
+    assert.equal(inspected.length, 0)
+
+    view.comments = [...view.comments, { id: 6987, author: "ywwb1328", body: "补充：验收通过" }]
+    view.updatedAt = "2026-11-20T01:31:31Z"
+    out = await prWatchOnce({ cfg, gitea, dws: {}, log: () => {}, inspect })
+    assert.equal(out.updatedNotified, 1)
+    assert.equal(inspected.length, 1)
+    assert.equal(inspected[0].type, "pr.updates")
+    assert.match(inspected[0].text, /demo\/demo#400/)
+    assert.match(inspected[0].text, /新评论/)
+    assert.match(inspected[0].text, /补充：验收通过/)
+    assert.match(inspected[0].text, /是否合并、是否关闭关联 issue 由你决定/)
+    assert.deepEqual(inspected[0].json.updates[0].changes, ["新评论"])
+    assert.equal(inspected[0].json.updates[0].headSha, "head-a")
+
+    out = await prWatchOnce({ cfg, gitea, dws: {}, log: () => {}, inspect })
+    assert.equal(out.updatedNotified, 0)
+    assert.equal(inspected.length, 1, "已路由的评论不重复通知")
+
+    view.headSha = "head-b"
+    view.updatedAt = "2026-11-20T01:36:31Z"
+    out = await prWatchOnce({ cfg, gitea, dws: {}, log: () => {}, inspect })
+    assert.equal(out.updatedNotified, 0, "单纯提交变化不通知 router agent")
+    assert.equal(inspected.length, 1)
+
+    view.comments = [...view.comments, { id: 6988, author: "ywwb1328", body: "新提交后再次验收" }]
+    view.updatedAt = "2026-11-20T01:41:31Z"
+    out = await prWatchOnce({ cfg, gitea, dws: {}, log: () => {}, inspect })
+    assert.equal(out.updatedNotified, 1)
+    assert.equal(inspected.length, 2)
+    assert.deepEqual(inspected[1].json.updates[0].changes, ["新评论"])
+    assert.equal(inspected[1].json.updates[0].headSha, "head-b")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("prWatch.enabled=false 时整条路径不跑", async () => {
   const dir = tmpDir()
   try {

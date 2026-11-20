@@ -1,5 +1,6 @@
-// PR 监听：定时扫 open PR；他人候选走 pr assign 合并助手，本人 UI 候选走 pr ui-assign 验收指派。
-// 两类候选都只 queue 给router agent；扫描器自身不指派、不建合并会话、不合 PR。
+// PR 监听：代码定时扫 open PR 及其更新；候选只 queue 给 router agent，扫描不启动 Agent、不合 PR。
+// 他人候选走 pr assign，本人 UI 候选走 pr ui-assign；新增或编辑评论走 pr.updates，由 router agent 决策。
+import crypto from "node:crypto"
 import { nowIso } from "./util.mjs"
 import { Book } from "./book.mjs"
 import { uiFilesChanged, uiPatterns } from "./mailflow.mjs"
@@ -164,6 +165,61 @@ export function prInspectorText(prs = [], cfg = {}, uiPrs = []) {
   return lines.join("\n")
 }
 
+// 代码扫描 PR 评论：首次只建基线；之后新增或编辑评论才交 router agent，单纯提交变化不通知。
+// 这里只生成事实与变化类型，不判断是否应该合并。
+export function prUpdateSnapshot(pr = {}, view = {}) {
+  const v = Array.isArray(view) ? view[0] : view
+  const comments = (Array.isArray(v?.comments) ? v.comments : []).map((comment) => ({
+    id: String(comment?.id ?? ""),
+    author: String(comment?.author ?? comment?.user?.login ?? ""),
+    body: String(comment?.body ?? comment?.bodyMd ?? ""),
+    authoredAt: String(comment?.authoredAt ?? comment?.created_at ?? ""),
+  }))
+  const latest = comments.at(-1)
+  const snapshot = {
+    headSha: String(v?.headSha ?? v?.head?.sha ?? pr?.headSha ?? ""),
+    updatedAt: String(v?.updatedAt ?? v?.updated_at ?? pr?.updatedAt ?? ""),
+    latestCommentId: String(latest?.id ?? ""),
+    comments: comments.slice(-3),
+  }
+  snapshot.fingerprint = crypto.createHash("sha256").update(JSON.stringify(comments)).digest("hex")
+  return snapshot
+}
+
+function prUpdateBookFields(snapshot) {
+  return {
+    updateFingerprint: snapshot.fingerprint,
+    updateHeadSha: snapshot.headSha,
+    updateLatestCommentId: snapshot.latestCommentId,
+    updatePrUpdatedAt: snapshot.updatedAt,
+  }
+}
+
+export function prUpdateChanges(seen = {}, snapshot) {
+  if (String(seen?.updateLatestCommentId ?? "") !== snapshot.latestCommentId) return ["新评论"]
+  return ["评论更新"]
+}
+
+export function prUpdateInspectorText(prs = []) {
+  if (!prs.length) return ""
+  const lines = [
+    "【Foreman · router agent · PR 更新】",
+    "代码已检测到下列 open PR 相对上次扫描发生变化；扫描过程没有启动 Agent，也没有执行合并。是否合并、是否关闭关联 issue 由你决定。",
+  ]
+  for (const pr of prs) {
+    lines.push("")
+    lines.push(`· ${pr.repo}#${pr.number} ${pr.title ?? ""}`.trim())
+    if (pr.url) lines.push(`  链接：${pr.url}`)
+    lines.push(`  变化：${pr.changes.join("、")}`)
+    if (pr.updateSnapshot.headSha) lines.push(`  head：${pr.updateSnapshot.headSha}`)
+    for (const comment of pr.updateSnapshot.comments) {
+      lines.push(`  评论 #${comment.id || "未知"} ${comment.author || "未知"}：${comment.body}`)
+    }
+    lines.push(`  若你决定合并：foreman pr merge ${pr.number} --repo ${pr.repo}`)
+  }
+  return lines.join("\n")
+}
+
 // 有冲突的 PR 不合也不报：pr-view 的 mergeNote / mergeable 判定，冲突的单记 skipped=conflict，
 // 下轮还会再查（冲突解掉后自动恢复正常通知）。
 export function isConflicting(view) {
@@ -190,6 +246,7 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
 
   const fresh = []
   const uiFresh = []
+  const updatedFresh = []
   let checked = 0
   for (const repoCfg of cfg.repos ?? []) {
     for (let page = 1; page <= maxPages; page++) {
@@ -207,6 +264,20 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
         const key = prKey(repo, pr.number)
         const seen = book.prSeen[key]
         const item = { ...pr, repo, key, seen }
+        // 所有 open PR 都由代码检测更新，包括本人 PR；首次仅建基线，变化指纹在投递成功后才推进。
+        if (pw.routeUpdates !== false && typeof gitea.viewPr === "function") {
+          try {
+            const view = await gitea.viewPr(repo, pr.number)
+            const snapshot = prUpdateSnapshot(item, view)
+            if (!seen?.updateFingerprint) {
+              book.markPrSeen(key, { ...item, ...prUpdateBookFields(snapshot) })
+            } else if (seen.updateFingerprint !== snapshot.fingerprint) {
+              updatedFresh.push({ ...item, updateSnapshot: snapshot, changes: prUpdateChanges(seen, snapshot) })
+            }
+          } catch (e) {
+            log(`PR 更新检查 ${key} 失败，下轮重试：${e.message}`)
+          }
+        }
         if (isOwnPr(item, cfg, book)) {
           // 本人 PR 不走合并助手；只有确认涉及 UI 时才交router agent做验收指派。
           if (seen?.reviewNotifiedAt || seen?.reviewAssignedAt) continue
@@ -268,12 +339,13 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
   const usePush = !useInspect && typeof push === "function"
   const useNew = !useInspect && !usePush && typeof deliver === "function"
   const uiToSend = useInspect ? uiFresh : []
-  if (!fresh.length && !uiToSend.length) {
-    return { ok: true, checked, notified: 0, uiNotified: 0, conflicting, target, pending: uiFresh.length }
+  const updatedToSend = useInspect ? updatedFresh : []
+  if (!fresh.length && !uiToSend.length && !updatedToSend.length) {
+    return { ok: true, checked, notified: 0, uiNotified: 0, updatedNotified: 0, conflicting, target, pending: uiFresh.length + updatedFresh.length }
   }
   if (!useInspect && !usePush && !useNew && !target) {
     log("PR 扫描：有候选但找不到通知目标（账本里没有调用方会话），这轮不发，等有了再报")
-    return { ok: true, checked, notified: 0, target: "", pending: fresh.length }
+    return { ok: true, checked, notified: 0, updatedNotified: 0, target: "", pending: fresh.length + updatedFresh.length }
   }
 
   let sentTo = target
@@ -281,15 +353,22 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
   try {
     if (useInspect) {
       const candidates = [...fresh, ...uiToSend]
+      const hasAssignmentCandidates = candidates.length > 0
       const out = await inspect({
-        type: "pr.candidates",
-        text: prInspectorText(fresh, cfg, uiToSend),
+        type: hasAssignmentCandidates ? "pr.candidates" : "pr.updates",
+        text: [prInspectorText(fresh, cfg, uiToSend), prUpdateInspectorText(updatedToSend)].filter(Boolean).join("\n\n"),
         json: {
           checked,
           conflicting,
           prs: candidates.map((pr) => ({
             key: pr.key, repo: pr.repo, number: Number(pr.number), title: String(pr.title ?? ""),
             url: String(pr.url ?? ""), author: String(pr.author ?? ""), ui: pr.ui === true,
+          })),
+          updates: updatedToSend.map((pr) => ({
+            key: pr.key, repo: pr.repo, number: Number(pr.number), title: String(pr.title ?? ""),
+            url: String(pr.url ?? ""), author: String(pr.author ?? ""),
+            headSha: pr.updateSnapshot.headSha, updatedAt: pr.updateSnapshot.updatedAt,
+            changes: pr.changes, comments: pr.updateSnapshot.comments,
           })),
         },
       })
@@ -310,13 +389,16 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
     }
   } catch (e) {
     log(`PR 扫描：通知 ${sentTo || "新会话"} 失败，下轮补发：${e.message}`)
-    return { ok: true, checked, notified: 0, uiNotified: 0, conflicting, target, failedNotify: true, pending: fresh.length + uiToSend.length }
+    return { ok: true, checked, notified: 0, uiNotified: 0, updatedNotified: 0, conflicting, target, failedNotify: true, pending: fresh.length + uiToSend.length + updatedToSend.length }
   }
   const via = useInspect ? "inspector" : usePush ? "steer-orchestrator" : useNew ? "new-session" : "existing"
   const book2 = new Book(cfg.stateFile)
   for (const pr of fresh) book2.markPrSeen(pr.key, { ...pr, notifiedTo: sentTo, via })
   for (const pr of uiToSend) {
     book2.markPrSeen(pr.key, { ...pr, skipped: "self", ui: true, reviewNotifiedTo: sentTo, via: "inspector-ui" })
+  }
+  for (const pr of updatedToSend) {
+    book2.markPrSeen(pr.key, { ...pr, ...prUpdateBookFields(pr.updateSnapshot), updateRoutedTo: sentTo, via: "inspector-update" })
   }
   // 新建的投递会话登记进 notices：它报过的 PR 全合完之后由服务自动归档，
   // 不然这些「PR待合并」会话会一条条留在侧边栏里（既没人读、也没人收）。
@@ -325,11 +407,12 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
     book2.markNotice(sentTo, { name: sentTo, convId, kind: "PR待合并", prs: fresh.map((p) => p.key) })
   }
   const inspectedPrs = [...fresh, ...uiToSend]
+  const routed = [...inspectedPrs, ...updatedToSend]
   log(useInspect
-    ? `PR 扫描：${inspectedPrs.length} 条候选已交给router agent ${sentTo} 处理（${inspectedPrs.map((p) => `${p.repo}#${p.number}`).join("、")}）`
+    ? `PR 扫描：${routed.length} 条候选已交给router agent ${sentTo} 处理（${routed.map((p) => `${p.repo}#${p.number}`).join("、")}）`
     : `PR 扫描：${fresh.length} 条新 PR 已交给 ${sentTo || "编排会话"} 合并（${fresh.map((p) => `${p.repo}#${p.number}`).join("、")}）`)
   return {
-    ok: true, checked, notified: inspectedPrs.length, uiNotified: uiToSend.length, conflicting,
-    target: sentTo || target, via, prs: inspectedPrs.map((p) => p.key), at: nowIso(),
+    ok: true, checked, notified: routed.length, uiNotified: uiToSend.length, updatedNotified: updatedToSend.length, conflicting,
+    target: sentTo || target, via, prs: inspectedPrs.map((p) => p.key), updates: updatedToSend.map((p) => p.key), at: nowIso(),
   }
 }
