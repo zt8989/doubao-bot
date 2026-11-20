@@ -140,7 +140,6 @@ class FmChat extends LitElement {
     }
     const pendingMessages = this.conversation?.pendingMessages || []
     return html`<section class="panel chat-panel">
-      <div class="chat-transport">Inbox 持久化 · Worker 串行投递 · Router Agent 会话</div>
       <div class="chat-messages" aria-live="polite">
         ${messages.length ? messages.map((message) => this.renderMessage(message)) : html`
           <div class="chat-empty">
