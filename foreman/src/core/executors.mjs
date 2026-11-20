@@ -5,11 +5,21 @@ import { builtinPrompt } from "../builtin-prompts.mjs"
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 
+// 入口脚本按绝对路径回导这个包：FOREMAN_HOME 指向当前运行副本（dist 或源码），
+// 转发脚本 import 到的就是同一个模块实例，不会另起一份、把 Book 之类的类判断串掉。
+process.env.FOREMAN_HOME ??= PACKAGE_ROOT
+
+// 脚本型定时任务的入口脚本不在包内：单独一个目录、单独做本地版本，由 foreman 按绝对路径加载。
+// 换机器/换目录用环境变量 FOREMAN_SCHEDULE_DIR 覆盖。
+export const SCHEDULE_SCRIPT_DIR = String(
+  process.env.FOREMAN_SCHEDULE_DIR || "/Users/zhouteng/Documents/workspace/doubao-bot/schedules"
+).replace(/\/+$/, "")
+
 const SCRIPT_DEFAULTS = {
-  pickup: { path: "src/service.mjs", exportName: "pickupPollOnce", args: {} },
-  prWatch: { path: "src/service.mjs", exportName: "prPollOnce", args: {} },
-  mail: { path: "src/mailflow.mjs", exportName: "mailPollOnce", args: {} },
-  router: { path: "src/service.mjs", exportName: "pollOnce", args: {} },
+  pickup: { path: `${SCHEDULE_SCRIPT_DIR}/pickup.mjs`, exportName: "pickupPollOnce", args: {} },
+  prWatch: { path: `${SCHEDULE_SCRIPT_DIR}/prwatch.mjs`, exportName: "prPollOnce", args: {} },
+  mail: { path: `${SCHEDULE_SCRIPT_DIR}/mail.mjs`, exportName: "mailPollOnce", args: {} },
+  router: { path: `${SCHEDULE_SCRIPT_DIR}/router.mjs`, exportName: "pollOnce", args: {} },
 }
 
 const object = (value) => value && typeof value === "object" && !Array.isArray(value)

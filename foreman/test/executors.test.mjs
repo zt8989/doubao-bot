@@ -3,18 +3,26 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { agentExecutor, runConfiguredScript, scriptExecutor } from "../src/core/executors.mjs"
+import { pathToFileURL } from "node:url"
+import { agentExecutor, runConfiguredScript, scriptExecutor, SCHEDULE_SCRIPT_DIR } from "../src/core/executors.mjs"
 
 const cfg = () => ({ prWatch: {}, mail: {}, router: {} })
 
-test("执行器默认配置与实际 PR、邮件脚本入口一致", async () => {
+test("执行器默认配置指向独立的定时脚本目录，导出函数与脚本一致", async () => {
   const config = cfg()
+  const pickup = scriptExecutor(config, "pickup")
   const pr = scriptExecutor(config, "prWatch")
+  const router = scriptExecutor(config, "router")
   const mail = scriptExecutor(config, "mail")
-  assert.deepEqual(pr, { path: "src/service.mjs", exportName: "prPollOnce", args: {} })
-  assert.deepEqual(mail, { path: "src/mailflow.mjs", exportName: "mailPollOnce", args: {} })
-  assert.equal(typeof (await import("../src/service.mjs"))[pr.exportName], "function")
-  assert.equal(typeof (await import("../src/mailflow.mjs"))[mail.exportName], "function")
+  assert.deepEqual(pickup, { path: `${SCHEDULE_SCRIPT_DIR}/pickup.mjs`, exportName: "pickupPollOnce", args: {} })
+  assert.deepEqual(pr, { path: `${SCHEDULE_SCRIPT_DIR}/prwatch.mjs`, exportName: "prPollOnce", args: {} })
+  assert.deepEqual(router, { path: `${SCHEDULE_SCRIPT_DIR}/router.mjs`, exportName: "pollOnce", args: {} })
+  assert.deepEqual(mail, { path: `${SCHEDULE_SCRIPT_DIR}/mail.mjs`, exportName: "mailPollOnce", args: {} })
+  for (const exec of [pickup, pr, router, mail]) {
+    assert.ok(path.isAbsolute(exec.path), `脚本路径必须是绝对路径：${exec.path}`)
+    const mod = await import(pathToFileURL(exec.path).href)
+    assert.equal(typeof mod[exec.exportName], "function")
+  }
   assert.equal(agentExecutor(config).custom, false)
   assert.ok(agentExecutor(config).prompt.length > 100)
 })
