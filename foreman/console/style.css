@@ -973,8 +973,9 @@ html[data-theme="dark"] .date-pick { color-scheme: dark; }
 .ghost:disabled { opacity: 0.7; cursor: default; }
 
 /* ---------- Chat：Inbox → Worker → Router Agent ---------- */
-fm-chat { display: flex; flex: 1; min-height: 0; }
-.chat-panel { width: 100%; margin: 0; padding: 0; display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: hidden; }
+main.is-chat { padding: 0; gap: 0; overflow: hidden; scrollbar-gutter: auto; }
+fm-chat { display: flex; flex: 1; width: 100%; min-height: 0; }
+.chat-panel { width: 100%; margin: 0; padding: 0; display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: hidden; border: 0; border-radius: 0; box-shadow: none; }
 .chat-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 24px 12px; }
 .chat-head h2 { margin: 0; font-size: 20px; }
 .chat-head .eyebrow { margin-bottom: 3px; color: var(--dimmer); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
@@ -999,7 +1000,7 @@ fm-chat { display: flex; flex: 1; min-height: 0; }
 .chat-event { margin: 0 auto 14px; max-width: 90%; color: var(--dim); font-size: 11px; text-align: center; }
 .chat-event summary { cursor: pointer; }
 .chat-event pre { margin: 8px 0 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; }
-.chat-composer { margin: 0 20px 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); overflow: hidden; }
+.chat-composer { margin: 0; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: var(--panel); overflow: hidden; }
 .chat-composer textarea { display: block; width: 100%; min-height: 82px; padding: 14px; border: 0; border-radius: 0; outline: none; background: transparent; color: var(--text); font: 13px/1.6 inherit; resize: none; }
 .chat-composer-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px 10px 14px; color: var(--dimmer); font-size: 10px; }
 .chat-composer .primary { margin-left: 0; border: 0; border-radius: 8px; padding: 7px 18px; background: var(--accent); color: #fff; cursor: pointer; }
@@ -1088,7 +1089,7 @@ fm-chat { display: flex; flex: 1; min-height: 0; }
   .chat-transport { padding: 0 16px 12px; }
   .chat-messages { min-height: 0; padding: 16px; }
   .chat-content { max-width: 86%; }
-  .chat-composer { margin: 0 12px 12px; }
+  .chat-composer { margin: 0; }
   .chat-composer-foot > span { display: none; }
   .chat-composer-foot { justify-content: flex-end; }
 }

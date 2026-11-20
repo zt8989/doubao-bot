@@ -1590,7 +1590,7 @@ class FmConsole extends LitElement {
       <fm-head .data=${this.data} .mode=${this.mode} .error=${this.error} .day=${this.day} .today=${this.data?.today || ""} .view=${this.view}></fm-head>
       <div class="app-shell">
         <fm-sidebar .view=${this.view} .collapsed=${this.sidebarCollapsed}></fm-sidebar>
-        <main>
+        <main class=${this.view === "chat" ? "is-chat" : ""}>
         ${this.view === "chat"
           ? html`<fm-chat></fm-chat>`
           : this.view === "schedules"
