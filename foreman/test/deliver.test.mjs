@@ -60,7 +60,7 @@ test("readFixedPrompt：配置没给路径就用内置提示词；给了路径�
   }
 })
 
-test("内置智能体提示词只描述职责与技能调用时机", () => {
+test("内置主提示词包含两个内部 sub agent 的完整职责与提示词", () => {
   for (const name of ["router", "orchestrator", "dispatch", "merge"]) {
     const prompt = fs.readFileSync(new URL(`../src/builtin/${name}-prompt.md`, import.meta.url), "utf8")
     assert.match(prompt, /## 职责/, `${name} 缺少职责说明`)
@@ -74,6 +74,15 @@ test("内置智能体提示词只描述职责与技能调用时机", () => {
       assert.match(prompt, /对抗审查智能体：只读 PR diff、工单验收标准和测试结果，输出结构化问题与阻断\/非阻断结论/, `${name} 审查智能体职责不一致`)
       assert.match(prompt, /不能改代码、不能提 PR、不能合并/, `${name} 审查智能体边界不一致`)
       assert.match(prompt, /人类\/独立验收系统：最终验收与合并。保护分支要求人工批准和 CI 通过/, `${name} 验收职责不一致`)
+      assert.match(prompt, /编码 sub agent 和对抗审查 sub agent 都是当前 Agent 的内部 sub agent/, `${name} 未明确内部 sub agent 边界`)
+      assert.match(prompt, /## 编码 sub agent 提示词/, `${name} 缺少编码 sub agent 提示词`)
+      assert.match(prompt, /## 对抗审查 sub agent 提示词/, `${name} 缺少对抗审查 sub agent 提示词`)
+      assert.match(prompt, /不得用 `foreman dispatch` 或 `foreman resume`/, `${name} 仍允许 Foreman 分配内部角色`)
+      assert.match(prompt, /不得用 `dws` 为它们创建独立会话/, `${name} 仍允许 dws 创建内部角色`)
+      assert.match(prompt, /foreman ws add/, `${name} 编码提示词缺少工作区职责`)
+      assert.match(prompt, /foreman pr open/, `${name} 编码提示词缺少 PR 职责`)
+      assert.match(prompt, /"conclusion": "blocking|non_blocking"/, `${name} 缺少结构化审查结论`)
+      assert.match(prompt, /有阻断时把审查原文发回同一个编码 sub agent/, `${name} 缺少修复复审闭环`)
     }
   }
 })
@@ -87,13 +96,15 @@ test("deliverPrompt：编排提示词原文在前，只给编排决策，不派�
   assert.match(out, /监控项目：\/w\/win-ai-stack/)
   assert.match(out, /触发：工单结论/)
   // 派单会话只描述当前职责与在跑数，不带定时任务配置；合并会话走另一条通道。
-  assert.match(out, /通道：派单（agent 主动派单不限在跑上限；当前在跑 1）/)
+  assert.match(out, /通道：内部 sub agent（主智能体直接创建编码与审查；当前在跑 1）/)
   assert.doesNotMatch(out, /定时巡检上限|定时任务/)
   assert.match(deliverPrompt({ fixed, kind: "合并完成", text, lane: "merge" }), /通道：合并（1 并发，只管合 PR）/)
   assert.ok(!deliverPrompt({ fixed, kind: "合并完成", text, lane: "merge" }).includes("在上限"))
   assert.match(out, /【foreman】demo\/demo#2 状态：done/)
   // 角色与三条路只在编排提示词（MD）里说一遍，组装层不复述，避免同一段身份说明出现两次。
-  assert.match(out, /实现交给工作会话/)
+  assert.match(out, /实现交给内部编码 sub agent/)
+  assert.match(out, /通道：内部 sub agent/)
+  assert.doesNotMatch(out, /agent 主动派单/)
   assert.match(out, /不是派给你的实现任务/)
   assert.ok(!out.includes("你的角色是编排者，不是这张工单的执行者"))
   assert.ok(!out.includes("由你决定下一步"))
@@ -129,7 +140,7 @@ test("deliverNewSession：新建一条会话投递，记账留痕但不进监听
     assert.match(calls[0].name, /^foreman-派单-/)
     assert.match(calls[0].prompt, /# 固定提示词/)
     assert.match(calls[0].prompt, /监控项目：\/w\/win-ai-stack/)
-    assert.match(calls[0].prompt, /通道：派单（agent 主动派单不限在跑上限；当前在跑 0）/)
+    assert.match(calls[0].prompt, /通道：内部 sub agent（主智能体直接创建编码与审查；当前在跑 0）/)
     assert.match(calls[0].prompt, /【foreman】结论/)
     assert.equal(out.convId, "conv-new")
     assert.equal(out.lane, "dispatch")

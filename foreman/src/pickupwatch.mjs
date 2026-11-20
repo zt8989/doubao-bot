@@ -20,7 +20,7 @@ export function pickupInspectorText(issues = [], cfg = {}) {
   const lines = [
     "【Foreman · router agent · 我的 ready-for-agent 工单待分配】",
     `代码已筛选 open、指派给 ${me} 且带 ready-for-agent 的工单，并排除了账本中已在处理或已收口的单。`,
-    "请先运行 foreman tasks --json 核对未收口数量、现有会话和容量；有容量时按现有优先级逐条执行下面的 hand 命令，由工单编排会话 dispatch 编码智能体。",
+    "请先运行 foreman tasks --json 核对未收口数量、现有会话和容量；有容量时按现有优先级逐条执行下面的 hand 命令，由工单主智能体在 Agent 内创建内部编码 sub agent，不经 Foreman 分配编码会话。",
     "不要在扫描器之外重复派单；容量已满时不要 hand，候选会在后续扫描中继续提醒。",
   ]
   for (const issue of issues) {

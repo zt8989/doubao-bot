@@ -125,8 +125,8 @@ export function sortIssues(issues, order = "oldest", { me = "", priority = ["min
 }
 
 // 一轮：每个仓库各自捞、各自做，做完一条接一条。只派活，不等结果。
-// 会话中心模式（默认，sessionFlow.enabled）下每张工单交给各自新建的编排会话，
-// 由它调 foreman dispatch 分配工作；ctx.hand=false 或 pickup.handToOrchestrator=false 才自己派。
+// 会话中心模式（默认，sessionFlow.enabled）下每张工单交给各自的主智能体，
+// 由它在 Agent 内部创建编码与对抗审查 sub agent；ctx.hand=false 或 pickup.handToOrchestrator=false 才走旧外部工作会话。
 export async function runRound(ctx) {
   const { cfg, book, log } = ctx
   const gitea = ctx.gitea ?? realGitea
@@ -157,13 +157,13 @@ export async function runRound(ctx) {
       const key = issueKey(repoCfg.repo, it.number)
       const op = ctx.dryRun ? 0 : startOperation(ctx, "dispatch", `${hand ? "交给编排" : "派单"} ${key}`, {
         key,
-        detail: hand ? "把工单交给编排会话，由它调 foreman dispatch" : it.title || "读工单、准备工作区并启动执行会话",
+        detail: hand ? "把工单交给主智能体，由它创建内部编码 sub agent" : it.title || "读工单、准备工作区并启动旧外部执行会话",
       })
       try {
         if (hand && ctx.dryRun) {
           // dry-run 不许有副作用：只打印这张单会绑定哪条独立编排，不 ensure、不 steer。
           const target = String(book?.issue?.(key)?.orchestrator ?? "").trim()
-          log(`[dry-run] ${key}：会交给这张单的独立编排会话 ${target || "（还没起，首句会带上编排职责与工单）"}，由它调 foreman dispatch`)
+          log(`[dry-run] ${key}：会交给这张单的独立主智能体 ${target || "（还没起，首句会带上完整内部 sub agent 提示词与工单）"}，由它创建内部编码 sub agent`)
           out = { repo: repoCfg.repo, number: it.number, state: "planned", hand: true, orchestrator: target }
         } else {
           out = hand

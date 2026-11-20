@@ -1,13 +1,7 @@
-// 以工单绑定的编排会话为中心：自动巡检每张工单各起一条编排智能体会话，工作会话绑在它身上。
-//
-// 与老模型的区别（老：每次收工新建「派单/合并」会话、由服务通知）：
-//   - 自动巡检按工单起编排会话（ensureIssueOrchestrator 幂等），编排职责与工单合进首句，后续更新用 dws msg --mode steer；
-//   - 用户从当前会话主动派单时，当前会话直接作为这张单的编排，不另起；
-//   - 工单先交给自己的编排（hand），由编排调 `foreman dispatch` 分配工作；
-//   - 工作会话 id 写进账本 issues[<键>] 的 agent / agentConvId / orchestrator；
-//   - 工作会话失败用 `foreman resume` 在**同一条**工作会话里 steer 续跑，绝不新开；
-//   - PR 扫描独立走 deliver.mode=new，新建合并会话，不复用任何工单编排会话；
-//   - 合并关单之后 `foreman clean` 清 worktree、工作会话与这张单自己的编排会话；
+// 以工单绑定的主智能体为中心：自动巡检每张工单各起一条主智能体会话。
+// 编码与对抗审查都是主智能体直接创建、续问的内部 sub agent，不经过 Foreman/dws 工作会话。
+// 本文件保留下部 dispatch/resume 函数仅作旧外部会话兼容，默认主提示词不再指引这条路径。
+// PR 扫描与合并助手仍是独立通道；合并关单后用 foreman clean 清理。
 import fs from "node:fs"
 import { Book } from "./book.mjs"
 import { builtinPrompt } from "./builtin-prompts.mjs"
@@ -82,13 +76,13 @@ export function orchestratorPrompt(ctx = {}, { issueKey = "", issue = null } = {
   const base = String((cfg.repos ?? [])[0]?.base ?? "").trim()
   const lines = [orchestratorBasePrompt(cfg).trim(), "", "---", ""]
   if (projectDir) lines.push(`监控项目：${projectDir}`)
-  lines.push("通道：派单（agent 主动 dispatch 不限在跑上限；pickup.maxRunning 只约束定时巡检）")
+  lines.push("通道：内部 sub agent（主智能体直接创建编码与对抗审查；pickup.maxRunning 只约束定时巡检）")
   if (base) lines.push(`基线：origin/${base}`)
   if (issueKey) {
     lines.push(`绑定工单：${issueKey}${issue?.title ? ` ${issue.title}` : ""}`)
-    lines.push("你只编排这一张工单；这张单后续的工作会话更新都会 steer 到本会话。")
+    lines.push("你只编排这一张工单；内部编码与对抗审查 sub agent 的结果直接返回本会话。")
   } else {
-    lines.push("工单会 steer 进这条会话（正文带「工单键」）；实现只在工作会话里，你不写代码。")
+    lines.push("工单会 steer 进这条会话（正文带「工单键」）；实现只在内部编码 sub agent 里，你不写代码。")
   }
   return lines.join("\n")
 }
@@ -274,15 +268,15 @@ export function ticketText({ repo, issue, orchestrator = "", fresh = false } = {
   const lines = [`【foreman · 编排会话 · 收到工单】${key} ${String(issue?.title ?? "")}`.trim()]
   lines.push(`工单键：${key}`)
   if (orchestrator) lines.push(`编排会话：${orchestrator}`)
-  if (fresh) lines.push("改派原因：router agent 确认原编排无法继续。请接手工单，先核对现有执行会话与账本，再决定是否续跑或重新 dispatch；不要重复开执行会话。")
+  if (fresh) lines.push("改派原因：router agent 确认原编排无法继续。请接手工单，先核对现有内部 sub agent 与账本，再决定续问或重新创建；不要为同一职责重复创建 sub agent。")
   lines.push("", "工单正文：", String(issue?.body ?? "").trim() || "（正文为空，按标题理解）")
   lines.push(
     "",
-    "下一步（你只做决策，不写代码）：",
-    `1. foreman dispatch --issue ${key} --prompt "<工单分析、这条编码会话的任务范围、依赖与验收要求>" —— 建一工程一工作区、开工作会话，编排指令随首句进入，会话 id 会绑回这条会话；`,
-    `2. 编码智能体负责工作分支、修改、测试、commit、非保护分支 push 和 PR，填写模板、关联工单并附测试结果，不合并；状态与最终回复会经 task.update Inbox 由 Worker queue 进来并带执行会话 id。需要修复时 foreman resume <执行会话id>（不要传工单号）；`,
-    `3. 监听 PR 事件并触发对抗审查；原样汇总结构化问题与阻断/非阻断结论，有阻断就交编码智能体修复并复审，不修改审查结论；`,
-    `4. 无阻断后发邮件通知验收，最终验收与合并由人类/独立验收系统完成，保护分支要求人工批准和 CI 通过；确认合并后 foreman clean --issue ${key}。`
+    "下一步（你只做编排，不写代码）：",
+    "1. 按主提示词整理任务包，通过当前 Agent 原生能力创建内部编码 sub agent，并完整注入主提示词中的编码提示词；不得调用 foreman dispatch 或 dws 开会话；",
+    "2. 编码 sub agent 自行准备工作区与分支、修改、测试、commit、非保护分支 push 和 PR，结果直接返回你；交付不完整或需要修复时续问同一个内部编码 sub agent，不调用 foreman resume；",
+    "3. PR 创建或更新后，由你创建内部对抗审查 sub agent 并注入主提示词中的审查提示词；原样汇总结构化问题与阻断/非阻断结论，不修改审查结论；",
+    `4. 有阻断就续问编码 sub agent 修复并交审查 sub agent 复审；无阻断后发邮件通知验收。最终验收与合并由人类/独立验收系统完成，保护分支要求人工批准和 CI 通过；确认合并后 foreman clean --issue ${key}。`
   )
   return lines.join("\n")
 }
@@ -317,7 +311,7 @@ export async function handToOrchestrator(ctx, { repoCfg, issue, orchestrator = "
     handedAt: nowIso(),
     attempts: Number(prev.attempts ?? 0) || 0,
   })
-  log(`${key}：已交给编排会话${convId ? `（${convId}）` : ""}${caller ? "（调用方会话）" : ""}，等它 dispatch`)
+  log(`${key}：已交给编排会话${convId ? `（${convId}）` : ""}${caller ? "（调用方会话）" : ""}，等它创建内部编码 sub agent`)
   return { repo: repoCfg.repo, number: Number(issue.number), issueKey: key, state: "handed", convId, orchestrator: convId }
 }
 
@@ -381,7 +375,7 @@ export async function resumeWorker(ctx, { sessionId } = {}) {
   return { ok: true, issueKey: key, target, convId: target, name, orchestrator: String(rec.orchestrator ?? "") }
 }
 
-// 结论后面带决策输入与当前会话 id；具体选补派、续跑还是问人，由编排按原因判断。
+// 仅用于旧外部工作会话的 task.update；默认内部 sub agent 的结果不经过这里。
 export function nextStepLine({ issueKey = "", result = null, sessionId = "" } = {}) {
   const status = String(result?.status ?? "")
   const session = String(sessionId ?? "").trim() || "<执行会话id>"
@@ -391,30 +385,30 @@ export function nextStepLine({ issueKey = "", result = null, sessionId = "" } = 
       : Number(result?.pr)
         ? [{ repo: String(issueKey).split("#")[0], pr: Number(result.pr) }]
         : []
-    if (!prs.length) return "下一步：确认编码智能体已 push 并创建 PR；没有 PR 就把缺失原因退回原编码会话补齐，主智能体不代开。"
+    if (!prs.length) return "旧外部工作会话事件：确认编码会话已 push 并创建 PR；没有 PR 就把缺失原因退回原编码会话补齐，主智能体不代开。"
     return [
-      "下一步：逐条监听以下 PR 并触发对抗审查：",
+      "旧外部工作会话事件：逐条监听以下 PR，并创建或续问主智能体内部的对抗审查 sub agent：",
       ...prs.map((p) => `- ${p.repo}#${p.pr}`),
-      "原样汇总结构化问题与阻断/非阻断结论；有阻断就交编码智能体修复并复审，无阻断则发邮件通知验收。",
+      `原样汇总结构化问题与阻断/非阻断结论；有阻断就用 foreman resume ${session} 交原编码会话修复并复审，无阻断则发邮件通知验收。`,
       "最终验收与合并由人类/独立验收系统完成；保护分支须人工批准且 CI 通过，主智能体不合并。",
       `确认全部 PR 已由人类/独立验收系统合并后：foreman clean --issue ${issueKey}`,
     ].join("\n")
   }
   if (status === "need_decision") {
-    return `下一步：把上面的问题给用户；答复后用 foreman resume ${session} 在同一工作会话里续跑（别新开）`
+    return `旧外部工作会话事件：把上面的问题给用户；答复后用 foreman resume ${session} 在同一工作会话里续跑（别新开）`
   }
   if (status === "none") {
     return [
-      "下一步：没有 RESULT 不代表执行失败，先根据上面的最后对话判断实际进展：",
+      "旧外部工作会话事件：没有 RESULT 不代表执行失败，先根据上面的最后对话判断实际进展：",
       `- 需要原会话继续：foreman resume ${session}`,
       "- 不要仅因缺少 RESULT 就重跑；已有交付或需要用户拍板时按实际情况处理。",
     ].join("\n")
   }
   if (status === "blocked" || status === "failed") {
     return [
-      "下一步：先根据上面的原因选择处理动作，不要固定续跑：",
+      "旧外部工作会话事件：先根据上面的原因选择处理动作，不要固定续跑：",
       `- 原会话能修正：foreman resume ${session}`,
-      `- 需要其他智能体协作：新派合适的工作会话并登记监听；它完成后 dws msg --mode steer ${session} "协作结果与继续任务"，让原会话继续；`,
+      `- 需要其他智能体协作：新派合适的旧外部工作会话并登记监听；它完成后 dws msg --mode steer ${session} "协作结果与继续任务"，让原会话继续；`,
       "- 只有必须由用户拍板时才提问；不要新开重复的同职责会话。",
     ].join("\n")
   }

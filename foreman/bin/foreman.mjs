@@ -110,17 +110,16 @@ const HELP = `foreman — 接单编排 + 常驻服务
               从该目录读取 config.json；未显式配置的 state、SQLite、pid、日志、端口文件与记忆目录都隔离到该目录。
               监听端口仍由 config.json 的 service.http.port 配置；显式 -c <配置> 优先于环境目录。
 
-run 以编排会话为中心：捞到单先交给编排会话（dws msg --mode steer），由它调 foreman dispatch 分配工作；
-工作会话的状态变化与普通最终回复写入 task.update Inbox，Worker 再 queue 回这条编排会话；代码不解析 RESULT、
-不自动 push/开 PR。失败先由编排归因，原会话可修正时 foreman resume <执行会话id>，需要其他智能体协作时补派并登记监听。
-合并关单后由编排调 foreman clean 清 worktree 与会话。--direct 退回老行为（run 自己派活）。
+run 以主智能体为中心：捞到单先交给本单主智能体，由它在 Agent 内部创建编码与对抗审查 sub agent；
+两个内部 sub agent 的结果直接返回主智能体，不经 Foreman/dws 工作会话。主智能体原样汇总审查、通知验收并维护状态。
+foreman dispatch/resume 仅保留给旧外部工作会话；合并关单后由主智能体调 foreman clean。--direct 退回旧外部会话行为。
 
-编排会话从哪来（工作会话与更新都绑它）：
-  1. 路由智能体接单：hand 按工单新建/复用独立编排；手工 orch start 仍可起全局兼容会话；
-  2. 用户自主发起：发起那条会话自己就是编排——hand/dispatch/resume 自动取 MCP_VM_CONVERSATION_ID
-     （或显式 --orchestrator <会话id|标题>，--no-orchestrator 关掉自动识别），
-     工作会话的状态更新由 Worker queue 回这条发起方会话。
---notify <id|标题>：本轮派出去的会话通知给该目标；--no-notify：本轮不登记监听。
+主智能体从哪来：
+  1. 路由智能体接单：hand 按工单新建/复用独立主智能体；手工 orch start 仍可起全局兼容会话；
+  2. 用户自主发起：发起那条会话自己就是主智能体，hand 自动取 MCP_VM_CONVERSATION_ID
+     （或显式 --orchestrator <会话id|标题>，--no-orchestrator 关掉自动识别）。
+  编码与对抗审查 sub agent 由主智能体在 Agent 内部创建，结果直接返回，不登记为外部工作会话。
+--notify <id|标题> 与 --no-notify 只服务旧外部会话监听。
 `
 
 const out = (o) => {

@@ -56,7 +56,7 @@ export const DEFAULTS = {
     // 只补一轮，容量（maxRunning）、工作时间窗、run 锁、节点暂停照旧把关；
     // 想退回「只在 cron 点巡检」就在配置里写 false。
     kickAfterDone: true,
-    // 自动巡检每张工单先新建自己的编排会话（首句含编排职责与工单），由它调 foreman dispatch 分配工作。
+    // 自动巡检每张工单先新建自己的主智能体（首句含完整内部 sub agent 提示词与工单），由它直接创建编码与审查 sub agent。
     // 设 false（或 CLI 带 --direct）退回老行为：run 自己建工作区、开工作会话。
     handToOrchestrator: true,
   },

@@ -85,7 +85,8 @@ test("只把指派给 pickup.me 且带 ready-for-agent 的 open 候选写入 rou
   assert.deepEqual(notices[0].json.issues.map((x) => x.number), [1, 8, 9])
   assert.match(notices[0].text, /foreman hand yyzl\/win-ai-harness#1/)
   assert.match(notices[0].text, /foreman tasks --json/)
-  assert.match(notices[0].text, /编排会话 dispatch 编码智能体/)
+  assert.match(notices[0].text, /内部编码 sub agent/)
+  assert.doesNotMatch(notices[0].text, /dispatch 编码智能体/)
   assert.doesNotMatch(notices[0].text, /foreman run --once/)
 })
 

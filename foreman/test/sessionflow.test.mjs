@@ -82,7 +82,7 @@ test("编排会话幂等：账本里已有 convId 就复用，绝不开第二条
     assert.equal(first.created, true)
     assert.equal(dws.calls.openNew.length, 1)
     assert.match(dws.calls.openNew[0].name, /编排/)
-    assert.match(dws.calls.openNew[0].prompt, /agent 主动 dispatch 不限在跑上限/)
+    assert.match(dws.calls.openNew[0].prompt, /内部 sub agent/)
     assert.match(dws.calls.openNew[0].prompt, /主智能体：创建工单、分配任务/)
     assert.match(dws.calls.openNew[0].prompt, /技能调用时机/)
     assert.ok(!dws.calls.openNew[0].prompt.includes("同时在跑最多"))
@@ -119,12 +119,10 @@ test("hand：编排职责与工单合进首句一次发出，不 steer，账本�
     assert.match(dws.calls.openNew[0].prompt, /绑定工单：yyzl\/demo#7/)
     assert.match(dws.calls.openNew[0].prompt, /工单键：yyzl\/demo#7/)
     assert.match(dws.calls.openNew[0].prompt, /改 demo 的镜像页/)
-    assert.match(dws.calls.openNew[0].prompt, /foreman resume <执行会话id>/)
-    assert.match(dws.calls.openNew[0].prompt, /task\.update Inbox/)
-    assert.match(dws.calls.openNew[0].prompt, /编码智能体负责工作分支/)
-    assert.match(dws.calls.openNew[0].prompt, /触发对抗审查/)
+    assert.match(dws.calls.openNew[0].prompt, /内部编码 sub agent/)
+    assert.match(dws.calls.openNew[0].prompt, /内部对抗审查 sub agent/)
     assert.match(dws.calls.openNew[0].prompt, /最终验收与合并由人类\/独立验收系统完成/)
-    assert.doesNotMatch(dws.calls.openNew[0].prompt, /是否 foreman pr open|核对 PR 后 foreman pr merge/)
+    assert.doesNotMatch(dws.calls.openNew[0].prompt, /foreman dispatch --issue|foreman resume <执行会话id>|task\.update Inbox|是否 foreman pr open|核对 PR 后 foreman pr merge/)
     assert.ok(!dws.calls.openNew[0].prompt.includes("resume --issue"), "首句不能教编排按工单号续跑")
 
     const rec = new Book(cfg.stateFile).issue("yyzl/demo#7")
@@ -351,13 +349,12 @@ test("resume：只按工作会话 id 定位并 steer 续跑，绝不新开", asy
   }
 })
 
-test("失败处理提示：带会话 id，由编排归因选择补派、续跑或问人", () => {
+test("旧外部会话失败处理提示保持 resume 兼容，并明确与内部 sub agent 隔离", () => {
   const blocked = nextStepLine({ issueKey: "yyzl/demo#7", result: { status: "failed" }, sessionId: "conv-worker-1" })
-  assert.match(blocked, /先根据上面的原因选择处理动作/)
+  assert.match(blocked, /旧外部工作会话事件/)
   assert.match(blocked, /foreman resume conv-worker-1/)
   assert.match(blocked, /需要其他智能体协作/)
   assert.match(blocked, /dws msg --mode steer conv-worker-1/)
-  assert.ok(!blocked.includes("resume --issue"), "续跑入口不能退回工单号")
   const none = nextStepLine({ issueKey: "yyzl/demo#7", result: { status: "none" }, sessionId: "conv-worker-1" })
   assert.match(none, /没有 RESULT 不代表执行失败/)
   assert.match(none, /根据上面的最后对话判断实际进展/)

@@ -355,8 +355,9 @@ export function verdictText({ req, verdict, from, summary }) {
     )
   } else {
     lines.push(
-      "这条 PR 保持打开。把上面的问题转给负责的执行会话修正（`foreman resume <执行会话id>` 或补派），" +
-        "改完 push 后由 foreman 重新发验收邮件；不要在修正前合并。"
+      "这条 PR 保持打开。默认内部链路把上面的问题与审查原文发回同一个内部编码 sub agent 修正；" +
+        "只有账本明确属于旧外部工作会话时才用 `foreman resume <执行会话id>`。" +
+        "改完 push 更新原 PR，并重新对抗审查、发验收邮件；不要在修正前合并。"
     )
   }
   return lines.join("\n")

@@ -1,6 +1,6 @@
 ---
 name: foreman
-description: 接单编排 CLI（项目 foreman，命令 foreman）：**以工单绑定的编排会话为中心**——持久 Schedule 每 5 分钟筛选 open、指派给 `pickup.me` 且带 `ready-for-agent` 的工单，把候选写入 SQLite Inbox，不直接派单；router agent按实时容量和现有优先级对通知中的工单 `hand`，再由本单编排 `dispatch` 编码智能体。另有代码每 1 分钟轮询执行会话，Worker 先按事件 type 处理、无法识别时交路由 Agent，24 小时未成功投递才换会话。捞到工单用 `foreman hand` steer 给它；它再调 `foreman dispatch` 分配工作（建一工程一工作区 + 开工作会话，会话 id 绑回本单编排）。PR 扫描把他人候选写入 `pr.merge` Inbox，由 Worker 直接建合并助手会话（不经路由，`pr assign` 仅作人工补派），本人 UI 候选写入router agent Inbox，由它 `pr ui-assign` 在周晓亮、张振豪之间轮询指派验收并附 PR 链接。**标准工作会话只用 foreman 开 PR**：它读工单、改工作区、跑测试、commit，推送派单指定的非保护分支并用 `foreman pr open` 开 PR，填写模板、关联工单、附测试结果；不合并、不碰工单状态、不输出 RESULT；**决策会话例外**：先调研，确认可做后必须用 gitea 把本单切换为 `ready-for-agent` 并核验，再编码；不确定时仅用 `foreman send --type mail` 发邮件请用户决策。代码定时执行 `watch poll`，router agent或人工可补跑，只把收工（`finished`/`settled`）写成 `task.update` 事件（`running` 与 `gone` 只落本地账本、不投递，gone 多为正常归档），Worker 再 queue 给任务所属编排。编码智能体负责非保护分支 push 和 `foreman pr open`；主智能体负责派单、监听 PR、触发对抗审查、原样汇总结论、发验收邮件和维护状态机，不代写代码、不开 PR、不合并；最终验收与合并由人类/独立验收系统完成，确认合并后用 `foreman clean` 清 worktree 与会话。Gitea 的读、建单/改单/评论/关单、dws 会话、herdr 一律直连。**全链路异步**：`hand`/`dispatch`/`resume` 是投递动作，发出去就返回（秒级），工作会话常跑 30–60 分钟（实测 50 分钟）才 commit 收工——**派完就走，别等回复、别轮询会话、别重派**。当用户说自动接单、接工单、把工单派给豆包、看某条工单处理到哪、把卡住的单放回队列，或提到 foreman 时报 app_busy / locked / pr-open 时使用。**一工程一工作区**：跨工程的工单每个工程各建一个 worktree、各一条 PR，缺工程用 `foreman ws add` 现开。
+description: 接单编排 CLI（项目 foreman，命令 foreman）：默认以工单绑定的主智能体为中心，持久 Schedule 筛选我的 ready-for-agent 工单，router agent 核对容量后用 `foreman hand` 交付。主智能体在当前 Agent 内部直接创建编码与对抗审查 sub agent，主提示词包含两者的完整提示词；不得用 `foreman dispatch/resume` 或 dws 为这两个角色创建、续问会话。编码 sub agent 只用 `foreman ws add` 准备工作区、用 `foreman pr open` push 非保护分支并创建 PR；主智能体原样汇总结构化审查结论、发验收邮件并维护状态。人类/独立验收系统最终验收与合并，保护分支须人工批准和 CI 通过。旧 `dispatch/resume`、外部工作会话和 task.update 仅作兼容。PR 扫描与他人 PR 合并助手保持独立，本人 UI PR 仍由两名测试同学验收。用户提到自动接单、接工单、派给豆包、工单进度、卡住重试或 foreman 报 app_busy / locked / pr-open 时使用。
 ---
 
 # foreman：接单编排
@@ -15,49 +15,25 @@ description: 接单编排 CLI（项目 foreman，命令 foreman）：**以工单
 | `herdr` | 建 git worktree（顺带在 herdr 里挂工作区） | `herdr` server 在跑（`herdr status`） |
 | `dws` | 豆包会话（开会话/续说/读状态/读对话） | 豆包**单实例**，用户自己开着时要先 ⌘Q |
 
-## 异步：发出去就返回，别等它跑完
+## 主智能体与内部 sub agent（默认）
 
-`foreman hand` / `foreman dispatch` / `foreman resume` 都是**投递动作**：把活发进会话就返回（`handed` / `dispatched`），**不等回复、不等结论、不验收**。真正干活的是那条工作会话——一张单从 kickoff 到 commit 收工、交出普通最终回复，**常要 30–60 分钟**（实测有跑到 **50 分钟**才收工的），跨工程、跑全量单测更久。**这不是卡住，是正常耗时。**
+`foreman hand` 只负责把工单交给本单主智能体。主智能体读取 `src/builtin/orchestrator-prompt.md`（派单通知使用 `dispatch-prompt.md`），其中已经包含完整的编码与对抗审查 sub agent 提示词、输入占位符、审查 JSON 协议和修复复审流程。
 
-派完之后到结论回来这段，调用方不需要守着：`foreman tasks` / `foreman orch show` 瞄一眼进度，然后去干别的。
-
-| 别做 | 为什么 |
-| --- | --- |
-| 守着 `dws status` / 反复读这条会话 | 豆包单实例，切窗口会挤掉服务轮询；盯得再紧结论也不会早点出来 |
-| 重复 `dispatch` / 再开一条会话 | 一条单只绑一条工作会话（`agentConvId`），重派被账本 `working` 挡掉，或把一单拆成两条 |
-| 自己再跑一遍验收 / 单测「确认一下」 | 最终回复会说明改动、提交与自测，编排据此核对，重验只会把一轮拖成两轮 |
-
-结论只有一条路回来：router agent发现执行会话已收工后，按需 `foreman watch poll`；`finished` + 回复指纹变化时写入 `task.update` Inbox 事件，Worker 再用 `dws msg --mode queue` 投给**这张单绑的编排会话**（用户自主发起的就投回发起方会话）。Worker 只负责可靠投递，不解析 RESULT、不自动开 PR、不推进工单业务状态；最终回复由编排判断。**等待不在调用方身上**——派完即返回，不再由代码按 `pollSeconds` 自动轮询。
-
-例外只有两种：服务没在跑（见「排障」最后几行，人工 `watch poll` 补一轮）；用户明确要你现在就盯着这条单，那也别连续轮询，按需 `foreman watch poll`。
-
-## 以编排会话为中心（默认）
-
-**谁发起，谁就是这张单的编排会话**，工作会话绑到它（账本 `issues[键].orchestrator` + `agentConvId`）。两种发起：
-
-| 发起方式 | 编排会话是谁 | 怎么派 |
+| 步 | 谁做 | 边界 |
 | --- | --- | --- |
-| router agent接单 | 这张单自己的独立编排会话（首次 hand 自动新建，按工单幂等） | 它先 `run --dry-run --once` 核对候选与容量，确认后 `run --once` → `hand` → 编排调 `dispatch` |
-| 用户自主发起 | **发起方自己的那条会话**（`--orchestrator`，不传取 `MCP_VM_CONVERSATION_ID`） | 发起方自己调 `foreman dispatch` |
+| 交工单 | router agent / 人工执行 `foreman hand <owner/name>#N` | 新建或复用本单主智能体，不建编码工作区 |
+| 分配编码 | 主智能体通过当前 Agent 原生能力创建内部编码 sub agent | 完整注入主提示词中的编码模板；保存 agent id，不调用 `foreman dispatch` 或 dws |
+| 准备与交付 | 编码 sub agent | 自行 `foreman ws add`、建分支、修改、测试、commit，只 push 非保护分支并 `foreman pr open`；填写模板、关联工单和测试结果 |
+| 对抗审查 | 主智能体创建另一个内部 sub agent | 只读 PR diff、验收标准和测试结果，输出结构化阻断/非阻断 JSON，不改代码、不开 PR、不合并 |
+| 修复复审 | 主智能体续问原 sub agent | 审查原文发回同一个编码 sub agent；修复后交审查 sub agent 复审，主智能体不修改结论 |
+| 验收合并 | 人类/独立验收系统 | 主智能体发验收邮件并维护状态；保护分支须人工批准和 CI 通过 |
+| 清尾 | 主智能体确认合并后 `foreman clean <owner/name>#N` | 清工作区、监听和旧外部会话残留 |
 
-整条链路：
+两个内部 sub agent 的结果直接返回主智能体，不写入 Foreman `agentConvId`，不经过 `watch poll`、`task.update` 或 dws 中转。它们只与主智能体通信，不直接互联；同一职责续问原 agent id，不重复创建。
 
-| 步 | 命令 | 谁做 |
-| --- | --- | --- |
-| 起编排会话 | `foreman orch start` | 手工兼容入口；router agent接单不要调用，hand 会按工单自动新建 |
-| 交工单 | `foreman hand <owner/name>#N` | 把工单正文 steer 进编排会话，账本记 `handed`；不建工作区。确认原编排失联时才加 `--fresh` 重派独立编排 |
-| 分配工作 | `foreman dispatch <owner/name>#N --prompt "<编排指令>" [--repo <工程名|owner/name>]...` | **编排调用，提示词必填**：默认只建工单所在仓，额外工程必须重复传 `--repo`，正文提到依赖仓不会自动建；开工作会话后把会话 id 绑回编排。`--prompt` 注入工单分析、任务范围、依赖与验收要求，直接随派单首句进入（长指令用 `--file <路径>`），头部自动带完整工单 ID 与 URL；各原工程 `repos[].dir/AGENTS.md` 全文也随首句、重派和 `resume` 注入（文件存在且非空时）；留空拒绝派单。已派过就 steer 同一条续跑，注入内容也合进这条消息 |
-| 看链路 | `foreman orch show` | 每条编排会话（含发起方会话）绑了哪些工作会话、最近 steer 了什么 |
-| 收工后开 PR | 编码智能体 push 非保护工作分支并调用 `foreman pr open` | 填写 PR 模板、关联工单、附测试结果；PR 号/链接进账本，主智能体不代开 |
-| 失败续跑 | `foreman resume <执行会话id>` | 在**指定工作会话**里 `dws msg --mode steer`，**不新开、不传工单号** |
-| 验收与合并 | 人类/独立验收系统 | 主智能体触发对抗审查、原样汇总结论并发验收邮件；保护分支要求人工批准和 CI 通过 |
-| 清尾 | `foreman clean <owner/name>#N`（或 `--all`） | 清 worktree、本地分支、工作会话、监听与这张单的编排会话（幂等；编排会话在正跑时留给服务下一轮收） |
+### 旧外部会话兼容
 
-- 上表里 `hand` / `dispatch` / `resume` **全是异步投递**：命令返回（`handed` / `dispatched`）就等于这一步做完了，别接着等；从投递到普通最终回复回来常 30–60 分钟（见上面「异步」节）。
-- 工作会话的**任何状态更新**都先写成 `task.update` 持久事件，由 Worker `dws msg --mode queue` 投给**这张单绑的编排会话**；不再新建会话、不再 `dws notify`，也不直接 steer。用户自主发起的单就投回发起方会话。若 dws 明确报「侧边栏里没有任务」，Worker 将同一事件附上原目标不可达的说明兜底交router agent；其他 queue 异常继续重试。
-- 失败/卡住先由编排归因：原会话能修正才 `resume <执行会话id>`；需要其他智能体就新派并 `watch add` 登记，完成后由 Worker queue 回等待结果的原会话；不要一律续跑，也不要为同一职责重复开会话。
-- PR 监听把他人候选写入 `pr.merge` Inbox，由 Worker 建合并助手会话并回写账本（扫描器本身不建会话、不经路由）；本人 UI 候选才写入router agent Inbox，由它 `pr ui-assign` 轮询指派周晓亮/张振豪验收。`pr assign` 保留为人工补派入口。
-- 降级：配置 `sessionFlow.enabled: false` 或 `foreman run --direct` 退回老的多会话模型。
+`foreman dispatch`、`foreman resume`、外部工作会话和 `task.update` 仅为旧链路及 `--direct` 保留，不是默认主链路的角色分配方式。旧链路仍是异步投递：命令返回不代表实现完成，收工状态经 Inbox/Worker 投递；这些规则不要套用到内部 sub agent。
 
 ## 收口边界（PR 两步 + 清尾 + 工作区）
 
@@ -73,7 +49,7 @@ description: 接单编排 CLI（项目 foreman，命令 foreman）：**以工单
 
 - Gitea 的**读**：`pr-view` / `issue-view` / `search` / `pull-list` / `label-list` / `milestone` / `explore`。
 - Gitea 的**其它写**：`issue`（建单）、`issue-comment`、`issue-edit`（标题/正文/标签/指派）、`close` / `reopen`、`assign` / `due` / `milestone-set`。
-- `dws` 全部会话类命令（`open` / `send` / `status` / `info` / `list` / `use` / `msg` / `stop` / `archive` / `notify`）。
+- `dws` 只用于主智能体及既有外部会话；默认主链路不得用它创建、续问或中转编码与对抗审查 sub agent。
 - `herdr` 全部。
 
 理由：读不产生状态、改了也不推进状态机，这些下一轮 `search --label` / `pull-list` 自然读到最新值，没有东西依赖它们实时进账本。`foreman issue comment|close` 还在、用了会顺手落库，但**不是必须**。
@@ -92,8 +68,8 @@ description: 接单编排 CLI（项目 foreman，命令 foreman）：**以工单
    分支：fix/issue-284（基线 origin/sit-20261126）
 ```
 
-- **怎么认工程**：主仓库是工单所在仓库，永远排第一；**其余工程只认编排 `dispatch` 显式重复传入的 `--repo <工程名|owner/name>`，不扫描标题和正文**。正文提到 `win-ai-harness` / `win-ai-specs` 等依赖或规格仓不代表要改它们；显式工程必须在本产品配置内，写错会直接报错，避免静默漏建。
-- **认漏了不用交 need_decision**：首句写死「要改的工程不在上面，先 `foreman ws add --repo <工程名|owner/name> --issue <owner/name>#N` 现开一个（幂等，回工作区路径与分支），再进去改」。执行会话不该因为跨工程停下来问人，也不该跑到主 checkout 里去改。
+- **怎么认工程**：主仓库是工单所在仓库，永远排第一；其余工程以主智能体任务包明确声明的清单为准，不扫描标题和正文猜测。编码 sub agent 对每个工程分别调用 `foreman ws add --repo <工程名|owner/name> --issue <owner/name>#N`，各自建工作区、分支与 PR。
+- **认漏了不用交 need_decision**：主智能体把缺失工程补充给同一个编码 sub agent，由它 `foreman ws add --repo <工程名|owner/name> --issue <owner/name>#N` 现开工作区（幂等，回工作区路径与分支），再进去改。内部 sub agent 不该跑到主 checkout 里改。
 - **边界按工程写**：每个工程只在自己那条工作区里改；不许跨到别的工程目录、不许动各仓库主 checkout、不许动别的目录。
 - **PR 也按工程**：每个工程各自 push、各自 `foreman pr open --repo <该工程> --head <分支> --issue N --issue-repo <工单所在仓库>` 开一条；`--issue-repo` 账本靠它把几个工程的 PR 记到同一张单的 `prs[]` 上。
 - **收尾也按工程**：每条 PR 合完只清它自己那个工程的工作区；**所有工程的 PR 都合完才关单**（没合完的 close 节点只记一句「还有 n 个工程的 PR 没合」，工单继续 `pr-open`）。
@@ -110,7 +86,7 @@ foreman ws list --issue <owner/name>#<单号>                                   
 
 foreman 是「CLI + 一个常驻服务」。持久 Schedule、SQLite Inbox 和单 Worker 同在 `foreman serve` 进程：Schedule 到期按定义直接运行 script（我的工单扫描、执行会话轮询、PR 扫描、邮件轮询），只有失败、实际业务活动或脚本显式声明的 `{type,text,json}` 才写成 `schedule.event` 注入 `~/.foreman/console.db` 的 `agent_inbox`；普通“执行完成 / queued / checked”回执直接跳过。Worker 先按 `payload.type` 找直接处理器，无法识别的内容连同 text/JSON 交router agent判断；1 秒轮询负责漏唤醒与重启恢复，24 小时未成功投递才新建路由会话。事件按来源去重、支持 pending 合并替换、过期丢弃、失败重试；旧 `schedule.result` 按 `non-actionable` 丢弃，普通消息的 done 只表示已交给处理器或 dws，都不表示 Agent 已完成工作。
 
-router agent负责健康检查、按优先级/容量接单、重派失联编排、本地修账，以及按需用 `foreman tasks --json` 复核并通过 `foreman clean --all` 清理 `done/cleaned` 残留。我的工单由独立 `pickup` Schedule 定时扫描：严格按 `assignees` 包含 `pickup.me` 和 `ready-for-agent` 标签筛选，候选以 `issue.candidates` 写入 Inbox；代码不 hand、不 dispatch。执行收工由代码每 1 分钟直接运行 `pollOnce`；任务状态与最终回复经 `task.update` 由 Worker queue 给所属编排。router Agent 不再由执行轮询 Schedule 定时唤醒。
+router agent负责健康检查、按优先级/容量接单、重派失联编排、本地修账，以及按需用 `foreman tasks --json` 复核并通过 `foreman clean --all` 清理 `done/cleaned` 残留。我的工单由独立 `pickup` Schedule 定时扫描：严格按 `assignees` 包含 `pickup.me` 和 `ready-for-agent` 标签筛选，候选以 `issue.candidates` 写入 Inbox；代码只 hand 给主智能体，不创建内部 sub agent。下述执行收工轮询只兼容旧外部工作会话：代码每 1 分钟运行 `pollOnce`，状态与最终回复经 `task.update` 由 Worker queue 给所属主智能体；内部 sub agent 的结果直接在 Agent 内返回，不经过这里。
 
 ```bash
 foreman serve [--daemon]         # 起服务：前台跑（--daemon 后台，输出进 service.log）
@@ -133,7 +109,7 @@ foreman watch poll               # 立刻跑一轮（checked / settled / enqueue
 - **普通邮件回复**：邮件主题自动带 `[FM-SID:<会话ID>]`，ID 取 `--session-id` 或当前 `MCP_VM_CONVERSATION_ID`。非验收回复先写 `mail.reply` Inbox，Worker 命中会话后 steer；无 ID 或会话不存在时交 router agent。`[FM-xxxxxxxx]` 验收回复仍走原白名单与验收流程。旧 `inspector` 配置/账本/事件仅兼容读取。
 - **派单通道**：`pickup.maxRunning`（默认 2）限制router agent `foreman run` 或人工 `foreman pickup` 的并行单数，优先级沿用 `pickup.priority` 等既有配置；agent 主动 `dispatch` 不限上限，派活动作串行并抢 `run.lock`。自动合并通道已取消，PR 由 `foreman pr merge` 幂等收口；UI PR 仍需两名测试同学验收，未获验收不会自动合并。
 
-- **router agent**：不再由 `router.intervalSeconds`（默认 60s）的 Schedule 定时 queue。这个 Schedule 改为代码执行 `src/service.mjs#pollOnce`，检查执行会话并把状态变化写成 `task.update`；普通检查完成不写 Inbox。手动 `foreman route`、PR/邮件通知和 Worker 未识别事件仍调用同一路由会话。Agent 被调用时先读 `foreman tasks --json`：主体是 `sessions` 父子树，节点 `state=running/idle/gone/unknown` 为真实会话状态，`issueKey/issueState` 仅作归属、容量与清理元数据。在飞数取 `summary.unresolvedIssues`，PR 数取 `summary.prOpenIssues`，真实编码运行只数编码节点 `state=running`。全部未收口合计最多 `pickup.maxRunning`（默认 2），`handed` 占槽；满额禁止 `run/pickup/hand/orch start/dispatch`，dry-run 只看候选优先级。需要补取证时才 `watch poll`；每次检查 `foreman clean --all` 幂等清理 `done/cleaned` 残留，非终态不得清理。确认原编排失联才 `hand --fresh`；只修本地完成状态用 `issue settle <N> --repo R --note "依据"`。我的工单 `issue.candidates` 通知到达时，只处理通知列出的工单，有容量才逐条 `foreman hand <owner/name>#N`，由本单编排 `dispatch`；不要用 `run --once` 扩大候选范围。`pickup.kickAfterDone` 不再生效，`run --every` 已拒绝执行。
+- **router agent**：不再由 `router.intervalSeconds`（默认 60s）的 Schedule 定时 queue。这个 Schedule 改为代码执行 `src/service.mjs#pollOnce`，检查执行会话并把状态变化写成 `task.update`；普通检查完成不写 Inbox。手动 `foreman route`、PR/邮件通知和 Worker 未识别事件仍调用同一路由会话。Agent 被调用时先读 `foreman tasks --json`：主体是 `sessions` 父子树，节点 `state=running/idle/gone/unknown` 为真实会话状态，`issueKey/issueState` 仅作归属、容量与清理元数据。在飞数取 `summary.unresolvedIssues`，PR 数取 `summary.prOpenIssues`，真实编码运行只数编码节点 `state=running`。全部未收口合计最多 `pickup.maxRunning`（默认 2），`handed` 占槽；满额禁止 `run/pickup/hand/orch start/dispatch`，dry-run 只看候选优先级。需要补取证时才 `watch poll`；每次检查 `foreman clean --all` 幂等清理 `done/cleaned` 残留，非终态不得清理。确认原编排失联才 `hand --fresh`；只修本地完成状态用 `issue settle <N> --repo R --note "依据"`。我的工单 `issue.candidates` 通知到达时，只处理通知列出的工单，有容量才逐条 `foreman hand <owner/name>#N`，由本单主智能体直接创建内部编码 sub agent；不要用 `run --once` 扩大候选范围。`pickup.kickAfterDone` 不再生效，`run --every` 已拒绝执行。
 
 - **CLI 启动即握手**（除 `serve` / `help`）：任意子命令起来先读端口文件 `~/.foreman/service.port`（服务写的纯数字），拿它去 `GET /api/ping`；通了直接跑，不通就自动拉起服务、等服务把端口写进文件再连（上限 `handshakeTimeoutMs`，默认 5s）。**CLI 与服务的通信全程 HTTP，没有 unix socket。** 起不来非零退出，打印 `✗ foreman 服务没起来：<原因>` + 两条可执行提示（`foreman serve`、`cat ~/.foreman/service.log`），照做，别手动猜。
 - 逃生开关 `--no-service`：跳过握手与自动拉起，只跑这一条命令（测试与排障用）；配置 `service.enabled: false` 等价于一直带它。
@@ -190,9 +166,9 @@ foreman run --no-notify                # 这一轮不登记监听，因此不会
 foreman orch start                    # 手工兼容入口；router agent接单按工单新建独立编排，不调用它
 foreman orch show                     # 每条编排会话（含发起方会话）绑了哪些工作会话、最近 steer 了什么
 foreman hand <owner/name>#<N> [--fresh] # 默认复用本单编排；确认原编排失联才 --fresh 重派
-foreman dispatch <owner/name>#<N> --prompt "<编排指令>" [--repo <工程名|owner/name>]...   # 提示词必填；默认只建主仓，额外工程重复传 --repo
-                                    # 头部自动带完整工单 ID 和 URL；长指令改用 --file <路径>，留空拒绝派单
-foreman resume <执行会话id>             # 原会话可修正时：按会话 id steer 续跑（不新开、不传工单号）
+foreman dispatch <owner/name>#<N> --prompt "<编排指令>" [--repo <工程名|owner/name>]...   # 旧外部会话兼容；默认主链路不用
+                                    # 仅用于旧外部工作会话，不用于创建内部编码或审查 sub agent
+foreman resume <执行会话id>             # 旧外部会话兼容：steer 指定工作会话；内部 sub agent 由原 agent id 续问
                                       # 以上三条都支持 --orchestrator <会话id|标题>：绑到发起方会话
                                       #（不传则取 MCP_VM_CONVERSATION_ID，即「用户自己发起的会话」）
 foreman clean <owner/name>#<N>        # 合并关单后清 worktree / 分支 / 工作会话 / 本单编排会话（幂等）
@@ -218,13 +194,13 @@ foreman doctor [--start]              # --start 才真的连豆包窗口读状�
 
 ## 一轮的流程
 
-0. **会话中心（默认）先交给本单编排**：捞到单不直接建工作区，而是 `ensureIssueOrchestrator`（这张单独立一条编排会话，按单幂等）+ `dws msg --mode steer` 把工单交进去，账本记 `handed` 与 `orchestrator`；编排读完调 `foreman dispatch` 才走下面 2、3 步。失败/卡住由编排先归因：原会话可修正就 `foreman resume <执行会话id>`，需要其他智能体就补派并登记监听，完成后由 Worker queue 回原会话；合完调 `foreman clean`。
-1. `gitea search --label <id>` 拉 open 工单，按 `pickup` 过滤（排除人工标签、已处理的、到重试上限的），**三档排序**：我的（作者是 `pickup.me`）→ 无人认领 → 他人，同档最老先接（`pickup.priority` 可改顺序）。
-2. 默认只建工单所在仓；编排确认跨工程后，通过 `dispatch --repo <工程名|owner/name>` 显式声明的每个工程才各建一个工作区：`herdr worktree create --cwd <该工程> --branch fix/issue-N --base origin/<base> --path ~/.foreman/worktrees/<该工程>/fix-issue-N --no-focus`。**一个工程一个工作区，不合并、不共用；正文提到工程名不再自动预建。**分支建好后 PATCH 原工单的 `ref`，指定详情页右侧的分支 / Git 标签，不发评论；多工程统一写主仓分支，分支不变的重派不重复 PATCH。
-3. `dws open --name foreman-<工单所在仓库>-<N>` 发 kickoff：把工单正文、**每个工程的工作区与分支清单**、边界（**一工程一工作区：每个工程只在自己那条工作区里改，不许跨目录、不许动主 checkout；缺工作区就在最终回复写「缺工作区：<owner/name>」**）、编码交付职责一次写进去：修改、测试、commit，**只推送派单指定的非保护工作分支**，逐工程用 `foreman pr open` 开 PR，填写模板、关联工单并附测试结果，不合并、不关工单、不动 worktree 与会话；后续按主智能体转来的对抗审查意见修复并更新原 PR。决策会话仍先调研，确认可做后用 gitea 切换并核验 `ready-for-agent`，不确定时仅用 `foreman send --type mail` 请用户决策。普通最终回复说明改动、提交、PR 链接和测试结果，**不要求 `<RESULT>`**。
-4. **这一条是异步的，派完就结束**：返回 `dispatched` 即收工——**不等回复、不解析 RESULT、不验收、不重派**。会话本身要跑很久（30–60 分钟是常态，实测 50 分钟收工），期间别去 `dws status` 盯它。router agent发现会话已收工后按需 `foreman watch poll`，用 `dws info` 读取普通最终回复，和 `running/gone/finished/settled` 状态一起写入 `task.update` Inbox；Worker 再 `dws msg --mode queue` 投给这张单绑定的编排会话（补派任务回 parent，完全无归属的旧任务才回退router agent）。Worker 成功投递后才消费回复指纹并落 idle，重启由 SQLite 恢复。**Foreman 不自动 push、不自动开 PR、不推进工单业务状态。**
-5. 主智能体监听 PR 事件并触发对抗审查；对抗审查智能体只读 PR diff、工单验收标准和测试结果，独立输出结构化问题与阻断/非阻断结论。主智能体原样汇总，不修改结论；有阻断就交编码智能体修复、补测、push 更新原 PR 并复审，无阻断就发邮件通知验收。最终验收与合并由人类/独立验收系统完成，保护分支要求人工批准和 CI 通过；主智能体不切分支、不开 PR、不合并、不代写代码。
-6. 最终回复说明缺信息或受阻时，由编排决定改单、续跑或交人处理，**worktree 留着**；人处理完 `foreman retry <仓库> <N>` 放回队列。
+0. **交给本单主智能体**：捞到单后 `hand` 新建或复用主智能体，首句同时带完整主提示词和工单，不创建编码工作会话。
+1. **整理任务包**：主智能体读取工单、验收标准、工程清单与基线；信息不足先问人。
+2. **内部编码**：主智能体在 Agent 内创建编码 sub agent 并注入完整编码模板。编码 sub agent 自行 `foreman ws add`、从 `origin/<base>` 建分支、实现、自测、commit，只 push 非保护工作分支。
+3. **创建 PR**：编码 sub agent 对每个动过的工程分别 `foreman pr open`，填写模板、关联工单并附测试结果；跨工程携带 `--issue-repo`。结果直接返回主智能体。
+4. **内部对抗审查**：主智能体创建另一个内部 sub agent，注入审查模板、PR 列表、验收标准和测试报告。审查 sub agent 只读并输出结构化 JSON，主智能体原样汇总。
+5. **修复与验收**：有阻断就续问同一个编码 sub agent 修复、push 更新原 PR，再交审查 sub agent 复审；无阻断则发邮件通知验收。最终验收与合并由人类/独立验收系统完成，保护分支须人工批准和 CI 通过。
+6. **清理**：确认全部 PR 合并后，主智能体 `foreman clean <owner/name>#N` 清理工作区与监听。缺信息或受阻时保留工作区，续问原内部编码 sub agent；不调用 `foreman dispatch/resume` 或 dws 创建这两个角色。
 
 普通最终回复至少写清：改了什么、提交与 PR 链接、跑过的测试及结果；跑不了或未完成时写明原因与下一步建议。不要输出固定 `<RESULT>` 或状态标签；主智能体只汇总交付与审查结果，不修改对抗审查结论，最终验收与合并由人类/独立验收系统决定。
 
@@ -247,7 +223,7 @@ foreman doctor [--start]              # --start 才真的连豆包窗口读状�
 - **合并只走 `foreman pr merge`**：由人类/独立验收系统在最终验收后执行，保护分支要求人工批准和 CI 通过；主智能体与编码智能体不得调用。UI 单仍须两名测试同学回复「验收通过」，router agent 不得绕过。
 - **续接调度**：`planner` 只保留旧配置/账本兼容，无定时器、不自动接单；续接由router agent判断。
 - **接单三档**：`pickup.priority` 默认 `["mine","unassigned","others"]`，`pickup.me` 从配置读（自己的 Gitea 账号）；「我的」按工单作者（`creator`）认定。`onlyUnassigned: true` 会把「他人」整档排除。**在飞工单（账本 `working` 且无 `lastFailure`）不再被捞单**：续跑只由编排 AI / `foreman retry` 触发，否则每轮巡检都会给同一张单重发一次「继续处理」；只有派单失败（有 `lastFailure`）且 `attempts < maxAttempts` 的才会在router agent/人工显式处理候选时重试。**自动 pickup Schedule 不使用这三档候选池**：它只认 `assignees` 包含 `pickup.me`，作者是我也不能替代指派。
-- **会话中心默认开**：`sessionFlow.enabled`（默认 `true`）——router agent/人工接单时每张工单各有一条编排会话，命名为 `<deliver.namePrefix>-<仓库>-<单号>-编排` 并写入 `issues[键].orchestrator`；`promptFile` 留空用内置 `src/builtin/orchestrator-prompt.md`，`projectDir` 留空回落 `deliver.projectDir`，`waitFirstReply` 默认 `false`。`pickup.handToOrchestrator`（默认 `true`）= router agent确认接单后先 `hand` 给本单编排，由它调 `dispatch`。用户从当前会话主动派单则直接绑定当前会话。关掉这两个开关（或 `run --direct`）退回老的多会话模型；`deliver.mode=new` 只影响合并会话的创建方式（PR 扫描直投与 `pr assign` 补派都走这条），扫描本身不直接建派单会话。
+- **会话中心默认开**：`sessionFlow.enabled`（默认 `true`）——router agent/人工接单时每张工单各有一条主智能体会话，命名为 `<deliver.namePrefix>-<仓库>-<单号>-编排` 并写入 `issues[键].orchestrator`；`promptFile` 留空用内置 `src/builtin/orchestrator-prompt.md`，其中包含两个内部 sub agent 的完整提示词。`projectDir` 留空回落 `deliver.projectDir`，`waitFirstReply` 默认 `false`。`pickup.handToOrchestrator`（默认 `true`）= router agent确认接单后先 `hand` 给本单主智能体，由它直接创建内部编码与对抗审查 sub agent。用户从当前会话主动发起则绑定当前会话。关掉这两个开关（或 `run --direct`）退回旧外部多会话模型；`deliver.mode=new` 只影响合并会话的创建方式，PR 扫描不直接创建内部 sub agent。
 - **服务没在跑时没人判结论**（异步的代价，不是 bug）：补法是 `foreman watch list` 看登记还在不在 → `foreman watch poll` 立刻重放一轮 → `foreman status` 看 `lastPollAt` / `pollCount` / `dwsErrors`。
 - **工作时间窗**：`workHours`（`enabled`、`days` 1=周一…7=周日、`start`/`end` 如 `08:30`–`18:30`、`offUntil` 临时闭嘴）。我的工单扫描与他人 PR 扫描只在窗口内跑；执行会话代码轮询与验收邮件不受它限制。手动 `foreman watch poll` / `foreman pr poll` / `route` / `pickup` 与 pickup「立即扫描」不受限。
 - **PR 监听**：`prWatch.enabled`（默认 `true`）、`intervalSeconds`（默认 300）、`ignoreAuthors`（自己的 Gitea 用户名，由 `pickup.me` 补齐；当前 `233151`）。他人候选写 `pr.merge` Inbox 由 Worker 建合并助手会话，本人 UI 候选写router agent Inbox；`pr assign` 只作人工补派，`notifyTarget` 与 `deliver.mode=existing` 不再参与这条生产链路。要停就 `enabled: false`。

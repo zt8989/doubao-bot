@@ -178,8 +178,8 @@ export function handoff({ repo, issue, worktree, branch, workspaces }) {
 
 // deliverPrompt：每次新建会话的首句 = 编排提示词（配置给了路径就读运行时副本，没给用内置的）
 // + 产品 + 监控项目 + 触发原因 + 本次通知正文。
-// 关键：这是**编排**提示词，新会话只决定「派单 / 续跑 / 触发审查 / 通知验收」，
-// 不是「编排提示词 + 去完成这张工单」——实现永远在执行会话里，不在这条投递会话里。
+// 关键：这是**主智能体**提示词，实现与对抗审查都交给它直接创建的内部 sub agent，
+// 不是「主提示词 + 去完成这张工单」——主智能体只编排，不亲手实现。
 export function deliverPrompt({ fixed = "", projectDir = "", product = "", kind = "", text = "", running = null, maxRunning = null, lane = "" } = {}) {
   const laneName = lane === "merge" ? "merge" : "dispatch"
   const head = String(fixed ?? "").trim() || builtinPrompt(laneName).trim()
@@ -190,7 +190,7 @@ export function deliverPrompt({ fixed = "", projectDir = "", product = "", kind 
   if (kind) online.push(`触发：${String(kind).trim()}`)
   if (lane === "merge") online.push("通道：合并（1 并发，只管合 PR）")
   else if (lane === "dispatch" && Number.isFinite(running)) {
-    online.push(`通道：派单（agent 主动派单不限在跑上限；当前在跑 ${running}）`)
+    online.push(`通道：内部 sub agent（主智能体直接创建编码与审查；当前在跑 ${running}）`)
   }
   return [
     head,
@@ -199,7 +199,7 @@ export function deliverPrompt({ fixed = "", projectDir = "", product = "", kind 
     "",
     ...(online.length ? [...online, ""] : []),
     // 角色与三条路已经在编排提示词（上面的 MD）里写过了，这里只点一下入口，不再复述一遍。
-    "按上面的编排提示词做决定，实现交给工作会话。",
+    "按上面的主提示词做决定，实现交给内部编码 sub agent。",
     "下面是本次通知的上下文（只是决策输入，不是派给你的实现任务）：",
     "",
     body,
