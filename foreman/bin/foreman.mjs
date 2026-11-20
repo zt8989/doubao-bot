@@ -608,8 +608,8 @@ async function cmdDoctor(pos, flags) {
   if (truthy(flags.start)) {
     const ctx = makeCtx(cfg)
     try {
-      await ctx.dws.status("foreman-doctor-probe")
-      checks.push({ name: "dws 窗口/登录", ok: true, detail: "能读到窗口状态" })
+      await ctx.dws.start()
+      checks.push({ name: "dws 窗口/登录", ok: true, detail: "窗口可用，已登录" })
     } catch (e) {
       checks.push({ name: "dws 窗口/登录", ok: false, detail: e.message })
     }

@@ -142,6 +142,11 @@ export class DwsDriver {
     return this.run(["archive", name], { timeout: 60000 })
   }
 
+  // start：连接或复用豆包窗口并检查登录态，不新建会话。
+  async start() {
+    return this.json(["start"], { timeout: 120000 })
+  }
+
   async status(name) {
     const r = await this.json(["status", name, "--json"], { timeout: 120000 })
     const list = Array.isArray(r?.status) ? r.status : [r?.status ?? r]
