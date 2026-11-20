@@ -58,6 +58,15 @@ test("readFixedPrompt：配置没给路径就用内置提示词；给了路径�
   }
 })
 
+test("内置智能体提示词只描述职责与技能调用时机", () => {
+  for (const name of ["router", "orchestrator", "dispatch", "merge"]) {
+    const prompt = fs.readFileSync(new URL(`../src/builtin/${name}-prompt.md`, import.meta.url), "utf8")
+    assert.match(prompt, /## 职责/, `${name} 缺少职责说明`)
+    assert.match(prompt, /## 技能调用时机/, `${name} 缺少技能调用时机`)
+    assert.doesNotMatch(prompt, /每\s*\d+\s*分钟|定时任务|定时器|Schedule|cron/i, `${name} 不应描述具体定时任务`)
+  }
+})
+
 test("deliverPrompt：编排提示词原文在前，只给编排决策，不派实现任务", () => {
   const fixed = "# 工作原则\n1. 不阻塞"
   const text = "【foreman】demo/demo#2 状态：done"
@@ -66,8 +75,9 @@ test("deliverPrompt：编排提示词原文在前，只给编排决策，不派�
   assert.match(out, /1\. 不阻塞/)
   assert.match(out, /监控项目：\/w\/win-ai-stack/)
   assert.match(out, /触发：工单结论/)
-  // 派单会话能看到在跑数，但上限只约束定时巡检；合并会话走另一条通道，不带在跑数。
-  assert.match(out, /通道：派单（agent 主动派单不限在跑上限；当前在跑 1；定时巡检上限 2）/)
+  // 派单会话只描述当前职责与在跑数，不带定时任务配置；合并会话走另一条通道。
+  assert.match(out, /通道：派单（agent 主动派单不限在跑上限；当前在跑 1）/)
+  assert.doesNotMatch(out, /定时巡检上限|定时任务/)
   assert.match(deliverPrompt({ fixed, kind: "合并完成", text, lane: "merge" }), /通道：合并（1 并发，只管合 PR）/)
   assert.ok(!deliverPrompt({ fixed, kind: "合并完成", text, lane: "merge" }).includes("在上限"))
   assert.match(out, /【foreman】demo\/demo#2 状态：done/)
@@ -108,7 +118,7 @@ test("deliverNewSession：新建一条会话投递，记账留痕但不进监听
     assert.match(calls[0].name, /^foreman-派单-/)
     assert.match(calls[0].prompt, /# 固定提示词/)
     assert.match(calls[0].prompt, /监控项目：\/w\/win-ai-stack/)
-    assert.match(calls[0].prompt, /通道：派单（agent 主动派单不限在跑上限；当前在跑 0；定时巡检上限 2）/)
+    assert.match(calls[0].prompt, /通道：派单（agent 主动派单不限在跑上限；当前在跑 0）/)
     assert.match(calls[0].prompt, /【foreman】结论/)
     assert.equal(out.convId, "conv-new")
     assert.equal(out.lane, "dispatch")

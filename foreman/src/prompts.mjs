@@ -10,6 +10,10 @@ export const FINAL_REPLY_SPEC = `结束时直接给出最终回复，用自然�
 - 未能完成时，写清缺少的信息、阻塞原因或下一步建议。
 最终结果由编排智能体结合提交、diff、测试和工单统一判断。`
 
+export const WORKER_SKILL_SPEC = `技能调用时机：
+- 需要读取或核对工单、评论、标签或 PR 时调用 gitea 技能，只使用只读能力；
+- 需要与所属编排智能体或发起方会话沟通时调用 dws 技能，只联系所属编排或发起方，不直接联系其他编码智能体。`
+
 // 从原 checkout 而不是 worktree 读根目录约定：worktree 可能基于较旧基线，原工程约定以 repos[].dir 为准。
 // 没有文件或空文件时不占提示词；文件存在但读失败要停止派单，不能悄悄丢掉工程约定。
 export function originalAgentDocs(repos = []) {
@@ -61,7 +65,6 @@ export function kickoff({ repo, issue, worktree, branch, base, workspaces, faile
     `要改的工程不在上面：停手，在最终回复里写清「缺工作区：<owner/name>」，工作区由外面补开。`,
     `改完就 commit，然后结束本轮：push、开 PR、合并、关工单、动 worktree 由外部流程接手。`,
     `提交信息用中文，首行写 “fix(#${issue.number}): <一句话>”，正文写清改法与验证方式；工作区保持干净，手上有改动就一并提交。`,
-    `工单、分支、PR 用 Gitea CLI 查（只读）：gitea issue-view --repo ${repo} ${issue.number} 看工单与评论，gitea search --repo ${repo} 列工单，gitea pull-list --repo ${repo} 看相关 PR；令牌自动取（GITEA_TOKEN 或本机默认凭据文件）。查完就回到改代码、跑测试、commit；写工单、push、PR、合并、收口由外部流程执行。`,
     multi
       ? `改完必须自己在每个动过的工程里跑相关测试；某个工程跑不了就在最终回复里写清是哪个工程、为什么。`
       : `改完必须自己跑相关测试；跑不了就在最终回复里写清原因。`,
@@ -89,7 +92,7 @@ export function kickoff({ repo, issue, worktree, branch, base, workspaces, faile
     lines.push(``, `这些工程的工作区没建成（要改就在最终回复里写清「缺工作区：<owner/name>」，工作区由外面补开）：`, ...failedWorkspaces.map((f) => `- ${f.repo}：${f.error}`))
   }
   if (lastFailure) lines.push(``, `上一次没成的反馈：${lastFailure}`)
-  lines.push(``, `要求：`, ...rules.map((r, i) => `${i + 1}. ${r}`), ``, FINAL_REPLY_SPEC)
+  lines.push(``, `要求：`, ...rules.map((r, i) => `${i + 1}. ${r}`), ``, WORKER_SKILL_SPEC, ``, FINAL_REPLY_SPEC)
   return lines.join("\n")
 }
 
@@ -113,8 +116,8 @@ export function decisionKickoff({ repo, issue, base, workspaces = [], labels = [
     (issue.body ?? "").trim() || "（正文为空，按标题理解）",
     ``,
     `这张单带着「需要人参与 / 信息不足」类标签，所以这次不是直接派活，是请你先判断再决定动不动手：`,
-    `1. 先读工单与评论（gitea issue-view --repo ${repo} ${issue.number}），必要时翻代码，弄清它到底要什么。`,
-    `2. 信息不够、或有多种合理做法：先把缺的信息、可选方案和你的推荐写清楚；需要人回答的，用 gitea issue-comment 回到工单上，等答复再动手。`,
+    `1. 先调用 gitea 技能读工单与评论，必要时翻代码，弄清它到底要什么。`,
+    `2. 信息不够、或有多种合理做法：先把缺的信息、可选方案和你的推荐写清楚；需要人回答的，通过 gitea 技能评论工单，等答复再动手。`,
     `3. 判断下来确实能做、做法也明确：直接在指定工作区里做，改完自己跑相关测试并 commit，结束本轮；push、开 PR、合并、关工单由外部流程接手。`,
     `4. 判断下来不该做（重复、已解决、方向不对）：说明理由并给出建议，工单状态与标签保持原状，由人工处理。`,
     `5. 这次没有人监听你跑完后的状态：结论、疑问、建议都写在会话里，写清依据和下一步。`
@@ -130,7 +133,7 @@ export function decisionKickoff({ repo, issue, base, workspaces = [], labels = [
       ])
     )
   }
-  lines.push(``, FINAL_REPLY_SPEC)
+  lines.push(``, WORKER_SKILL_SPEC, ``, FINAL_REPLY_SPEC)
   return lines.join("\n")
 }
 
@@ -143,6 +146,8 @@ export function resume({ issue, attempt, base = "", failure = "", repo = "", wor
     failure ? `上一次的问题：${failure}` : "上一次没有跑完，接着当前工作区状态继续，已完成的提交直接沿用。",
     `${where}。要改的工程还没有工作区：在最终回复里写清「缺工作区：<owner/name>」，改动落在指定工作区内。`,
     `改完就 commit，然后结束本轮；push、开 PR、合并、关工单、worktree 由外部流程接手。`,
+    ``,
+    WORKER_SKILL_SPEC,
     ``,
     FINAL_REPLY_SPEC,
   ].join("\n")
@@ -175,7 +180,7 @@ export function deliverPrompt({ fixed = "", projectDir = "", product = "", kind 
   if (kind) online.push(`触发：${String(kind).trim()}`)
   if (lane === "merge") online.push("通道：合并（1 并发，只管合 PR）")
   else if (lane === "dispatch" && Number.isFinite(running)) {
-    online.push(`通道：派单（agent 主动派单不限在跑上限；当前在跑 ${running}${Number.isFinite(maxRunning) ? `；定时巡检上限 ${maxRunning}` : ""}）`)
+    online.push(`通道：派单（agent 主动派单不限在跑上限；当前在跑 ${running}）`)
   }
   return [
     head,
