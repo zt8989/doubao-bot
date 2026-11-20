@@ -164,6 +164,7 @@ class FmHead extends LitElement {
     const d = this.data
     const svc = d?.service || {}
     const prw = d?.prWatch || {}
+    const historical = Boolean(this.day && this.day !== this.today)
     return html`
       <header class="topbar">
         <div class="brand">
@@ -180,9 +181,13 @@ class FmHead extends LitElement {
               .value=${this.day || this.today || ""}
               @change=${(e) => emit(this, "day-set", { day: e.target.value })}
             />
-            ${this.day && this.day !== this.today
-              ? html`<button class="ghost day-today" @click=${() => emit(this, "day-set", { day: "" })}>回到今天</button>`
-              : ""}
+            <button
+              class=${"ghost day-today" + (historical ? "" : " is-placeholder")}
+              ?disabled=${!historical}
+              aria-hidden=${historical ? "false" : "true"}
+              tabindex=${historical ? "0" : "-1"}
+              @click=${() => emit(this, "day-set", { day: "" })}
+            >回到今天</button>
           </span>` : ""}
           <span class="meta-item mono">${this._clock}</span>
           <span class=${"pill " + (svc.alive ? "on" : "off")}>
@@ -1111,25 +1116,6 @@ class FmOperations extends LitElement {
   }
 }
 
-/* ---------------- 页脚 ---------------- */
-class FmFoot extends LitElement {
-  static properties = {
-    busy: { type: String },
-  }
-  createRenderRoot() {
-    return this
-  }
-  render() {
-    const btnText = this.busy === "busy" ? "扫描中…" : this.busy === "ok" ? "已同步" : this.busy === "fail" ? "同步失败" : "立即扫描"
-    return html`
-      <footer>
-        <button class="ghost" ?disabled=${this.busy === "busy"} @click=${() => emit(this, "refresh")}>
-          ${btnText}
-        </button>
-      </footer>`
-  }
-}
-
 /* ---------------- 根组件：取数、主题、轮询 ---------------- */
 class FmConsole extends LitElement {
   static properties = {
@@ -1168,7 +1154,6 @@ class FmConsole extends LitElement {
     schedBusy: { type: String },
     schedError: { type: String },
     schedNote: { type: String },
-    busy: { type: String },
     error: { type: String },
   }
 
@@ -1220,7 +1205,6 @@ class FmConsole extends LitElement {
       const q = new URLSearchParams(location.search).get("day") || ""
       if (/^\d{4}-\d{2}-\d{2}$/.test(q)) this.day = q
     } catch {}
-    this.busy = ""
     this.error = ""
   }
 
@@ -1248,7 +1232,6 @@ class FmConsole extends LitElement {
       this.applyDayToUrl()
       this.load()
     }
-    this._onRefresh = () => this.syncNow()
     this._onView = (e) => {
       this.view = e.detail.view
       if (this.view === "inbox" || this.view === "outbox") this.loadQueue(this.view)
@@ -1286,7 +1269,6 @@ class FmConsole extends LitElement {
     }
     this.addEventListener("theme-set", this._onTheme)
     this.addEventListener("day-set", this._onDay)
-    this.addEventListener("refresh", this._onRefresh)
     this.addEventListener("view-set", this._onView)
     this.addEventListener("sidebar-toggle", this._onSidebarToggle)
     this.addEventListener("schedule-save", this._onSchedSave)
@@ -1323,9 +1305,6 @@ class FmConsole extends LitElement {
     }
     window.addEventListener("focus", this._onFocus)
 
-    this._onResize = () => this._syncTopbarHeight()
-    window.addEventListener("resize", this._onResize)
-
     this.load()
     this.loadWorkflow()
     this.loadSchedules()
@@ -1344,11 +1323,9 @@ class FmConsole extends LitElement {
   disconnectedCallback() {
     clearInterval(this._loadTimer)
     window.removeEventListener("focus", this._onFocus)
-    window.removeEventListener("resize", this._onResize)
     this._mq?.removeEventListener?.("change", this._onSystemTheme)
     this.removeEventListener("theme-set", this._onTheme)
     this.removeEventListener("day-set", this._onDay)
-    this.removeEventListener("refresh", this._onRefresh)
     this.removeEventListener("view-set", this._onView)
     this.removeEventListener("sidebar-toggle", this._onSidebarToggle)
     this.removeEventListener("schedule-save", this._onSchedSave)
@@ -1397,23 +1374,6 @@ class FmConsole extends LitElement {
       this.error = ""
     } catch (e) {
       this.error = `服务 · 拿不到数据（${e.message}）`
-    }
-  }
-
-  async syncNow() {
-    if (this.busy === "busy") return
-    this.busy = "busy"
-    try {
-      const res = await fetch("/api/sync", { method: "POST" })
-      const body = await res.json()
-      await this.load()
-      this.busy = body.ok ? "ok" : "fail"
-    } catch {
-      this.busy = "fail"
-    } finally {
-      setTimeout(() => {
-        this.busy = ""
-      }, 1600)
     }
   }
 
@@ -1693,8 +1653,7 @@ class FmConsole extends LitElement {
                 </div>
               </section>`}
         </main>
-      </div>
-      <fm-foot .busy=${this.busy}></fm-foot>`
+      </div>`
   }
 }
 
@@ -1707,5 +1666,4 @@ customElements.define("fm-tasks", FmTasks)
 customElements.define("fm-queue", FmQueue)
 customElements.define("fm-schedules", FmSchedules)
 customElements.define("fm-operations", FmOperations)
-customElements.define("fm-foot", FmFoot)
 customElements.define("fm-console", FmConsole)

@@ -73,8 +73,7 @@ fm-console {
   overflow: hidden;
 }
 
-fm-head,
-fm-foot { flex: 0 0 auto; }
+fm-head { flex: 0 0 auto; }
 
 .glow {
   position: fixed;
@@ -560,6 +559,8 @@ table.tasks tbody tr:hover { background: color-mix(in srgb, var(--accent) 4%, tr
 .day-label { font-size: 11.5px; color: var(--dimmer); }
 
 .date-pick {
+  flex: 0 0 108px;
+  width: 108px;
   font: inherit;
   font-size: 12px;
   height: 26px;
@@ -578,7 +579,8 @@ html[data-theme="dark"] .date-pick { color-scheme: dark; }
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
-.day-today { padding: 3px 8px; font-size: 11.5px; }
+.day-today { margin-left: 0; padding: 3px 8px; font-size: 11.5px; }
+.day-today.is-placeholder { visibility: hidden; pointer-events: none; }
 
 /* ---------- 扫描记录 ---------- */
 .poll-strip {
@@ -947,19 +949,6 @@ html[data-theme="dark"] .date-pick { color-scheme: dark; }
 
 .empty-title { font-size: 13.5px; color: var(--dim); }
 .empty-sub { margin-top: 6px; font-size: 12px; color: var(--dimmer); }
-
-/* ---------- 页脚 ---------- */
-footer {
-  max-width: 1180px;
-  margin: 0 auto;
-  padding: 18px 28px 28px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  font-size: 12px;
-  color: var(--dimmer);
-}
 
 .ghost {
   margin-left: auto;
