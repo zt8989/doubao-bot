@@ -194,12 +194,12 @@ fm-head { flex: 0 0 auto; }
 
 /* ---------- 主体 ---------- */
 main {
-  max-width: 1180px;
-  margin: 0 auto;
-  padding: 24px 28px 8px;
+  max-width: none;
+  margin: 0;
+  padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 16px;
 }
 
 /* ---------- 指标卡 ---------- */
@@ -658,9 +658,8 @@ html[data-theme="dark"] .date-pick { color-scheme: dark; }
   align-items: stretch;
   flex: 1;
   width: 100%;
-  max-width: 1440px;
   min-height: 0;
-  margin: 0 auto;
+  margin: 0;
   overflow: hidden;
 }
 
@@ -680,19 +679,22 @@ html[data-theme="dark"] .date-pick { color-scheme: dark; }
   z-index: 5;
   display: block;
   flex: 0 0 auto;
-  align-self: flex-start;
-  margin: 24px 0 0 20px;
+  align-self: stretch;
+  margin: 0;
 }
 
 .sidebar {
   position: relative;
   z-index: 1;
   width: 176px;
+  height: 100%;
   padding: 8px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
+  border-width: 0 1px 0 0;
+  border-style: solid;
+  border-color: var(--line);
+  border-radius: 0;
   background: var(--panel);
-  box-shadow: var(--shadow);
+  box-shadow: none;
   transition: width 0.18s ease;
 }
 
@@ -972,7 +974,7 @@ html[data-theme="dark"] .date-pick { color-scheme: dark; }
 
 /* ---------- Chat：Inbox → Worker → Router Agent ---------- */
 fm-chat { display: flex; flex: 1; min-height: 0; }
-.chat-panel { width: 100%; max-width: 1080px; margin: 0 auto; padding: 0; display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: hidden; }
+.chat-panel { width: 100%; margin: 0; padding: 0; display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: hidden; }
 .chat-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 24px 12px; }
 .chat-head h2 { margin: 0; font-size: 20px; }
 .chat-head .eyebrow { margin-bottom: 3px; color: var(--dimmer); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
@@ -1026,8 +1028,8 @@ fm-chat { display: flex; flex: 1; min-height: 0; }
 
   /* 侧栏改成顶部一条可横向滚动的导航，不再占掉正文宽度 */
   .app-shell { flex-direction: column; align-items: stretch; }
-  .app-shell > fm-sidebar { position: static; top: auto; flex: 0 0 auto; margin: 10px 10px 0; width: auto; display: block; }
-  .sidebar { width: 100%; padding: 6px; }
+  .app-shell > fm-sidebar { position: static; top: auto; flex: 0 0 auto; margin: 0; width: auto; display: block; }
+  .sidebar { width: 100%; height: auto; padding: 6px; border-width: 0 0 1px; }
   .side-nav { flex-direction: row; overflow-x: auto; gap: 4px; scrollbar-width: none; }
   .side-nav::-webkit-scrollbar { display: none; }
   .sidebar .side-text { display: none; }
