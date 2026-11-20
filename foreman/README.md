@@ -202,6 +202,8 @@ foreman worker run             # 手动消费一轮（排障；正常由 wake/�
 
 服务只有一条 HTTP 通道：CLI 的 RPC、控制台页面、控制台接口都在这一个端口上，不另起进程、没有 socket。
 
+测试实例可用 `FOREMAN_CONFIG_DIR=<目录> foreman serve` 启动：服务从该目录读取 `config.json`，未显式配置的 `state.json`、SQLite、pid、日志、端口文件、token 与记忆目录都落在该目录，避免与正式的 `~/.foreman` 混用。监听端口仍由 `config.json` 的 `service.http.port` 配置；显式 `-c <配置>` 优先于环境目录，配置文件里显式写出的路径不会被环境目录改写。
+
 ```json
 {
   "service": {

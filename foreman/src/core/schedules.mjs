@@ -1,9 +1,9 @@
 // 定时任务只以 SQLite 为准；config.json 仅在首次初始化时提供旧配置迁移值。
 // 页面上一键启停，写入 agent_schedules / agent_schedule_settings 并立刻重排定时器。
-import { inWorkHours } from "./util.mjs"
+import { inWorkHours } from "../util.mjs"
 import { validateCron, nextCronTime } from "./cron.mjs"
 import { normalizeScriptExecutor, scriptExecutor } from "./executors.mjs"
-import { agentScheduleCwd } from "./config.mjs"
+import { agentScheduleCwd } from "../config.mjs"
 
 const pad = (n) => String(n).padStart(2, "0")
 

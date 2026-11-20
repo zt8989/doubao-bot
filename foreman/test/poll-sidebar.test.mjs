@@ -7,7 +7,7 @@ import path from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { pollOnce } from "../src/service.mjs"
 import { Book } from "../src/book.mjs"
-import { InboxStore, AgentWorker } from "../src/inbox.mjs"
+import { InboxStore, AgentWorker } from "../src/core/inbox.mjs"
 import { deliverTaskUpdate } from "../src/taskevents.mjs"
 
 function mkCtx({ runningMap, status, notify }) {

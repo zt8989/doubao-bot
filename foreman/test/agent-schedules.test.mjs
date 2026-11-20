@@ -5,8 +5,8 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { DatabaseSync } from "node:sqlite"
-import { listSchedules, applySchedules, hydrateSchedules, scheduleDefinitions, saveScheduleSettings } from "../src/schedules.mjs"
-import { InboxStore, ScheduleRunner } from "../src/inbox.mjs"
+import { listSchedules, applySchedules, hydrateSchedules, scheduleDefinitions, saveScheduleSettings } from "../src/core/schedules.mjs"
+import { InboxStore, ScheduleRunner } from "../src/core/inbox.mjs"
 import { loadConfig, DEFAULT_AGENT_CWD } from "../src/config.mjs"
 
 const entry = () => ({

@@ -165,3 +165,41 @@ test("pickup.auto 只认布尔 true，字符串 \"true\" 不算开关", () => {
   const { file } = tmpConfig({ repos: [{ repo: "a/b", dir: "/tmp", base: "sit-test" }], pickup: { auto: "true" } })
   assert.equal(loadConfig(file).pickup.auto, false)
 })
+
+test("测试环境变量选择配置目录并隔离默认运行文件", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-env-"))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify({ service: { http: { port: 7417 } } }))
+
+  const cfg = loadConfig(undefined, { FOREMAN_CONFIG_DIR: dir })
+  assert.equal(cfg.configPath, path.join(dir, "config.json"))
+  assert.equal(cfg.service.http.port, 7417)
+  assert.equal(cfg.stateFile, path.join(dir, "state.json"))
+  assert.equal(cfg.memory.dir, path.join(dir, "memory"))
+  assert.equal(cfg.service.pidFile, path.join(dir, "foreman.pid"))
+  assert.equal(cfg.service.logFile, path.join(dir, "service.log"))
+  assert.equal(cfg.service.http.portFile, path.join(dir, "service.port"))
+  assert.equal(cfg.service.http.tokenFile, path.join(dir, "console.token"))
+  assert.equal(cfg.service.http.db, path.join(dir, "console.db"))
+})
+
+test("显式 -c 与配置路径优先于环境目录", (t) => {
+  const envDir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-env-dir-"))
+  t.after(() => fs.rmSync(envDir, { recursive: true, force: true }))
+  const { file } = tmpConfig({
+    service: {
+      pidFile: "custom/service.pid",
+      logFile: "custom/service.log",
+      http: { port: 7417, portFile: "custom/service.port", tokenFile: "custom/console.token", db: "custom/console.db" },
+    },
+  })
+
+  const cfg = loadConfig(file, { FOREMAN_CONFIG_DIR: envDir })
+  assert.equal(cfg.configPath, file)
+  assert.equal(cfg.service.http.port, 7417)
+  assert.equal(cfg.service.pidFile, path.join(path.dirname(file), "custom/service.pid"))
+  assert.equal(cfg.service.logFile, path.join(path.dirname(file), "custom/service.log"))
+  assert.equal(cfg.service.http.portFile, path.join(path.dirname(file), "custom/service.port"))
+  assert.equal(cfg.service.http.tokenFile, path.join(path.dirname(file), "custom/console.token"))
+  assert.equal(cfg.service.http.db, path.join(path.dirname(file), "custom/console.db"))
+})

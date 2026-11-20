@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { agentExecutor, runConfiguredScript, scriptExecutor } from "../src/executors.mjs"
+import { agentExecutor, runConfiguredScript, scriptExecutor } from "../src/core/executors.mjs"
 
 const cfg = () => ({ prWatch: {}, mail: {}, router: {} })
 

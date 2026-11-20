@@ -1,4 +1,4 @@
-import { MemoryStore } from "./memory.mjs"
+import { MemoryStore } from "./core/memory.mjs"
 
 function localDay(date) {
   const pad = (value) => String(value).padStart(2, "0")

@@ -4,7 +4,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { DatabaseSync } from "node:sqlite"
-import { InboxStore } from "../src/inbox.mjs"
+import { InboxStore } from "../src/core/inbox.mjs"
 import { Book } from "../src/book.mjs"
 import { enqueueTaskUpdate, deliverTaskUpdate, taskOwner } from "../src/taskevents.mjs"
 

@@ -4,7 +4,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { DatabaseSync } from "node:sqlite"
-import { OutboxStore, OutboxDispatcher } from "../src/outbox.mjs"
+import { OutboxStore, OutboxDispatcher } from "../src/core/outbox.mjs"
 import { startServer } from "../src/service.mjs"
 
 const AT = "2026-11-19T00:00:00.000Z"

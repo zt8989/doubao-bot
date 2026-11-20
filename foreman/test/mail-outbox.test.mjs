@@ -4,7 +4,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { DatabaseSync } from "node:sqlite"
-import { OutboxStore, OutboxDispatcher } from "../src/outbox.mjs"
+import { OutboxStore, OutboxDispatcher } from "../src/core/outbox.mjs"
 import { requestAcceptance, requestOf, acceptanceGate, mailAcceptanceSent, mailAcceptanceFailed } from "../src/mailflow.mjs"
 import { Book } from "../src/book.mjs"
 

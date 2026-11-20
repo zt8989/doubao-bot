@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { DatabaseSync } from "node:sqlite"
-import { OutboxStore } from "../src/outbox.mjs"
+import { OutboxStore } from "../src/core/outbox.mjs"
 import { enqueueOutbound, outboundPayload } from "../src/outbound.mjs"
 
 test("统一 send 校验 mail/lark 参数，不提供 lark send 独立通道", () => {

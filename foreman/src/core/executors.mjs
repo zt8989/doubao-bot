@@ -1,9 +1,9 @@
 // Schedule 执行器配置：页面展示、持久化与实际运行共用同一份定义。
 import path from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
-import { builtinPrompt } from "./builtin-prompts.mjs"
+import { builtinPrompt } from "../builtin-prompts.mjs"
 
-const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
+const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 
 const SCRIPT_DEFAULTS = {
   pickup: { path: "src/service.mjs", exportName: "pickupPollOnce", args: {} },

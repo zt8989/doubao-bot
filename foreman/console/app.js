@@ -5,6 +5,7 @@
  * 组件都用 light DOM（createRenderRoot 返回 this），样式继续吃 style.css 的全局类。
  */
 import { LitElement, html } from "lit"
+import "./chat.js"
 
 const STATE_LABEL = {
   planned: "已计划",
@@ -73,6 +74,9 @@ class FmThemeSwitch extends LitElement {
 
 /* ---------------- 左侧导航 ---------------- */
 function navIcon(id) {
+  if (id === "chat") {
+    return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v13H9l-5 4V4zM8 9h8M8 13h5"/></svg>`
+  }
   if (id === "inbox") {
     return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v14H4zM4 14h4l2 3h4l2-3h4M12 4v7M9 8l3 3 3-3"/></svg>`
   }
@@ -95,10 +99,11 @@ class FmSidebar extends LitElement {
   }
   render() {
     const views = [
+      { id: "chat", label: "Chat" },
       { id: "inbox", label: "Inbox" },
       { id: "outbox", label: "Outbox" },
       { id: "tasks", label: "Tasks" },
-      { id: "schedules", label: "设置" },
+      { id: "schedules", label: "Schedule" },
       { id: "operations", label: "操作日志" },
     ]
     return html`
@@ -159,6 +164,7 @@ class FmHead extends LitElement {
     const d = this.data
     const svc = d?.service || {}
     const prw = d?.prWatch || {}
+    const historical = Boolean(this.day && this.day !== this.today)
     return html`
       <header class="topbar">
         <div class="brand">
@@ -175,9 +181,13 @@ class FmHead extends LitElement {
               .value=${this.day || this.today || ""}
               @change=${(e) => emit(this, "day-set", { day: e.target.value })}
             />
-            ${this.day && this.day !== this.today
-              ? html`<button class="ghost day-today" @click=${() => emit(this, "day-set", { day: "" })}>回到今天</button>`
-              : ""}
+            <button
+              class=${"ghost day-today" + (historical ? "" : " is-placeholder")}
+              ?disabled=${!historical}
+              aria-hidden=${historical ? "false" : "true"}
+              tabindex=${historical ? "0" : "-1"}
+              @click=${() => emit(this, "day-set", { day: "" })}
+            >回到今天</button>
           </span>` : ""}
           <span class="meta-item mono">${this._clock}</span>
           <span class=${"pill " + (svc.alive ? "on" : "off")}>
@@ -879,7 +889,7 @@ class FmSchedules extends LitElement {
     return html`
       <section class="panel">
         <div class="panel-head">
-          <h2>设置</h2>
+          <h2>Schedule</h2>
           <div class="panel-side"><span class="hint">列表只读；进入详情或编辑后管理任务</span></div>
         </div>
         ${this.messages()}
@@ -1106,41 +1116,6 @@ class FmOperations extends LitElement {
   }
 }
 
-/* ---------------- 页脚 ---------------- */
-class FmFoot extends LitElement {
-  static properties = {
-    data: { attribute: false },
-    busy: { type: String },
-  }
-  createRenderRoot() {
-    return this
-  }
-  render() {
-    const d = this.data
-    const st = d?.storage
-    const btnText = this.busy === "busy" ? "扫描中…" : this.busy === "ok" ? "已同步" : this.busy === "fail" ? "同步失败" : "立即扫描"
-    return html`
-      <footer>
-        <span>数据源 · ${st ? `${st.driver} · ${st.file.split("/").pop()}` : "—"}</span>
-        <span class="dot-sep">·</span>
-        <span>账本更新 · ${d?.generatedAtClock || "—"}</span>
-        <span class="dot-sep">·</span>
-        <span>快照生成 · ${d?.generatedAtClock || "—"}</span>
-        <span class="dot-sep">·</span>
-        <span>
-          ${st ? `SQLite · 去重键 ${st.uniqueKey} · 快照 ${st.rows.polls} 次` : "SQLite · —"}
-        </span>
-        <span class="dot-sep">·</span>
-        <span>
-          ${`API · /api/snapshot · ${d?.isToday === false ? `${d.day} · ` : ""}${d?.tasks?.length ?? 0} 单 / ${d?.prs?.length ?? 0} PR`}
-        </span>
-        <button class="ghost" ?disabled=${this.busy === "busy"} @click=${() => emit(this, "refresh")}>
-          ${btnText}
-        </button>
-      </footer>`
-  }
-}
-
 /* ---------------- 根组件：取数、主题、轮询 ---------------- */
 class FmConsole extends LitElement {
   static properties = {
@@ -1179,7 +1154,6 @@ class FmConsole extends LitElement {
     schedBusy: { type: String },
     schedError: { type: String },
     schedNote: { type: String },
-    busy: { type: String },
     error: { type: String },
   }
 
@@ -1187,8 +1161,8 @@ class FmConsole extends LitElement {
     super()
     this.data = null
     this.mode = "system"
-    // 首页主导航：Inbox / Outbox / Tasks；默认保留任务总览。
-    this.view = "tasks"
+    // Chat 是默认工作台；原有 Inbox / Outbox / Tasks 保留为运维视图。
+    this.view = "chat"
     try {
       this.sidebarCollapsed = localStorage.getItem(SIDEBAR_KEY) === "1"
     } catch {
@@ -1231,24 +1205,11 @@ class FmConsole extends LitElement {
       const q = new URLSearchParams(location.search).get("day") || ""
       if (/^\d{4}-\d{2}-\d{2}$/.test(q)) this.day = q
     } catch {}
-    this.busy = ""
     this.error = ""
   }
 
   createRenderRoot() {
     return this
-  }
-
-  // 左侧导航的吸附位置跟着顶栏真实高度走（顶栏一行 / 窄屏换行都能对上），
-  // 免得写死 px 让侧边栏在滚动第一下跳一下。
-  _syncTopbarHeight() {
-    const bar = this.querySelector("fm-head .topbar")
-    const h = bar ? Math.round(bar.getBoundingClientRect().height) : 0
-    if (h > 0) document.documentElement.style.setProperty("--fm-topbar-h", `${h}px`)
-  }
-
-  updated() {
-    this._syncTopbarHeight()
   }
 
   connectedCallback() {
@@ -1271,7 +1232,6 @@ class FmConsole extends LitElement {
       this.applyDayToUrl()
       this.load()
     }
-    this._onRefresh = () => this.syncNow()
     this._onView = (e) => {
       this.view = e.detail.view
       if (this.view === "inbox" || this.view === "outbox") this.loadQueue(this.view)
@@ -1309,7 +1269,6 @@ class FmConsole extends LitElement {
     }
     this.addEventListener("theme-set", this._onTheme)
     this.addEventListener("day-set", this._onDay)
-    this.addEventListener("refresh", this._onRefresh)
     this.addEventListener("view-set", this._onView)
     this.addEventListener("sidebar-toggle", this._onSidebarToggle)
     this.addEventListener("schedule-save", this._onSchedSave)
@@ -1346,9 +1305,6 @@ class FmConsole extends LitElement {
     }
     window.addEventListener("focus", this._onFocus)
 
-    this._onResize = () => this._syncTopbarHeight()
-    window.addEventListener("resize", this._onResize)
-
     this.load()
     this.loadWorkflow()
     this.loadSchedules()
@@ -1367,11 +1323,9 @@ class FmConsole extends LitElement {
   disconnectedCallback() {
     clearInterval(this._loadTimer)
     window.removeEventListener("focus", this._onFocus)
-    window.removeEventListener("resize", this._onResize)
     this._mq?.removeEventListener?.("change", this._onSystemTheme)
     this.removeEventListener("theme-set", this._onTheme)
     this.removeEventListener("day-set", this._onDay)
-    this.removeEventListener("refresh", this._onRefresh)
     this.removeEventListener("view-set", this._onView)
     this.removeEventListener("sidebar-toggle", this._onSidebarToggle)
     this.removeEventListener("schedule-save", this._onSchedSave)
@@ -1420,23 +1374,6 @@ class FmConsole extends LitElement {
       this.error = ""
     } catch (e) {
       this.error = `服务 · 拿不到数据（${e.message}）`
-    }
-  }
-
-  async syncNow() {
-    if (this.busy === "busy") return
-    this.busy = "busy"
-    try {
-      const res = await fetch("/api/sync", { method: "POST" })
-      const body = await res.json()
-      await this.load()
-      this.busy = body.ok ? "ok" : "fail"
-    } catch {
-      this.busy = "fail"
-    } finally {
-      setTimeout(() => {
-        this.busy = ""
-      }, 1600)
     }
   }
 
@@ -1653,8 +1590,10 @@ class FmConsole extends LitElement {
       <fm-head .data=${this.data} .mode=${this.mode} .error=${this.error} .day=${this.day} .today=${this.data?.today || ""} .view=${this.view}></fm-head>
       <div class="app-shell">
         <fm-sidebar .view=${this.view} .collapsed=${this.sidebarCollapsed}></fm-sidebar>
-        <main>
-        ${this.view === "schedules"
+        <main class=${this.view === "chat" ? "is-chat" : ""}>
+        ${this.view === "chat"
+          ? html`<fm-chat></fm-chat>`
+          : this.view === "schedules"
           ? html`<fm-schedules .schedules=${this.schedules} .workHours=${this.workHours} .busy=${this.schedBusy} .error=${this.schedError} .note=${this.schedNote}></fm-schedules>`
           : this.view === "operations"
           ? html`<fm-operations .operations=${this.operations} .filter=${this.opFilter}></fm-operations>`
@@ -1714,8 +1653,7 @@ class FmConsole extends LitElement {
                 </div>
               </section>`}
         </main>
-      </div>
-      <fm-foot .data=${this.data} .busy=${this.busy}></fm-foot>`
+      </div>`
   }
 }
 
@@ -1728,5 +1666,4 @@ customElements.define("fm-tasks", FmTasks)
 customElements.define("fm-queue", FmQueue)
 customElements.define("fm-schedules", FmSchedules)
 customElements.define("fm-operations", FmOperations)
-customElements.define("fm-foot", FmFoot)
 customElements.define("fm-console", FmConsole)

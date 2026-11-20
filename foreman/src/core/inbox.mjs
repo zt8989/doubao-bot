@@ -113,17 +113,17 @@ export class InboxStore {
   }
 
   // 调用方必须已持有 tx；Schedule 用它把「推进下次时间 + 写事件」放在同一事务。
-  _enqueue({ kind, text = "", payload = {}, dedupeKey = "", coalesceKey = "", availableAt = "", expiresAt = "" }, now = new Date()) {
+  _enqueue({ kind, text = "", payload = {}, dedupeKey = "", coalesceKey = "", availableAt = "", expiresAt = "", dedupeMode = "active" }, now = new Date()) {
     if (!String(kind || "").trim()) throw new Error("Inbox 事件缺少 kind")
     const at = iso(now)
     if (dedupeKey) {
-      // PR 扫描会重放同一候选；done 的 pr.candidates 事件也必须挡重，
-      // 防止 state.json 游标失效时同一通知在下一轮重新入队。
+      // PR 扫描重放候选时连 done 也挡重；Chat 的 clientId 则跨全部完成状态去重。
       const prNotice = kind === "router.notice" && payload?.type === "pr.candidates"
       const statuses = prNotice ? "('pending', 'processing', 'done')" : ACTIVE
-      const duplicate = this.db.prepare(`SELECT id, status FROM agent_inbox WHERE dedupe_key = ? AND status IN ${statuses} ORDER BY id DESC LIMIT 1`).get(dedupeKey)
+      const status = dedupeMode === "forever" ? "" : ` AND status IN ${statuses}`
+      const duplicate = this.db.prepare(`SELECT id, status FROM agent_inbox WHERE dedupe_key = ?${status} ORDER BY id DESC LIMIT 1`).get(dedupeKey)
       if (duplicate) {
-        const reason = duplicate.status === "done" ? "duplicate-delivered" : "duplicate"
+        const reason = prNotice && duplicate.status === "done" ? "duplicate-delivered" : "duplicate"
         const id = this.insert({ kind, text, payload, dedupeKey, coalesceKey, availableAt, expiresAt, status: "dropped", reason }, at)
         return { id, status: "dropped", reason, duplicateOf: Number(duplicate.id) }
       }

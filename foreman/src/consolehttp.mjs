@@ -210,6 +210,20 @@ export function startConsoleHttp({ store, ctx, dir, host, port, token = "", log 
         return sendJson(res, 200, r)
       }
 
+      if (pathname === "/api/chat") {
+        if (!onRpc) return sendJson(res, 501, { ok: false, error: "rpc_not_enabled" })
+        if (req.method === "GET") return sendJson(res, 200, await onRpc({ id: "http-chat-messages", cmd: "chat messages" }))
+        if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
+        let body
+        try {
+          body = await readBody(req)
+        } catch (e) {
+          return sendJson(res, 400, { ok: false, error: e.code || "bad_request", message: e.message })
+        }
+        const result = await onRpc({ id: "http-chat-send", cmd: "chat send", text: body?.text, clientId: body?.clientId })
+        return sendJson(res, result?.ok === false ? 400 : 202, result)
+      }
+
       if (pathname === "/api/rpc") {
         if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
         if (!onRpc) return sendJson(res, 501, { ok: false, error: "rpc_not_enabled" })

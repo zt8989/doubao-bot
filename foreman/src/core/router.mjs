@@ -1,5 +1,5 @@
 // router agent：接收未定向消息、巡检、接单与异常分派；Foreman 只负责持久投递和会话轮换。
-import { Book } from "./book.mjs"
+import { Book } from "../book.mjs"
 import { agentExecutor } from "./executors.mjs"
 import { memoryBootstrap } from "./memory.mjs"
 
@@ -31,7 +31,7 @@ function saveRouterRecord(book, value) {
   book.data.inspector = value
 }
 
-async function deliver(ctx, rec, text, { now, action, reason = "" }) {
+async function deliver(ctx, rec, text, { now, action, reason = "", scheduled = false }) {
   const { cfg, dws } = ctx
   const book = new Book(cfg.stateFile)
   let convId = rec?.convId ?? ""
@@ -44,7 +44,9 @@ async function deliver(ctx, rec, text, { now, action, reason = "" }) {
       memoryBootstrap(cfg),
       projectDir ? `监控项目目录：${projectDir}` : "",
       rec?.convId ? `上一条 router agent 会话 ${rec.convId} 已连续 24 小时未成功接收消息；你接替它，不假定旧会话仍可用。` : "",
-      "这是首次巡检，请按上面的职责开始检查。",
+      scheduled
+        ? "这是首次巡检，请按上面的职责开始检查。"
+        : "这是 router agent 的首条事件，请按上面的职责处理。",
       text,
     ].filter(Boolean).join("\n\n")
     const opened = await dws.openNew({ name, prompt: first, noWait: true })
@@ -114,7 +116,7 @@ export async function routerOnce(ctx, { now = new Date(), force = false, notice 
     }
     sections.push(...noticeList)
     const text = sections.join("\n\n")
-    const out = await deliver(ctx, rec, text, { now, action, reason: stale ? "stale-24h" : "" })
+    const out = await deliver(ctx, rec, text, { now, action, reason: stale ? "stale-24h" : "", scheduled: includeScheduled })
     runtime.lastAt = out.sentAt
     runtime.count = Number(runtime.count ?? 0) + 1
     runtime.lastResult = out
