@@ -51,23 +51,61 @@ const STATE_STAGE = {
   failed: "develop",
 }
 
-/* ---------------- 主题切换 ---------------- */
+/* ---------------- 主题切换（下拉） ---------------- */
+const THEME_OPTIONS = [
+  { value: "light", label: "亮色" },
+  { value: "dark", label: "暗色" },
+  { value: "system", label: "跟随系统" },
+]
+
 class FmThemeSwitch extends LitElement {
-  static properties = { mode: { type: String } }
+  static properties = { mode: { type: String }, open: { type: Boolean } }
   createRenderRoot() {
     return this
   }
+  constructor() {
+    super()
+    this.open = false
+    this._onDocClick = (e) => {
+      if (!this.contains(e.target)) this.open = false
+    }
+  }
+  connectedCallback() {
+    super.connectedCallback()
+    document.addEventListener("click", this._onDocClick, true)
+  }
+  disconnectedCallback() {
+    document.removeEventListener("click", this._onDocClick, true)
+    super.disconnectedCallback()
+  }
+  pick(value) {
+    this.open = false
+    emit(this, "theme-set", { mode: value })
+  }
   render() {
-    const btn = (mode, label) => html`
-      <button
-        type="button"
-        class=${this.mode === mode ? "is-active" : ""}
-        aria-pressed=${this.mode === mode ? "true" : "false"}
-        @click=${() => emit(this, "theme-set", { mode })}
-      >${label}</button>`
+    const current = THEME_OPTIONS.find((o) => o.value === this.mode) || THEME_OPTIONS[2]
     return html`
-      <div class="theme-switch" role="group" aria-label="主题">
-        ${btn("light", "亮")}${btn("dark", "暗")}${btn("system", "自动")}
+      <div class="theme-switch ${this.open ? "is-open" : ""}">
+        <button
+          type="button"
+          class="theme-trigger"
+          aria-haspopup="listbox"
+          aria-expanded=${this.open ? "true" : "false"}
+          @click=${() => { this.open = !this.open }}
+        >
+          <span class="theme-label">${current.label}</span>
+          <svg class="theme-caret" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5 6 7.5 9 4.5" /></svg>
+        </button>
+        ${this.open ? html`
+          <ul class="theme-menu" role="listbox" aria-label="主题">
+            ${THEME_OPTIONS.map((o) => html`
+              <li
+                role="option"
+                aria-selected=${o.value === this.mode ? "true" : "false"}
+                class=${o.value === this.mode ? "is-active" : ""}
+                @click=${() => this.pick(o.value)}
+              >${o.label}</li>`)}
+          </ul>` : ""}
       </div>`
   }
 }
@@ -93,7 +131,7 @@ function navIcon(id) {
 }
 
 class FmSidebar extends LitElement {
-  static properties = { view: { type: String }, collapsed: { type: Boolean } }
+  static properties = { view: { type: String }, collapsed: { type: Boolean }, alive: { type: Boolean } }
   createRenderRoot() {
     return this
   }
@@ -108,6 +146,10 @@ class FmSidebar extends LitElement {
     ]
     return html`
       <aside class=${"sidebar" + (this.collapsed ? " is-collapsed" : "")} aria-label="控制台导航">
+        <div class="brand">
+          <span class=${"pulse" + (this.alive === false ? " is-off" : "")}></span>
+          <span class="brand-text">FOREMAN<span class="thin">/CONSOLE</span></span>
+        </div>
         <nav class="side-nav">
           ${views.map((v) => html`
             <button
@@ -144,34 +186,41 @@ class FmHead extends LitElement {
     day: { type: String },
     today: { type: String },
     view: { type: String },
+    chatState: { attribute: false },
   }
   createRenderRoot() {
     return this
   }
   connectedCallback() {
     super.connectedCallback()
-    this._clock = "--:--:--"
-    this._timer = setInterval(() => {
-      this._clock = clockText()
-      this.requestUpdate()
-    }, 1000)
+    this.chatState = this.chatState || {}
   }
-  disconnectedCallback() {
-    clearInterval(this._timer)
-    super.disconnectedCallback()
+  refreshChat() {
+    emit(this, "chat-refresh")
   }
   render() {
     const d = this.data
-    const svc = d?.service || {}
-    const prw = d?.prWatch || {}
     const historical = Boolean(this.day && this.day !== this.today)
+    const cs = this.chatState || {}
+    const chatStatusText = cs.running ? "处理中" : cs.pending ? "等待 Worker" : "已连接"
+    const chatStatusClass = cs.running || cs.pending ? "is-running" : ""
     return html`
       <header class="topbar">
-        <div class="brand">
-          <span class=${"pulse" + (d && !svc.alive ? " is-off" : "")}></span>
-          <span class="brand-text">FOREMAN<span class="thin">/CONSOLE</span></span>
-        </div>
+        ${this.view === "chat"
+          ? html`<div class="topbar-title">
+              <div class="eyebrow">Router Agent</div>
+              <h2>Chat</h2>
+            </div>`
+          : html`<div class="topbar-title">
+              <h2>${({ inbox: "Inbox", outbox: "Outbox", tasks: "Tasks", schedules: "Schedule", operations: "操作日志" })[this.view] || "Foreman"}</h2>
+            </div>`}
         <div class="meta">
+          ${this.view === "chat" ? html`
+            <span class=${"chat-status " + chatStatusClass}>${chatStatusText}</span>
+            <button class="ghost" type="button" ?disabled=${cs.loading} @click=${() => this.refreshChat()}>
+              ${cs.loading ? "刷新中…" : "刷新"}
+            </button>
+          ` : ""}
           ${this.view === "tasks" ? html`<span class="meta-item day-wrap">
             <span class="day-label">看哪天</span>
             <input
@@ -189,13 +238,6 @@ class FmHead extends LitElement {
               @click=${() => emit(this, "day-set", { day: "" })}
             >回到今天</button>
           </span>` : ""}
-          <span class="meta-item mono">${this._clock}</span>
-          <span class=${"pill " + (svc.alive ? "on" : "off")}>
-            ${this.error ? this.error : svc.alive ? `服务 · 运行中 pid ${svc.pid}` : "服务 · 未运行"}
-          </span>
-          <span class=${"pill " + (prw.enabled ? "on" : "off")}>
-            间隔 · ${prw.intervalSeconds ? `${prw.intervalSeconds}s` : "未开"}
-          </span>
           <fm-theme-switch .mode=${this.mode}></fm-theme-switch>
         </div>
       </header>`
@@ -1156,12 +1198,14 @@ class FmConsole extends LitElement {
     schedError: { type: String },
     schedNote: { type: String },
     error: { type: String },
+    chatState: { attribute: false },
   }
 
   constructor() {
     super()
     this.data = null
     this.mode = "system"
+    this.chatState = {}
     // Chat 是默认工作台；原有 Inbox / Outbox / Tasks 保留为运维视图。
     this.view = "chat"
     try {
@@ -1296,6 +1340,17 @@ class FmConsole extends LitElement {
     this.addEventListener("candidate-pick", this._onCandidatePick)
     this.addEventListener("task-complete", this._onTaskComplete)
 
+    // Chat ↔ 顶栏桥接：fm-chat 把 running/pending/loading 冒泡上来，fm-head 的「刷新」按钮再回派给 fm-chat。
+    this._onChatState = (e) => {
+      this.chatState = { ...(e.detail || {}) }
+    }
+    this._onChatRefresh = () => {
+      const chat = this.querySelector("fm-chat")
+      chat?.load?.()
+    }
+    this.addEventListener("chat-state", this._onChatState)
+    this.addEventListener("chat-refresh", this._onChatRefresh)
+
     this._onFocus = () => {
       this.load()
       this.loadWorkflow()
@@ -1340,6 +1395,8 @@ class FmConsole extends LitElement {
     this.removeEventListener("candidates-refresh", this._onCandRefresh)
     this.removeEventListener("candidate-pick", this._onCandidatePick)
     this.removeEventListener("task-complete", this._onTaskComplete)
+    this.removeEventListener("chat-state", this._onChatState)
+    this.removeEventListener("chat-refresh", this._onChatRefresh)
     super.disconnectedCallback()
   }
 
@@ -1588,9 +1645,21 @@ class FmConsole extends LitElement {
 
   render() {
     return html`
-      <fm-head .data=${this.data} .mode=${this.mode} .error=${this.error} .day=${this.day} .today=${this.data?.today || ""} .view=${this.view}></fm-head>
-      <div class="app-shell">
-        <fm-sidebar .view=${this.view} .collapsed=${this.sidebarCollapsed}></fm-sidebar>
+      <fm-sidebar
+        .view=${this.view}
+        .collapsed=${this.sidebarCollapsed}
+        .alive=${this.data?.service?.alive !== false}
+      ></fm-sidebar>
+      <div class="main-col">
+        <fm-head
+          .data=${this.data}
+          .mode=${this.mode}
+          .error=${this.error}
+          .day=${this.day}
+          .today=${this.data?.today || ""}
+          .view=${this.view}
+          .chatState=${this.chatState || {}}
+        ></fm-head>
         <main class=${this.view === "chat" ? "is-chat" : ""}>
         ${this.view === "chat"
           ? html`<fm-chat></fm-chat>`

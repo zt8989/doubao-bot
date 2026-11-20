@@ -48,6 +48,12 @@ class FmChat extends LitElement {
   updated() {
     const list = this.querySelector(".chat-messages")
     if (list) list.scrollTop = list.scrollHeight
+    // 把 chat 状态冒泡到 <fm-console>，由顶栏 fm-head 渲染（顶栏融合）。
+    emit(this, "chat-state", {
+      running: !!this.conversation?.running,
+      pending: !!this.conversation?.pending,
+      loading: !!this.loading,
+    })
   }
 
   async load() {
@@ -134,20 +140,6 @@ class FmChat extends LitElement {
     }
     const pendingMessages = this.conversation?.pendingMessages || []
     return html`<section class="panel chat-panel">
-      <div class="chat-head">
-        <div>
-          <div class="eyebrow">Router Agent</div>
-          <h2>Chat</h2>
-        </div>
-        <div class="chat-head-actions">
-          <span class=${`chat-status ${this.conversation?.running || this.conversation?.pending ? "is-running" : ""}`}>
-            ${this.conversation?.running ? "处理中" : this.conversation?.pending ? "等待 Worker" : "已连接"}
-          </span>
-          <button class="ghost" type="button" ?disabled=${this.loading} @click=${() => this.load()}>
-            ${this.loading ? "刷新中…" : "刷新"}
-          </button>
-        </div>
-      </div>
       <div class="chat-transport">Inbox 持久化 · Worker 串行投递 · Router Agent 会话</div>
       <div class="chat-messages" aria-live="polite">
         ${messages.length ? messages.map((message) => this.renderMessage(message)) : html`

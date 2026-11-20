@@ -68,16 +68,17 @@ const sendJson = (res, code, body) => {
   res.end(text)
 }
 
-function serveStatic(res, dir, name, { immutable = false } = {}) {
+function serveStatic(res, dir, name, { immutable = false, noStore = false } = {}) {
   const file = path.join(dir, name)
   if (!fs.existsSync(file)) {
     res.writeHead(404, { "content-type": "text/plain; charset=utf-8" })
     return res.end("not found")
   }
   const buf = fs.readFileSync(file)
+  const cacheControl = noStore ? "no-store" : immutable ? "public, max-age=31536000, immutable" : "no-cache"
   res.writeHead(200, {
     "content-type": MIME[path.extname(name)] || "application/octet-stream",
-    "cache-control": immutable ? "public, max-age=31536000, immutable" : "no-cache",
+    "cache-control": cacheControl,
   })
   res.end(buf)
 }
@@ -436,7 +437,7 @@ export function startConsoleHttp({ store, ctx, dir, host, port, token = "", log 
       // assets 文件名带 hash → 长缓存；页面本身不缓存。
       if (pathname === "/" || pathname === "/index.html") {
         if (!fs.existsSync(path.join(dir, "index.html"))) return serveBuildHint(res)
-        return serveStatic(res, dir, "index.html")
+        return serveStatic(res, dir, "index.html", { noStore: true })
       }
       if (/^\/assets\/[A-Za-z0-9._-]+$/.test(pathname)) {
         return serveStatic(res, dir, pathname.slice(1), { immutable: true })
