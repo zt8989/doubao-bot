@@ -1,4 +1,4 @@
-import { routerOnce } from "./router.mjs"
+import { routerOnce } from "./core/router.mjs"
 import { Book } from "./book.mjs"
 
 // 任务 → 所属 Agent 的唯一归属规则。优先使用工单绑定的编排，兼容补派监听与旧账本。

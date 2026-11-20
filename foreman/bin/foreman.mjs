@@ -15,7 +15,7 @@ import { git, branchExists } from "../src/gitx.mjs"
 import { ensureService, callRaw, ServiceError, resolvePort, resolveTarget, portFileOf, readPortFile } from "../src/svclient.mjs"
 import { startServer, pingOnce } from "../src/service.mjs"
 import { sessionTasks, formatSessionTasks } from "../src/tasktree.mjs"
-import { MemoryStore } from "../src/memory.mjs"
+import { MemoryStore } from "../src/core/memory.mjs"
 import { dreamOnce } from "../src/dreaming.mjs"
 
 const HELP = `foreman — 接单编排 + 常驻服务

@@ -1,6 +1,6 @@
 import fs from "node:fs"
 import path from "node:path"
-import { expandHome } from "./util.mjs"
+import { expandHome } from "../util.mjs"
 
 const CORE_FILES = {
   memory: "MEMORY.md",

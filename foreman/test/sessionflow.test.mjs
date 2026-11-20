@@ -7,7 +7,7 @@ import os from "node:os"
 import path from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { Book } from "../src/book.mjs"
-import { InboxStore, AgentWorker } from "../src/inbox.mjs"
+import { InboxStore, AgentWorker } from "../src/core/inbox.mjs"
 import { deliverTaskUpdate } from "../src/taskevents.mjs"
 import { runRound } from "../src/orchestrator.mjs"
 import {

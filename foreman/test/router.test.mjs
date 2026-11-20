@@ -4,7 +4,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { Book } from "../src/book.mjs"
-import { routerOnce } from "../src/router.mjs"
+import { routerOnce } from "../src/core/router.mjs"
 import { handleRequest, startServer } from "../src/service.mjs"
 import { DwsDriver } from "../src/dwsdrv.mjs"
 

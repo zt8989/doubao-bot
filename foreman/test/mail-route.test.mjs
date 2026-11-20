@@ -4,7 +4,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { DatabaseSync } from "node:sqlite"
-import { InboxStore, AgentWorker } from "../src/inbox.mjs"
+import { InboxStore, AgentWorker } from "../src/core/inbox.mjs"
 import { mailPollOnce, deliverMailReply } from "../src/mailflow.mjs"
 import { Book } from "../src/book.mjs"
 

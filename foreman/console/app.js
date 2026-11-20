@@ -5,6 +5,7 @@
  * 组件都用 light DOM（createRenderRoot 返回 this），样式继续吃 style.css 的全局类。
  */
 import { LitElement, html } from "lit"
+import "./chat.js"
 
 const STATE_LABEL = {
   planned: "已计划",
@@ -73,6 +74,9 @@ class FmThemeSwitch extends LitElement {
 
 /* ---------------- 左侧导航 ---------------- */
 function navIcon(id) {
+  if (id === "chat") {
+    return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v13H9l-5 4V4zM8 9h8M8 13h5"/></svg>`
+  }
   if (id === "inbox") {
     return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v14H4zM4 14h4l2 3h4l2-3h4M12 4v7M9 8l3 3 3-3"/></svg>`
   }
@@ -95,6 +99,7 @@ class FmSidebar extends LitElement {
   }
   render() {
     const views = [
+      { id: "chat", label: "Chat" },
       { id: "inbox", label: "Inbox" },
       { id: "outbox", label: "Outbox" },
       { id: "tasks", label: "Tasks" },
@@ -1187,8 +1192,8 @@ class FmConsole extends LitElement {
     super()
     this.data = null
     this.mode = "system"
-    // 首页主导航：Inbox / Outbox / Tasks；默认保留任务总览。
-    this.view = "tasks"
+    // Chat 是默认工作台；原有 Inbox / Outbox / Tasks 保留为运维视图。
+    this.view = "chat"
     try {
       this.sidebarCollapsed = localStorage.getItem(SIDEBAR_KEY) === "1"
     } catch {
@@ -1654,7 +1659,9 @@ class FmConsole extends LitElement {
       <div class="app-shell">
         <fm-sidebar .view=${this.view} .collapsed=${this.sidebarCollapsed}></fm-sidebar>
         <main>
-        ${this.view === "schedules"
+        ${this.view === "chat"
+          ? html`<fm-chat></fm-chat>`
+          : this.view === "schedules"
           ? html`<fm-schedules .schedules=${this.schedules} .workHours=${this.workHours} .busy=${this.schedBusy} .error=${this.schedError} .note=${this.schedNote}></fm-schedules>`
           : this.view === "operations"
           ? html`<fm-operations .operations=${this.operations} .filter=${this.opFilter}></fm-operations>`

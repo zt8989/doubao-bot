@@ -27,24 +27,25 @@ import { findWorkspace, mergeWorkspace, upsertPr } from "./workspaces.mjs"
 import { WorkflowEngine } from "./workflow/engine.mjs"
 import { NODE_TEARDOWN, runNodeCleanup, resolveIssueKey, issueKeyForPr } from "./workflow/cleaners.mjs"
 import { DoubaoSessionAdapter } from "./workflow/adapters/doubao.mjs"
+import { createChatWorkflow } from "./workflow/chat.mjs"
 import { GiteaTrackerAdapter } from "./workflow/adapters/gitea.mjs"
 import { prWatchOnce, prWatchTarget, mergeFailureReason, prNotifyText, shouldReport, ownedPrKeys, prKey, uiReviewers, uiReviewersReady, isOwnPr, isUiPrView } from "./prwatch.mjs"
 import { pickupWatchOnce } from "./pickupwatch.mjs"
 import { MailDriver, realRecipients } from "./mail.mjs"
 import { acceptanceGate, detectUiChange, mailPollOnce, requestAcceptance, mailAcceptanceSent, mailAcceptanceFailed, deliverMailReply } from "./mailflow.mjs"
 import { inflightIssues } from "./planner.mjs"
-import { routerOnce } from "./router.mjs"
+import { routerOnce } from "./core/router.mjs"
 import { dreamOnce } from "./dreaming.mjs"
 import { listPulls, viewPr, mergePr, closeIssue, createPr, commentIssue } from "./gitea.mjs"
 import { ConsoleStore } from "./console.mjs"
-import { InboxStore, AgentWorker, ScheduleRunner } from "./inbox.mjs"
-import { OutboxStore, OutboxDispatcher } from "./outbox.mjs"
+import { InboxStore, AgentWorker, ScheduleRunner } from "./core/inbox.mjs"
+import { OutboxStore, OutboxDispatcher } from "./core/outbox.mjs"
 import { enqueueOutbound } from "./outbound.mjs"
 import { LarkDriver } from "./lark.mjs"
-import { listSchedules, applySchedules, createAgentSchedule, firstRunAt, customAgentSchedules, hydrateSchedules, scheduleDefinitions, saveScheduleSettings } from "./schedules.mjs"
+import { listSchedules, applySchedules, createAgentSchedule, firstRunAt, customAgentSchedules, hydrateSchedules, scheduleDefinitions, saveScheduleSettings } from "./core/schedules.mjs"
 import { DEFAULTS, agentScheduleCwd } from "./config.mjs"
-import { normalizeEventEnvelope } from "./schedule-events.mjs"
-import { runConfiguredScript } from "./executors.mjs"
+import { normalizeEventEnvelope } from "./core/schedule-events.mjs"
+import { runConfiguredScript } from "./core/executors.mjs"
 import { startOperation, finishOperation } from "./operations.mjs"
 import { startConsoleHttp } from "./consolehttp.mjs"
 import { fileURLToPath } from "node:url"
@@ -799,6 +800,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   consoleStore.recoverOperations()
   const inbox = new InboxStore(consoleStore.db)
   ctx.inbox = inbox
+  ctx.chat = createChatWorkflow(ctx)
   // SQLite 是定时任务唯一事实源；旧 config.json 只在首次初始化时补迁移默认值。
   hydrateSchedules(cfg, inbox)
   // workflow 里的清理、归档也走同一本操作日志。
@@ -955,6 +957,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     handlers: {
       // 兼容旧的定时 router 事件；新定时轮询由 Schedule 的 script 执行器运行 pollOnce。
       router: ({ scheduled, notices }) => routerOnce(ctx, { force: true, scheduled, notices }),
+      "chat.message": (batch) => ctx.chat.deliver(batch),
       "mail.reply": (event) => deliverMailReply(ctx, event),
       "task.update": async (batch) => {
         const delivered = []
@@ -2793,6 +2796,16 @@ export async function handleRequest(ctx, req) {  const id = req?.id
   if (cmd === "pr poll") {
     const r = await ctx.prPoll()
     return ok(r)
+  }
+
+  if (cmd === "chat send") {
+    if (!ctx.chat) return fail("chat-unavailable", "Chat 不在当前服务里")
+    return ok(await ctx.chat.send(req))
+  }
+
+  if (cmd === "chat messages") {
+    if (!ctx.chat) return fail("chat-unavailable", "Chat 不在当前服务里")
+    return ok(await ctx.chat.messages())
   }
 
   if (cmd === "inbox list") {

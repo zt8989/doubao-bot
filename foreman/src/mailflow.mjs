@@ -18,7 +18,7 @@ import {
   htmlToText,
   stripQuoted,
 } from "./mail.mjs"
-import { routerOnce } from "./router.mjs"
+import { routerOnce } from "./core/router.mjs"
 
 // 默认认 UI 文件的规则：前端工程常见后缀 + 常见目录。
 // 配置 mail.uiPatterns 可以整体覆盖（写正则字符串）。

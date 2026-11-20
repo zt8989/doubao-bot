@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { DatabaseSync } from "node:sqlite"
-import { InboxStore, AgentWorker, ScheduleRunner } from "../src/inbox.mjs"
+import { InboxStore, AgentWorker, ScheduleRunner } from "../src/core/inbox.mjs"
 
 function fixture() {
   const db = new DatabaseSync(":memory:")

@@ -3,7 +3,7 @@ import fs from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { expandHome } from "./util.mjs"
-import { validateCron } from "./cron.mjs"
+import { validateCron } from "./core/cron.mjs"
 
 export const DEFAULT_EXCLUDE = ["needs-human", "ready-for-human", "needs-info", "wontfix", "agent-blocked"]
 
