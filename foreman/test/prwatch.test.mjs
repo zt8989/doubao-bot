@@ -689,3 +689,51 @@ test("pr.merge Worker：建合并助手并记账，重复事件幂等不重复�
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("pr.merge 投递失败由 Inbox 重试，恢复后只建一条合并会话", async () => {
+  const dir = tmpDir()
+  let server
+  try {
+    const cfg = baseCfg(dir)
+    cfg.prWatch.intervalSeconds = 3600
+    const book = new Book(cfg.stateFile)
+    book.record("caller-1", { convId: "conv-first" })
+    let calls = 0
+    const dws = {
+      openNew: async () => {
+        calls++
+        if (calls === 1) throw new Error("dws 暂时不可用")
+        return { convId: "merge-retry" }
+      },
+      queue: async () => {},
+    }
+    const gitea = { listPulls: async () => [{ repo: "demo/demo", number: 96, title: "他人的", author: "zhangsan", url: "http://x/pulls/96" }] }
+
+    server = await startServer({ cfg, book, dws, gitea, log: () => {} })
+    const scanned = await server.prPoll()
+    assert.equal(scanned.via, "inbox")
+    await server.worker.idle()
+    assert.equal(calls, 1, "第一次建会话失败")
+    const pending = server.inbox.list({ status: "pending" }).filter((e) => e.kind === "pr.merge")
+    assert.equal(pending.length, 1, "失败事件留在 Inbox，不丢")
+    assert.match(pending[0].lastError ?? "", /dws 暂时不可用/)
+    assert.equal(new Book(cfg.stateFile).prSeen["demo/demo#96"]?.assignedTo ?? "", "", "未投递成功不记账")
+
+    // retryMs 默认 30s：把时钟推到重试时间之后，模拟 Worker 下一轮。
+    const retried = await server.worker.runOnce(new Date(Date.now() + 60000))
+    assert.equal(retried.ok, true)
+    assert.equal(calls, 2, "重试时才第二次建会话")
+    const seen = new Book(cfg.stateFile).prSeen["demo/demo#96"]
+    assert.match(seen.assignedTo, /^foreman-合并-/)
+    assert.ok(seen.notifiedAt)
+    assert.equal(server.inbox.list({ status: "pending" }).filter((e) => e.kind === "pr.merge").length, 0)
+
+    // 再扫一轮：已通知的 PR 不会再次入箱。
+    const again = await server.prPoll()
+    assert.equal(again.notified, 0)
+    assert.equal(calls, 2)
+  } finally {
+    if (server) await server.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
