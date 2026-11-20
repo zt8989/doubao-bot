@@ -50,7 +50,11 @@ test("Chat 消息先持久化到 Inbox，Worker 消费后才投递 Router Agent"
   assert.equal(accepted.status, "pending")
   assert.equal(f.store.get(accepted.eventId).kind, "chat.message")
   assert.equal(f.opened.length, 0, "写入 Inbox 时不得直接调用 Router Agent")
-  assert.equal((await f.chat.messages()).pending, 1)
+  const queuedConversation = await f.chat.messages()
+  assert.equal(queuedConversation.pending, 1)
+  assert.deepEqual(queuedConversation.pendingMessages.map(({ text, status }) => ({ text, status })), [
+    { text: "帮我检查当前任务", status: "pending" },
+  ])
 
   const worker = new AgentWorker({
     store: f.store,
@@ -84,6 +88,7 @@ test("Chat 读取 Router Agent 会话，并区分用户、回复和 Foreman 事�
   assert.equal(conversation.messages[1].text, "你好，我是 Router Agent")
   assert.equal(conversation.running, false)
   assert.equal(conversation.pending, 0)
+  assert.deepEqual(conversation.pendingMessages, [])
 })
 
 test("HTTP /api/chat 提供读会话与写入 Inbox 的统一入口", async (t) => {

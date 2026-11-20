@@ -57,11 +57,14 @@ export function createChatWorkflow(ctx) {
     async messages() {
       const book = new Book(ctx.cfg.stateFile)
       const router = book.data.router ?? book.data.inspector ?? {}
-      const pending = ctx.inbox
+      const pendingMessages = (ctx.inbox
         ? [...ctx.inbox.list({ limit: 1000, status: "pending" }), ...ctx.inbox.list({ limit: 1000, status: "processing" })]
-          .filter((event) => event.kind === CHAT_KIND).length
-        : 0
-      if (!router.convId) return { ok: true, convId: "", name: "", messages: [], running: false, pending }
+        : [])
+        .filter((event) => event.kind === CHAT_KIND)
+        .sort((a, b) => a.id - b.id)
+        .map((event) => ({ id: event.id, text: String(event.text ?? ""), status: event.status }))
+      const pending = pendingMessages.length
+      if (!router.convId) return { ok: true, convId: "", name: "", messages: [], running: false, pending, pendingMessages }
       if (typeof ctx.dws?.info !== "function") throw new Error("dws 缺少 info，无法读取 Router Agent 会话")
       const info = await ctx.dws.info(router.convId)
       const raw = Array.isArray(info?.messages) ? info.messages : []
@@ -79,6 +82,7 @@ export function createChatWorkflow(ctx) {
         name: String(router.name ?? ""),
         messages,
         pending,
+        pendingMessages,
         running: Boolean(last && (last.role === "user" || last.finished === false)),
       }
     },

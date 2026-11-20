@@ -125,6 +125,7 @@ class FmChat extends LitElement {
 
   render() {
     const messages = this.conversation?.messages || []
+    const pendingMessages = this.conversation?.pendingMessages || []
     return html`<section class="panel chat-panel">
       <div class="chat-head">
         <div>
@@ -150,6 +151,15 @@ class FmChat extends LitElement {
       </div>
       ${this.notice ? html`<div class="chat-notice">${this.notice}</div>` : ""}
       ${this.error ? html`<div class="chat-error chat-load-error">${this.error}</div>` : ""}
+      ${pendingMessages.length ? html`<div class="chat-pending-queue" aria-label="等待投送的消息" aria-live="polite">
+        ${pendingMessages.map((message) => html`<div class="chat-pending-message">
+          <svg class="chat-pending-icon" viewBox="0 0 20 20" aria-hidden="true">
+            <path d="M4 5.5h12M4 10h8M4 14.5h5M13 13l2 2 3-4" />
+          </svg>
+          <span class="chat-pending-text" title=${message.text}>${message.text}</span>
+          <span class="chat-pending-status">${message.status === "processing" ? "投送中" : "待投送"}</span>
+        </div>`)}
+      </div>` : ""}
       <form class="chat-composer" @submit=${(event) => { event.preventDefault(); this.send() }}>
         <textarea
           rows="3"
