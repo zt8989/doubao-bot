@@ -4,7 +4,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { earliestCaller, prWatchTarget, shouldReport, prNotifyText, prWatchOnce, ownedPrKeys } from "../src/prwatch.mjs"
-import { startServer, prPollOnce, handleRequest } from "../src/service.mjs"
+import { startServer, prPollOnce, handleRequest, deliverMergeCandidate } from "../src/service.mjs"
 import { Book } from "../src/book.mjs"
 
 function tmpDir() {
@@ -619,6 +619,72 @@ test("prWatch.enabled=false 时整条路径不跑", async () => {
     const gitea = { listPulls: async () => { throw new Error("不该调用 gitea") } }
     const r = await prWatchOnce({ cfg, gitea, dws: { notify: async () => {} }, log: () => {} })
     assert.equal(r.skipped, "disabled")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("PR 扫描只写 pr.merge Inbox，不建会话、不提前记已通知", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = baseCfg(dir)
+    const gitea = {
+      listPulls: async () => [{ repo: "demo/demo", number: 95, title: "他人的", author: "zhangsan", url: "http://x/pulls/95" }],
+      viewPr: async () => ({ mergeNote: "可以合并", state: "open" }),
+    }
+    const events = []
+    const delivered = []
+    const out = await prWatchOnce({
+      cfg, gitea, dws: {}, log: () => {},
+      enqueue: async (event) => { events.push(event); return { id: 1, status: "pending" } },
+      deliver: async () => { delivered.push(true); return { session: "不该建" } },
+    })
+    assert.equal(out.via, "inbox")
+    assert.equal(out.notified, 1)
+    assert.equal(events.length, 1)
+    assert.equal(events[0].kind, "pr.merge")
+    assert.equal(events[0].payload.agent, "merge")
+    assert.deepEqual(events[0].payload.prs.map((pr) => pr.key), ["demo/demo#95"])
+    assert.match(events[0].payload.text, /foreman pr merge 95 --repo demo\/demo/)
+    assert.equal(delivered.length, 0, "扫描阶段不建合并会话")
+    const seen = new Book(cfg.stateFile).prSeen["demo/demo#95"]
+    assert.equal(seen?.notifiedAt ?? "", "", "notifiedAt 由 Worker 投递成功后回写")
+    assert.equal(seen?.assignedTo ?? "", "")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("pr.merge Worker：建合并助手并记账，重复事件幂等不重复建", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = baseCfg(dir)
+    const delivered = []
+    const ctx = {
+      cfg,
+      log: () => {},
+      deliver: async (args) => { delivered.push(args); return { session: "foreman-合并-95", convId: "merge-95" } },
+    }
+    const event = {
+      kind: "pr.merge",
+      payload: {
+        type: "pr.merge", agent: "merge",
+        prs: [{ key: "demo/demo#95", repo: "demo/demo", number: 95, title: "他人的", author: "zhangsan", url: "http://x/pulls/95" }],
+      },
+    }
+    const first = await deliverMergeCandidate(ctx, event)
+    assert.equal(first.action, "assigned")
+    assert.equal(first.session, "foreman-合并-95")
+    assert.equal(delivered.length, 1)
+    assert.equal(delivered[0].lane, "merge")
+    const seen = new Book(cfg.stateFile).prSeen["demo/demo#95"]
+    assert.equal(seen.assignedTo, "foreman-合并-95")
+    assert.ok(seen.notifiedAt)
+    assert.deepEqual(new Book(cfg.stateFile).notices["foreman-合并-95"].prs, ["demo/demo#95"])
+
+    const second = await deliverMergeCandidate(ctx, event)
+    assert.equal(second.skipped, "already-assigned")
+    assert.equal(delivered.length, 1, "重复事件不再建会话")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

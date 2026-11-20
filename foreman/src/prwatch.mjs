@@ -1,5 +1,5 @@
-// PR 监听：代码定时扫 open PR 及其更新。他人候选直投合并会话（不进路由），
-// 本人 UI 候选与新增/编辑评论才交 router agent（pr ui-assign / pr.updates 决策）。
+// PR 监听：代码定时扫 open PR 及其更新。他人候选只写 pr.merge Inbox 事件（不建会话），
+// 由 Worker 派合并助手；本人 UI 候选与新增/编辑评论才交 router agent（pr ui-assign / pr.updates）。
 import crypto from "node:crypto"
 import { nowIso } from "./util.mjs"
 import { Book } from "./book.mjs"
@@ -234,7 +234,7 @@ export function isConflicting(view) {
 // 跑一轮 PR 扫描：列 open PR → 过滤作者 → 账本去重 → 查冲突（冲突的过滤掉）→ 交给合并助手核对。
 // push 给了就 steer 进唯一编排会话（会话中心，默认）；deliver 给了才每次新建一条会话；
 // 都没有就塞回 target 那条已有会话。只有发成功才记账；发送失败下一轮重试。
-export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: overrideTarget, inspect = null, deliver = null, push = null }) {
+export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: overrideTarget, inspect = null, deliver = null, push = null, enqueue = null }) {
   const pw = cfg?.prWatch ?? {}
   if (pw.enabled === false) return { ok: true, skipped: "disabled" }
 
@@ -335,20 +335,21 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
     fresh.push(...keep)
   }
 
-  // 两条通道各走各的：他人 PR 直投合并会话，一张单只过一次手，不再经路由中转；
+  // 三条通道各走各的：他人 PR 只写 pr.merge Inbox 事件（扫描不建会话，Worker 才派合并助手）；
   // 本人 UI 候选与 PR 评论更新仍交 router agent 决策（要不要指派验收、评论变化怎么处理）。
-  const useMerge = fresh.length > 0 && typeof deliver === "function"
+  const useInbox = fresh.length > 0 && typeof enqueue === "function"
+  const useMerge = !useInbox && fresh.length > 0 && typeof deliver === "function"
   const useInspect = typeof inspect === "function"
-  const usePush = !useMerge && typeof push === "function"
+  const usePush = !useInbox && !useMerge && typeof push === "function"
   const uiToSend = useInspect ? uiFresh : []
   const updatedToSend = useInspect ? updatedFresh : []
   // 没有合并通道时，他人候选仍退回路由中转（测试与旧调用方保持原行为）。
-  const freshByRouter = fresh.length > 0 && !useMerge && !usePush && useInspect
+  const freshByRouter = fresh.length > 0 && !useInbox && !useMerge && !usePush && useInspect
 
   if (!fresh.length && !uiToSend.length && !updatedToSend.length) {
     return { ok: true, checked, notified: 0, uiNotified: 0, updatedNotified: 0, conflicting, target, pending: uiFresh.length + updatedFresh.length }
   }
-  if (!useMerge && !useInspect && !usePush && !target) {
+  if (!useInbox && !useMerge && !useInspect && !usePush && !target) {
     log("PR 扫描：有候选但找不到通知目标（账本里没有调用方会话），这轮不发，等有了再报")
     return { ok: true, checked, notified: 0, updatedNotified: 0, target: "", pending: fresh.length + updatedFresh.length }
   }
@@ -358,13 +359,26 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
     url: String(pr.url ?? ""), author: String(pr.author ?? ""), ui: pr.ui === true,
   }))
 
-  // 1) 他人 PR：整批投一条合并会话。账本同时记 assignedTo，人工或路由再 pr assign 会幂等跳过。
+  // 1) 他人 PR：只写 Inbox，不在扫描里建会话。会话名、assignedTo、notifiedAt 都由 Worker 投递成功后回写；
+  // 这里提前写会让「事件还在重试」的 PR 被下一轮扫描当成已通知而漏掉。
   let mergeTo = ""
   let mergeConvId = ""
   let mergeFailed = false
   if (fresh.length) {
     try {
-      if (useMerge) {
+      if (useInbox) {
+        const text = prNotifyText(fresh)
+        const repo = fresh.every((pr) => pr.repo === fresh[0].repo) ? fresh[0].repo : ""
+        const keys = fresh.map((pr) => pr.key).sort()
+        const out = await enqueue({
+          kind: "pr.merge",
+          text,
+          payload: { type: "pr.merge", agent: "merge", repo, prs: prJson(fresh), text },
+          dedupeKey: `pr:merge:${crypto.createHash("sha256").update(keys.join(",")).digest("hex")}`,
+        })
+        if (out?.ok === false) throw new Error(out.error || "pr.merge 入箱失败")
+        mergeTo = "inbox"
+      } else if (useMerge) {
         // 一轮跨多个仓库时取不到单一产品提示词，回落全局 deliver。
         const repo = fresh.every((pr) => pr.repo === fresh[0].repo) ? fresh[0].repo : ""
         const out = await deliver({ text: prNotifyText(fresh), kind: "PR待合并", repo, lane: "merge" })
@@ -413,8 +427,9 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
   }
 
   // 只记真发出去的那部分；失败的下轮补发，不推进去重。
+  // 走 Inbox 的他人 PR 这里不记账：Worker 投递成功后才写 notifiedTo / assignedTo。
   const book2 = new Book(cfg.stateFile)
-  if (fresh.length && mergeTo && !mergeFailed) {
+  if (fresh.length && mergeTo && !mergeFailed && !useInbox) {
     for (const pr of fresh) {
       book2.markPrSeen(pr.key, {
         ...pr, notifiedTo: mergeTo, via: useMerge ? "merge-assistant" : "orchestrator",
@@ -436,6 +451,7 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
     book2.markNotice(mergeTo, { name: mergeTo, convId: mergeConvId, kind: "PR待合并", prs: fresh.map((p) => p.key) })
   }
   if (mergeFailed || inspectFailed) log(`PR 扫描：部分投递失败，下轮补发（他人 PR ${mergeFailed ? "失败" : "正常"}、路由 ${inspectFailed ? "失败" : "正常"}）`)
+  else if (fresh.length && useInbox) log(`PR 扫描：${fresh.length} 条新 PR 已写入 pr.merge Inbox，待 Worker 派合并助手（${fresh.map((p) => `${p.repo}#${p.number}`).join("、")}）`)
   else if (fresh.length && useMerge) log(`PR 扫描：${fresh.length} 条新 PR 已直投合并会话 ${mergeTo}（${fresh.map((p) => `${p.repo}#${p.number}`).join("、")}）`)
 
   const delivered = (mergeFailed ? 0 : fresh.length) + (inspectFailed ? 0 : uiToSend.length + updatedToSend.length)
@@ -445,7 +461,7 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
     updatedNotified: inspectFailed ? 0 : updatedToSend.length,
     conflicting,
     target: mergeTo || inspectTo || target,
-    via: useMerge ? "merge-direct" : usePush ? "steer-orchestrator" : freshByRouter ? "inspector" : "existing",
+    via: useInbox ? "inbox" : useMerge ? "merge-direct" : usePush ? "steer-orchestrator" : freshByRouter ? "inspector" : "existing",
     failedNotify: mergeFailed || inspectFailed,
     prs: [...(mergeFailed ? [] : fresh), ...(inspectFailed ? [] : uiToSend)].map((p) => p.key),
     updates: inspectFailed ? [] : updatedToSend.map((p) => p.key),

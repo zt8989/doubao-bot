@@ -959,6 +959,12 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
       router: ({ scheduled, notices }) => routerOnce(ctx, { force: true, scheduled, notices }),
       "chat.message": (batch) => ctx.chat.deliver(batch),
       "mail.reply": (event) => deliverMailReply(ctx, event),
+      // 他人 PR 合并：扫描只写 pr.merge 事件，这里才建合并助手会话；不经 router agent。
+      "pr.merge": async (batch) => {
+        const delivered = []
+        for (const event of batch) delivered.push(await deliverMergeCandidate(ctx, event))
+        return delivered
+      },
       "task.update": async (batch) => {
         const delivered = []
         for (const event of batch) delivered.push(await deliverTaskUpdate(ctx, event))
@@ -1246,6 +1252,42 @@ export async function prAssignOnce(ctx, { repo = "", number = 0 } = {}) {
   }
 }
 
+// Worker 的 pr.merge handler：Inbox 里的一条候选事件 → 一条合并助手会话。
+// 扫描只写意图，真正的建会话、投递、记账都在这里；失败抛错由 Inbox 统一重试，重启由 SQLite 恢复。
+// 重复事件（同一 PR 被两轮扫描各入箱一次）靠账本 assignedTo / notifiedAt 过滤，不会重复建会话。
+export async function deliverMergeCandidate(ctx, event) {
+  const payload = event?.payload ?? {}
+  const list = Array.isArray(payload.prs) ? payload.prs : []
+  if (!list.length) return { ok: true, skipped: "empty" }
+  if (typeof ctx.deliver !== "function") throw new Error("服务缺少 deliver，无法创建合并助手")
+  const book = new Book(ctx.cfg.stateFile)
+  const todo = list.filter((pr) => {
+    const seen = book.prSeen[pr.key] ?? {}
+    return !seen.assignedTo && !seen.notifiedAt
+  })
+  if (!todo.length) return { ok: true, skipped: "already-assigned", prs: list.map((pr) => pr.key) }
+
+  const text = String(payload.text ?? "").trim() || prNotifyText(todo)
+  const repo = todo.every((pr) => pr.repo === todo[0].repo) ? String(todo[0].repo ?? "") : ""
+  const out = await ctx.deliver({ text, kind: "PR待合并", repo, lane: "merge" })
+  const session = String(out?.session ?? "").trim()
+  const convId = String(out?.convId ?? "").trim()
+  if (!session) throw new Error("合并会话创建成功返回但没有会话名")
+
+  const assignedAt = nowIso()
+  const saved = new Book(ctx.cfg.stateFile)
+  for (const pr of todo) {
+    saved.markPrSeen(pr.key, {
+      ...pr, notifiedTo: session, via: "merge-assistant",
+      assignedTo: session, assignedConvId: convId, assignedAt,
+    })
+  }
+  // 登记进 notices：它报过的 PR 全合完之后由服务自动归档，别在侧边栏越积越多。
+  saved.markNotice(session, { name: session, convId, kind: "PR待合并", prs: todo.map((pr) => pr.key) })
+  ctx.log?.(`pr.merge 已派合并助手 ${session}（${todo.map((pr) => pr.key).join("、")}）`)
+  return { ok: true, action: "assigned", session, convId, prs: todo.map((pr) => pr.key), assignedAt }
+}
+
 // 我的工单扫描一轮：只把「指派给我 + ready-for-agent」候选写入 router agent Inbox。
 // 不接单、不调用旧 pickupOnce；容量与 hand/dispatch 决策归 router agent 和工单编排。
 export async function pickupPollOnce(ctx, { force = false } = {}) {
@@ -1271,8 +1313,8 @@ export async function pickupPollOnce(ctx, { force = false } = {}) {
   }
 }
 
-// PR 扫描一轮：配置里每个仓库列 open PR → 过滤作者 → 去重 → 他人 PR 直投合并会话，
-// 本人 UI 候选与评论更新才写 router agent Inbox。
+// PR 扫描一轮：配置里每个仓库列 open PR → 过滤作者 → 去重 → 他人 PR 写 pr.merge Inbox，
+// 由 Worker 派合并助手；本人 UI 候选与评论更新才写 router agent Inbox。
 // force 是页面上的「立即执行」：即使 prWatch.enabled 是 false（默认关）也扫这一轮。
 export async function prPollOnce(ctx, { force = false } = {}) {
   const { state, cfg, dws, gitea, log } = ctx
@@ -1288,8 +1330,10 @@ export async function prPollOnce(ctx, { force = false } = {}) {
     state.pr.target = target
     let out
     try {
-      // 他人 PR 直投合并会话，一张单只过一次手；本人 UI 候选与评论更新才交 router agent。
-      out = await prWatchOnce({ cfg, gitea, dws, log, target, inspect: notifyRouter, deliver: ctx.deliver })
+      // 他人 PR 只写 pr.merge Inbox，扫描不建会话；Worker 的 pr.merge handler 才派合并助手。
+      // 本人 UI 候选与评论更新仍交 router agent。没有 Inbox 时退回直投（旧部署/测试）。
+      const enqueueMerge = ctx.inbox ? (event) => ctx.inbox.enqueue(event) : null
+      out = await prWatchOnce({ cfg, gitea, dws, log, target, inspect: notifyRouter, deliver: ctx.deliver, enqueue: enqueueMerge })
     } catch (e) {
       log(`PR 扫描失败：${e.message}`)
       return { ok: false, error: e.message }

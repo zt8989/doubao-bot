@@ -1,6 +1,6 @@
 ---
 name: foreman
-description: 接单编排 CLI（项目 foreman，命令 foreman）：**以工单绑定的编排会话为中心**——持久 Schedule 每 5 分钟筛选 open、指派给 `pickup.me` 且带 `ready-for-agent` 的工单，把候选写入 SQLite Inbox，不直接派单；router agent按实时容量和现有优先级对通知中的工单 `hand`，再由本单编排 `dispatch` 编码智能体。另有代码每 1 分钟轮询执行会话，Worker 先按事件 type 处理、无法识别时交路由 Agent，24 小时未成功投递才换会话。捞到工单用 `foreman hand` steer 给它；它再调 `foreman dispatch` 分配工作（建一工程一工作区 + 开工作会话，会话 id 绑回本单编排）。PR 扫描把他人候选直投合并会话、本人 UI 候选写入router agent Inbox：他人 PR 不再经路由中转（`pr assign` 仅作人工补派），本人 UI PR 由它 `pr ui-assign` 在周晓亮、张振豪之间轮询指派验收并附 PR 链接。**标准工作会话不认识 foreman**：它只读工单、改工作区、跑测试、commit 并给普通最终回复（不 push、不开 PR、不碰工单、不输出 RESULT）；**决策会话例外**：先调研，确认可做后必须用 gitea 把本单切换为 `ready-for-agent` 并核验，再编码；不确定时仅用 `foreman send --type mail` 发邮件请用户决策。代码定时执行 `watch poll`，router agent或人工可补跑，只把收工（`finished`/`settled`）写成 `task.update` 事件（`running` 与 `gone` 只落本地账本、不投递，gone 多为正常归档），Worker 再 queue 给任务所属编排。是否开 PR、续跑、合并、修改工单业务状态与收尾全部由编排判断；push/建 PR 用 `foreman pr open`，合并走 `foreman pr merge`，合完 `foreman clean` 清 worktree 与会话。Gitea 的读、建单/改单/评论/关单、dws 会话、herdr 一律直连。**全链路异步**：`hand`/`dispatch`/`resume` 是投递动作，发出去就返回（秒级），工作会话常跑 30–60 分钟（实测 50 分钟）才 commit 收工——**派完就走，别等回复、别轮询会话、别重派**。当用户说自动接单、接工单、把工单派给豆包、看某条工单处理到哪、把卡住的单放回队列，或提到 foreman 时报 app_busy / locked / pr-open 时使用。**一工程一工作区**：跨工程的工单每个工程各建一个 worktree、各一条 PR，缺工程用 `foreman ws add` 现开。
+description: 接单编排 CLI（项目 foreman，命令 foreman）：**以工单绑定的编排会话为中心**——持久 Schedule 每 5 分钟筛选 open、指派给 `pickup.me` 且带 `ready-for-agent` 的工单，把候选写入 SQLite Inbox，不直接派单；router agent按实时容量和现有优先级对通知中的工单 `hand`，再由本单编排 `dispatch` 编码智能体。另有代码每 1 分钟轮询执行会话，Worker 先按事件 type 处理、无法识别时交路由 Agent，24 小时未成功投递才换会话。捞到工单用 `foreman hand` steer 给它；它再调 `foreman dispatch` 分配工作（建一工程一工作区 + 开工作会话，会话 id 绑回本单编排）。PR 扫描把他人候选写入 `pr.merge` Inbox，由 Worker 直接建合并助手会话（不经路由，`pr assign` 仅作人工补派），本人 UI 候选写入router agent Inbox，由它 `pr ui-assign` 在周晓亮、张振豪之间轮询指派验收并附 PR 链接。**标准工作会话不认识 foreman**：它只读工单、改工作区、跑测试、commit 并给普通最终回复（不 push、不开 PR、不碰工单、不输出 RESULT）；**决策会话例外**：先调研，确认可做后必须用 gitea 把本单切换为 `ready-for-agent` 并核验，再编码；不确定时仅用 `foreman send --type mail` 发邮件请用户决策。代码定时执行 `watch poll`，router agent或人工可补跑，只把收工（`finished`/`settled`）写成 `task.update` 事件（`running` 与 `gone` 只落本地账本、不投递，gone 多为正常归档），Worker 再 queue 给任务所属编排。是否开 PR、续跑、合并、修改工单业务状态与收尾全部由编排判断；push/建 PR 用 `foreman pr open`，合并走 `foreman pr merge`，合完 `foreman clean` 清 worktree 与会话。Gitea 的读、建单/改单/评论/关单、dws 会话、herdr 一律直连。**全链路异步**：`hand`/`dispatch`/`resume` 是投递动作，发出去就返回（秒级），工作会话常跑 30–60 分钟（实测 50 分钟）才 commit 收工——**派完就走，别等回复、别轮询会话、别重派**。当用户说自动接单、接工单、把工单派给豆包、看某条工单处理到哪、把卡住的单放回队列，或提到 foreman 时报 app_busy / locked / pr-open 时使用。**一工程一工作区**：跨工程的工单每个工程各建一个 worktree、各一条 PR，缺工程用 `foreman ws add` 现开。
 ---
 
 # foreman：接单编排
@@ -56,7 +56,7 @@ description: 接单编排 CLI（项目 foreman，命令 foreman）：**以工单
 - 上表里 `hand` / `dispatch` / `resume` **全是异步投递**：命令返回（`handed` / `dispatched`）就等于这一步做完了，别接着等；从投递到普通最终回复回来常 30–60 分钟（见上面「异步」节）。
 - 工作会话的**任何状态更新**都先写成 `task.update` 持久事件，由 Worker `dws msg --mode queue` 投给**这张单绑的编排会话**；不再新建会话、不再 `dws notify`，也不直接 steer。用户自主发起的单就投回发起方会话。若 dws 明确报「侧边栏里没有任务」，Worker 将同一事件附上原目标不可达的说明兜底交router agent；其他 queue 异常继续重试。
 - 失败/卡住先由编排归因：原会话能修正才 `resume <执行会话id>`；需要其他智能体就新派并 `watch add` 登记，完成后由 Worker queue 回等待结果的原会话；不要一律续跑，也不要为同一职责重复开会话。
-- PR 监听把他人候选直投一条合并会话（一张单只过一次手，不再绕路由）；本人 UI 候选才写入router agent Inbox，由它 `pr ui-assign` 轮询指派周晓亮/张振豪验收。`pr assign` 保留为人工补派入口。
+- PR 监听把他人候选写入 `pr.merge` Inbox，由 Worker 建合并助手会话并回写账本（扫描器本身不建会话、不经路由）；本人 UI 候选才写入router agent Inbox，由它 `pr ui-assign` 轮询指派周晓亮/张振豪验收。`pr assign` 保留为人工补派入口。
 - 降级：配置 `sessionFlow.enabled: false` 或 `foreman run --direct` 退回老的多会话模型。
 
 ## 收口边界（PR 两步 + 清尾 + 工作区）
@@ -149,15 +149,15 @@ foreman watch poll               # 立刻跑一轮（checked / settled / enqueue
 - 列表走 `gitea pull-list --repo <owner/name> --state open`（只读适配器命令，带回 `author`）。
 - **所有 open PR 的评论更新都由代码检查，不启动扫描 Agent**：逐条 `pr-view`，首次只记录评论指纹；后续发现新增或编辑评论时生成 `pr.updates` 写入 router agent Inbox，单纯提交变化不通知。通知只陈述评论变化，是否合并、是否关闭 issue 由 router agent 决定；同一评论指纹不重复通知，投递失败保留下轮补发。可用 `prWatch.routeUpdates: false` 关闭更新路由。
 - 本人账号（`prWatch.ignoreAuthors`，当前为 `233151`）的 PR 不进入他人合并助手链路。本人 PR 若涉及 UI，代码读取 PR 文件列表确认后，另发「本人 UI PR 待验收指派」给router agent；非 UI 仍只记 `skipped: "self"`。作者无法确认时记 `skipped: "unknown-author"`，也不进入候选；后续作者补全后可重新检查。
-- 其余 PR 合成一批，由代码直接投给合并会话（读合并提示词 + 监控项目，会话名 `foreman-合并-<YYYYMMDD-HHmm>`），一张 PR 只过一次手，不再写入路由 Inbox。`foreman pr assign <N> --repo R` 保留为人工补派：先校验确为他人 PR，已分配过的按账本 `assignedTo` 幂等跳过。
+- 其余 PR 合成一条 `pr.merge` 事件写入 Inbox（payload 带 `agent: "merge"` 与 PR 列表），**扫描器不建会话**。Worker 的 `pr.merge` handler 收到后才调 deliver 建合并助手会话（读合并提示词 + 监控项目，会话名 `foreman-合并-<YYYYMMDD-HHmm>`），投递成功才回写 `notifiedTo` / `notifiedAt` / `assignedTo` 并登记 notices；失败由 Inbox 统一重试，重启由 SQLite 恢复。同一 PR 被两轮扫描各入箱一次时，Worker 按账本 `assignedTo` / `notifiedAt` 过滤，不重复建会话。`foreman pr assign <N> --repo R` 保留为人工补派：同步建会话，先校验确为他人 PR，已分配过的幂等跳过。
 - 本人 UI 候选由router agent执行 `foreman pr ui-assign <N> --repo R`；Foreman 复核 open、本人、UI 和既有指派人后，按 `prWatch.uiReviewers` 顺序轮询指派。当前顺序为周晓亮（`ywwb1328`）→ 张振豪（`ywwb1797`），只改 Gitea 指派人，不建合并助手、不合并；成功后才推进游标，重复执行幂等。
 - 先按 `pr-view` 的 `mergeNote`/`mergeable` 判冲突，**有冲突的默认过滤掉**（`prWatch.filterConflicts`，默认 `true`；这类单合不了，报了没用，冲突解掉下一轮会自动恢复），记 `skipped: "conflict"`。
-- **扫描器直投合并会话，但不合并 PR**：投递前已过滤本人与作者不明；`pr assign` 再校验一次并幂等。合并助手收到通知后核对并执行通知里的 `foreman pr merge <N> --repo R`，不要交 `<RESULT>`，服务也不再根据 RESULT 二次合并。合不了会直接回理由（`pr-merge` 报错 + `pr-view` 的 `mergeNote`）。
-- 去重分两层：Inbox 按通知正文 SHA-256 去重并负责失败重试；`pr.candidates` 事件在 done 后仍按同键挡重，避免后续扫描把同一候选重新入队。`state.json` 的 `prWatch` 键（`<repo>#<number>`）在候选持久化后盖 `notifiedAt`。分配合并助手后另记 `assignedTo` / `assignedConvId` / `assignedAt`；本人 UI 候选另记 `reviewNotifiedAt`，验收指派后记录 `reviewer` / `reviewAssignedAt`。重启由 SQLite 恢复未投完的事件。
+- **扫描器只写 `pr.merge` Inbox，不建会话、不合 PR**：投递前已过滤本人与作者不明；Worker 建会话前再按账本去重。合并助手收到通知后核对并执行通知里的 `foreman pr merge <N> --repo R`，不要交 `<RESULT>`，服务也不再根据 RESULT 二次合并。合不了会直接回理由（`pr-merge` 报错 + `pr-view` 的 `mergeNote`）。
+- 去重分两层：Inbox 按通知正文 SHA-256 去重并负责失败重试；`pr.candidates` 事件在 done 后仍按同键挡重，避免后续扫描把同一候选重新入队。`state.json` 的 `prWatch` 键（`<repo>#<number>`）由 Worker 投递成功后盖 `notifiedAt`（扫描只入箱，不提前盖，否则重试中的 PR 会被下轮扫描漏掉）。分配合并助手后另记 `assignedTo` / `assignedConvId` / `assignedAt`；本人 UI 候选另记 `reviewNotifiedAt`，验收指派后记录 `reviewer` / `reviewAssignedAt`。重启由 SQLite 恢复未投完的事件。
 - 起服务 1s 后先扫一遍，之后按间隔跑。
 
 ```bash
-foreman pr poll                  # 立刻扫一轮：他人 PR 直投合并会话，本人 UI 候选交路由
+foreman pr poll                  # 立刻扫一轮：他人 PR 写 pr.merge Inbox，本人 UI 候选交路由
 foreman pr ui-assign <N> --repo R # 本人 UI PR 轮询指派周晓亮/张振豪验收（只指派，不合）
 foreman pr assign <N> --repo R   # router agent显式分配一条他人 PR 给合并助手（幂等）
 foreman pr list                  # 看 PR 监听账本
@@ -250,7 +250,7 @@ foreman doctor [--start]              # --start 才真的连豆包窗口读状�
 - **会话中心默认开**：`sessionFlow.enabled`（默认 `true`）——router agent/人工接单时每张工单各有一条编排会话，命名为 `<deliver.namePrefix>-<仓库>-<单号>-编排` 并写入 `issues[键].orchestrator`；`promptFile` 留空用内置 `src/builtin/orchestrator-prompt.md`，`projectDir` 留空回落 `deliver.projectDir`，`waitFirstReply` 默认 `false`。`pickup.handToOrchestrator`（默认 `true`）= router agent确认接单后先 `hand` 给本单编排，由它调 `dispatch`。用户从当前会话主动派单则直接绑定当前会话。关掉这两个开关（或 `run --direct`）退回老的多会话模型；`deliver.mode=new` 只影响合并会话的创建方式（PR 扫描直投与 `pr assign` 补派都走这条），扫描本身不直接建派单会话。
 - **服务没在跑时没人判结论**（异步的代价，不是 bug）：补法是 `foreman watch list` 看登记还在不在 → `foreman watch poll` 立刻重放一轮 → `foreman status` 看 `lastPollAt` / `pollCount` / `dwsErrors`。
 - **工作时间窗**：`workHours`（`enabled`、`days` 1=周一…7=周日、`start`/`end` 如 `08:30`–`18:30`、`offUntil` 临时闭嘴）。我的工单扫描与他人 PR 扫描只在窗口内跑；执行会话代码轮询与验收邮件不受它限制。手动 `foreman watch poll` / `foreman pr poll` / `route` / `pickup` 与 pickup「立即扫描」不受限。
-- **PR 监听**：`prWatch.enabled`（默认 `true`）、`intervalSeconds`（默认 300）、`ignoreAuthors`（自己的 Gitea 用户名，由 `pickup.me` 补齐；当前 `233151`）。他人候选直投合并会话、本人 UI 候选写router agent Inbox；`pr assign` 只作人工补派，`notifyTarget` 与 `deliver.mode=existing` 不再参与这条生产链路。要停就 `enabled: false`。
+- **PR 监听**：`prWatch.enabled`（默认 `true`）、`intervalSeconds`（默认 300）、`ignoreAuthors`（自己的 Gitea 用户名，由 `pickup.me` 补齐；当前 `233151`）。他人候选写 `pr.merge` Inbox 由 Worker 建合并助手会话，本人 UI 候选写router agent Inbox；`pr assign` 只作人工补派，`notifyTarget` 与 `deliver.mode=existing` 不再参与这条生产链路。要停就 `enabled: false`。
 - **`service.enabled: false`** 等价于一直带 `--no-service`：子命令不握手、不自动拉起；`pidFile` / `logFile` / `service.http.portFile` 可改路径（测试用临时目录）。
 - `verify` 是逐条 `bash -lc` 跑在 worktree 里的命令；`[]` 表示只查"干净 + 有提交"。
 - `herdr.enabled: false` 或 herdr 报错时退回 `git worktree add`，日志里有原因。
