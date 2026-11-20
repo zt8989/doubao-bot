@@ -35,9 +35,10 @@ export function taskUpdateText({ watcher = {}, phase = "", owner = "", finalText
 }
 
 // 只入持久 Inbox。调用方不得在 enqueue 成功后提前 markIdle/markNotified；这些账本由 Worker 送达后推进。
-// running 只是会话还在跑，不是业务状态变化：一律不投递，编排只收 finished/settled/gone。
+// running（还在跑）与 gone（多为正常归档）都不是业务结论：一律不投递，编排只收 finished/settled。
 export function enqueueTaskUpdate(ctx, { watcher, phase, fingerprint = "", finalText = "", observedAt = new Date() } = {}) {
-  if (String(phase ?? "") === "running") return { ok: false, reason: "running-not-notified" }
+  const name = String(phase ?? "")
+  if (name === "running" || name === "gone") return { ok: false, reason: `${name}-not-notified` }
   if (!ctx.inbox) return { ok: false, reason: "no-inbox" }
   const book = ctx.book ?? ctx.bookFactory?.()
   if (!book) throw new Error("task.update 缺少账本")
@@ -112,9 +113,8 @@ export async function deliverTaskUpdate(ctx, event) {
   const book = ctx.book ?? ctx.bookFactory?.() ?? new Book(ctx.cfg.stateFile)
   if (book) {
     book.clearIdle(p.taskId)
-    // gone 本身就是持续状态的去重标记；送达后不能清掉，否则下一轮 poll 会重新入队。
-    // 会话重新出现或恢复 running 时，仍由 pollOnce 负责清 gone。
-    if (p.phase !== "gone") book.clearGone(p.taskId)
+    // 只投递 finished/settled：gone 由 pollOnce 落账本、不清除，会话重新出现时由 pollOnce 清 gone。
+    book.clearGone(p.taskId)
     if (typeof book.markSteer === "function") {
       book.markSteer(deliveredTarget, { kind: `task:${p.phase || "update"}`, chars: String(event.text ?? "").length })
     }

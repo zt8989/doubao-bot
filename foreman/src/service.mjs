@@ -1368,7 +1368,7 @@ export async function pollOnce(ctx) {
         if (led.idle) book.clearIdle(key)
         if (led.gone) book.clearGone(key)
         // running 只是「还在跑」，不产生业务信息：只落本地账本，不入箱、不投递编排。
-        // 编排需要的只有收工（finished/settled）与消失（gone）两类状态变化。
+        // 编排只需要收工（finished/settled）；gone 多为正常归档，同样不投递。
         if (led.observedPhase !== "running") book.markTaskObserved(key, "running")
         rec.lastPhase = "running"
         rec.lastPollAt = nowIso()
@@ -1376,11 +1376,10 @@ export async function pollOnce(ctx) {
       }
       // 侧边栏里根本没有这条（已归档/已收起）：只记 gone，不读 status。
       // status 切不过去，只会回「侧边栏里没有任务」，每轮刷一次日志、白拽一次窗口。
+      // 归档是正常收尾，不打扰编排：与 running 一样只落本地账本，不入箱、不投递。
       if (sidebar && !side) {
         if (!led.gone) {
-          const published = enqueueTaskUpdate({ ...ctx, book }, { watcher: w, phase: "gone" })
-          if (published.ok) book.markTaskObserved(key, "gone")
-          else log(`任务 gone 事件未入箱 ${key}：${published.reason}`)
+          book.markTaskObserved(key, "gone")
           book.markGone(key)
         }
         rec.lastPhase = "gone"
