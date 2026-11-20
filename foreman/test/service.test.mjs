@@ -555,6 +555,40 @@ test("dispatch RPC：缺 ready-for-agent 标签时返回 not-ready 并提示出�
   }
 })
 
+// decide：router agent 消费 issue.decision 时调它开决策会话。不校验 ready-for-agent，不走编排会话。
+test("decide RPC：用决策提示词开新会话，不绑编排、不监听、不推 session.dispatched", async () => {
+  const dir = tmpDir()
+  try {
+    const repoDir = path.join(dir, "demo")
+    fs.mkdirSync(repoDir, { recursive: true })
+    fs.writeFileSync(path.join(repoDir, "AGENTS.md"), "# demo 原工程约定\n")
+    const repo = { repo: "yyzl/demo", name: "demo", dir: repoDir, base: "sit-20261126", product: "demo" }
+    const cfg = mkCfg(dir, { worktreeDir: path.join(dir, "worktrees"), repos: [repo], sessionFlow: { enabled: true } })
+    const emitted = []
+    const ctx = {
+      ...mkCtx(cfg),
+      dryRun: true,
+      gitea: { viewIssue: async (repoArg, n) => ({ number: n, title: "信息不足的单", body: "正文", labels: ["needs-info"], assignees: [], url: `http://gitea/yyzl/demo/issues/${n}` }) },
+      engine: { emit: async (event) => { emitted.push(event) } },
+    }
+    const missing = await handleRequest(ctx, { id: "x0", cmd: "decide" })
+    assert.equal(missing.ok, false)
+    assert.equal(missing.error, "bad-request")
+
+    const r = await handleRequest(ctx, { id: "x1", cmd: "decide", issue: "yyzl/demo#31" })
+    assert.equal(r.ok, true)
+    assert.equal(r.decision, true)
+    // dryRun 模式下 handleIssue 返回 state=planned、不写账本；这里只验证走了决策分支、没绑编排、没推 session.dispatched。
+    assert.equal(r.state, "planned")
+    assert.match(r.prompt, /决策会话/, "用决策提示词，不是编码提示词")
+    assert.match(r.prompt, /没有人监听/)
+    assert.ok(emitted.includes("issue.picked"))
+    assert.ok(!emitted.includes("session.dispatched"), "决策单不推 session.dispatched")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("issue settle：只修本地完成账本，不关远端工单、不清工作区", async () => {
   const dir = tmpDir()
   try {

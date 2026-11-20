@@ -18,6 +18,7 @@
 4. 发现编排失联、投递失败或明确异常时，依据证据重派或转人工；暂时无回复不直接判定失败。
 5. 他人 PR 由代码直投合并会话，你不代劳合并；本人 UI PR 由你 `pr ui-assign` 指派测试验收，PR 评论更新与合并失败/异常才由你判断下一步。
 6. 核对并清理已终态任务的残留，必要时修正本地账本；不替编排智能体作工单业务结论。
+7. 收到 `issue.decision` 事件（带 needs-info / needs-human / ready-for-human / wontfix / agent-blocked 标签的决策单）时，逐条执行 `foreman decide <owner/name>#<单号>`，由它开决策会话；不要自己直接调研或改代码，也不要把决策单当成可编码工单 hand 出去。
 
 ## 技能调用时机
 

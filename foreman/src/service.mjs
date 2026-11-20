@@ -670,12 +670,64 @@ export async function pickIssue(ctx, { repo = "", number = 0 } = {}) {
     const exclude = new Set((cfg.pickup?.excludeLabels ?? []).map((l) => String(l).toLowerCase()))
     const decision = labels.some((l) => exclude.has(l))
 
-    const hand = !decision && sessionFlowEnabled(cfg) && cfg.pickup?.handToOrchestrator === true
+    // 决策单走 Inbox：写 router.notice（type=issue.decision），由 Worker 串行 steer router agent，
+    // router 消费后调 foreman decide 开决策会话。不再在 pickIssue 里直接 handleIssue，
+    // 否则这条链路绕过了 Inbox 持久化 + Worker 串行投递，重启后会丢。
+    if (decision) {
+      const notify = ctx.notifyRouter ?? ctx.notifyInspector
+      if (typeof notify !== "function") {
+        finishOperation(ctx, op, "failed", "ctx.notifyRouter 未初始化，无法写入决策单 Inbox")
+        return { ok: false, error: "inbox-unavailable", message: "决策单需要 router Inbox 通道，但当前 ctx 没有 notifyRouter" }
+      }
+      const decisionLabels = labels.filter((l) => exclude.has(l)).join(", ")
+      const text = [
+        "【Foreman · router agent · 决策单待处理】",
+        `工单 ${key}「${issue.title ?? ""}」带 ${decisionLabels} 标签，需先调研 + 决策，不直接编码。`,
+        issue.url ? `链接：${issue.url}` : "",
+        `请执行：foreman decide ${key}`,
+        "decide 会用决策提示词开一条新会话（不绑编排、不监听、不进 PR 链）；agent 自己判断要不要切 ready-for-agent，不确定就发邮件请用户决策。",
+      ].filter(Boolean).join("\n")
+      let enqueueOut
+      try {
+        enqueueOut = await notify({
+          type: "issue.decision",
+          text,
+          json: { issue: { key, repo: repoCfg.repo, number: n, title: issue.title ?? "", url: issue.url ?? "", labels: issue.labels ?? [] } },
+        })
+      } catch (e) {
+        finishOperation(ctx, op, "failed", `决策单写 Inbox 失败：${e.message}`)
+        return { ok: false, error: "inbox-failed", message: e.message }
+      }
+      if (enqueueOut?.ok === false || enqueueOut?.skipped) {
+        const msg = enqueueOut?.error || enqueueOut?.skipped || "决策单写 Inbox 失败"
+        finishOperation(ctx, op, "failed", msg)
+        return { ok: false, error: "inbox-failed", message: msg }
+      }
+      // 账本先记 planned：等 router 派 decide 后才转 working，避免控制台提前看到「正在跑」。
+      book.setIssue(key, {
+        state: "planned",
+        issue: n,
+        title: issue.title ?? "",
+        url: issue.url ?? "",
+        repo: repoCfg.repo,
+        decision: true,
+      })
+      await ctx.engine?.emit("issue.picked", { issueKey: key, workflow: "own" })
+      finishOperation(ctx, op, "success", `决策单 · 已写入 router Inbox · event ${enqueueOut?.eventId ?? ""}`)
+      try {
+        ctx.consoleStore?.sync(new Book(cfg.stateFile))
+        forgetCandidates()
+      } catch {}
+      log(`手动接单 ${key}：决策单已写入 router Inbox（event ${enqueueOut?.eventId ?? ""}）`)
+      return { ok: true, decision: true, state: "inbox", eventId: enqueueOut?.eventId ?? "", convId: "" }
+    }
+
+    const hand = sessionFlowEnabled(cfg) && cfg.pickup?.handToOrchestrator === true
     let out
     try {
       out = hand
         ? await handToOrchestrator({ ...ctx, book }, { repoCfg, issue })
-        : await handleIssue({ ...ctx, book, decision, noNotify: decision || ctx.noNotify }, repoCfg, issue)
+        : await handleIssue({ ...ctx, book, decision: false, noNotify: ctx.noNotify }, repoCfg, issue)
     } catch (e) {
       finishOperation(ctx, op, "failed", e.message)
       const code = e.code === "app_unavailable" ? "app_unavailable" : "dispatch-failed"
@@ -683,18 +735,17 @@ export async function pickIssue(ctx, { repo = "", number = 0 } = {}) {
     }
 
     // 和工作流引擎对齐：捞到单推 issue.picked，真开出工作会话再推 session.dispatched。
-    // 决策单不推 session.dispatched：它不进 workflow 的「跑完 → 验收 → 出 PR」那条链。
     await ctx.engine?.emit("issue.picked", { issueKey: key, workflow: "own" })
-    if (out.state === "dispatched" && !decision) {
+    if (out.state === "dispatched") {
       await ctx.engine?.emit("session.dispatched", { issueKey: key, target: out.convId ?? out.agent ?? "", workflow: "own" })
     }
-    finishOperation(ctx, op, "success", `${decision ? "决策单 · " : ""}${out.convId ? `已派出 · ${out.convId}` : out.reason || out.state}`)
+    finishOperation(ctx, op, "success", `${out.convId ? `已派出 · ${out.convId}` : out.reason || out.state}`)
     try {
       ctx.consoleStore?.sync(new Book(cfg.stateFile))
       forgetCandidates()
     } catch {}
-    log(`手动接单 ${key}：${out.state}${decision ? "（决策单，不监听）" : ""}${out.convId ? ` · ${out.convId}` : ""}`)
-    return { ok: true, decision, ...out }
+    log(`手动接单 ${key}：${out.state}${out.convId ? ` · ${out.convId}` : ""}`)
+    return { ok: true, decision: false, ...out }
   } finally {
     releaseLock(lockFile)
   }
@@ -2337,6 +2388,33 @@ export async function handleRequest(ctx, req) {  const id = req?.id
       return ok(out)
     } catch (e) {
       return fail(e.code === "app_unavailable" ? "app_unavailable" : "dispatch-failed", e.message)
+    }
+  }
+
+  // decide：router agent 消费 issue.decision Inbox 事件后调它，开一条决策会话。
+  // 决策单不绑编排会话、不监听、不进「跑完→验收→出 PR」链；提示词由代码内置（decisionKickoff）。
+  // 不校验 ready-for-agent：决策单的意义就是先调研再决定要不要切 ready-for-agent。
+  if (cmd === "decide") {
+    if (!sessionFlowEnabled(ctx.cfg)) return fail("disabled", "sessionFlow.enabled=false，不走编排会话；决策单也需要 sessionFlow")
+    const ref = String(req.issue ?? "").trim()
+    const m = ref.match(/([^#\s]+)#([0-9]+)$/)
+    if (!m) return fail("bad-request", `decide 的 --issue 要写成 <owner/name>#<工单号>，收到：${ref || "（空）"}`)
+    const repoCfg = findRepoCfg(ctx.cfg, m[1])
+    if (!repoCfg) return fail("bad-request", `配置里没有这个工程：${m[1]}`)
+    const number = Number(m[2])
+    let issue
+    try {
+      issue = { ...(await ctx.gitea.viewIssue(repoCfg.repo, number)), number }
+    } catch (e) {
+      return fail("gitea-error", `读不到工单 ${repoCfg.repo}#${number}：${e.message}`)
+    }
+    try {
+      const out = await handleIssue({ ...ctx, book: new Book(ctx.cfg.stateFile), decision: true, noNotify: true }, repoCfg, issue)
+      // 决策单不推 session.dispatched（与 pickIssue 旧路径对齐）。
+      await ctx.engine?.emit("issue.picked", { issueKey: `${repoCfg.repo}#${number}`, workflow: "own" })
+      return ok({ ...out, decision: true })
+    } catch (e) {
+      return fail(e.code === "app_unavailable" ? "app_unavailable" : "decide-failed", e.message)
     }
   }
 

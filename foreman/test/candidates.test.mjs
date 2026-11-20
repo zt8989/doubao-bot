@@ -217,8 +217,9 @@ test("决策单提示词：先调研，切换 ready-for-agent 后才能编码，
   assert.match(p, /\/tmp\/wt/, "仍给工作区：调研后确认可做并完成标签切换才改")
 })
 
-test("手动接单：带 needs-info 标签走决策单（dry-run 验证提示词与标记）", async () => {
+test("手动接单：带 needs-info 标签走决策单 → 写 router Inbox（issue.decision），不直接开会话", async () => {
   const stateFile = tmpState()
+  const sent = []
   const ctx = {
     cfg: cfg({ stateFile }),
     dryRun: true,
@@ -226,12 +227,24 @@ test("手动接单：带 needs-info 标签走决策单（dry-run 验证提示词
     gitea: {
       viewIssue: async () => ({ ...issue(31), title: "信息不足的单", labels: ["needs-info"], body: "正文" }),
     },
+    notifyRouter: async (envelope) => {
+      sent.push(envelope)
+      return { ok: true, action: "inbox", eventId: "evt-decision-31" }
+    },
   }
   const r = await pickIssue(ctx, { repo: repoCfg.repo, number: 31 })
   assert.equal(r.ok, true)
   assert.equal(r.decision, true)
-  assert.match(r.prompt, /决策会话/, "换了一套提示词")
-  assert.match(r.prompt, /没有人监听/)
+  assert.equal(r.state, "inbox")
+  assert.equal(r.eventId, "evt-decision-31")
+  assert.equal(sent.length, 1, "决策单必须写一条 router Inbox")
+  assert.equal(sent[0].type, "issue.decision")
+  assert.match(sent[0].text, /foreman decide yyzl\/win-ai-harness#31/)
+  assert.match(sent[0].text, /needs-info/)
+  assert.equal(sent[0].json.issue.number, 31)
+  const rec = new Book(stateFile).issue(`${repoCfg.repo}#31`)
+  assert.equal(rec.state, "planned", "决策单先记 planned，等 router 派 decide 才转 working")
+  assert.equal(rec.decision, true)
 })
 
 test("手动接单：普通工单仍走标准派单提示词", async () => {

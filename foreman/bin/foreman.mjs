@@ -69,6 +69,9 @@ const HELP = `foreman — 接单编排 + 常驻服务
                                       默认只建工单所在仓；额外工程必须重复传 --repo，正文提到不会自动建
                                       提示词必填：编排分析、任务范围与验收要求随首句注入，头部带工单 ID 和 URL
                                       准入：工单需带 ready-for-agent；缺标签时返回 not-ready 并要求先出方案 + 邮件决策，--force 显式跳过
+  foreman decide <owner/name>#<单号> [--orchestrator <id>]
+                                      router agent 消费 issue.decision 时调用：用决策提示词开一条新会话
+                                      不绑编排、不监听、不进 PR 链；agent 先调研再决定要不要切 ready-for-agent
   foreman resume <执行会话id> [--orchestrator <id>]          失败/卡住：在指定工作会话里 steer 续跑（不新开）
   foreman clean <owner/name>#<单号>     合并关单后清 worktree、本地分支、工作会话与这张单的编排会话（幂等）
   foreman clean --all                  清所有终端态工单残留的工作区与会话
@@ -769,6 +772,16 @@ async function cmdDispatch(pos, flags) {
   return out({ ok: true, ...r })
 }
 
+async function cmdDecide(pos, flags) {
+  const ref = String(pos[0] ?? flags.issue ?? "").trim()
+  if (!ref) throw new Error("用法：foreman decide <owner/name>#<单号>（router agent 消费 issue.decision 时调用）")
+  const cfg = loadConfig(flags.config)
+  const port = await resolvePort(cfg)
+  const r = await callRaw(port, { id: "cli", cmd: "decide", issue: ref, ...orchestratorArg(flags) }, 900000)
+  if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
+  return out({ ok: true, ...r })
+}
+
 async function cmdResume(pos, flags) {
   const sessionId = String(pos[0] ?? flags.session ?? "").trim()
   if (!sessionId) throw new Error("用法：foreman resume <执行会话id>（在指定工作会话里 steer 续跑，不传工单号）")
@@ -860,6 +873,8 @@ async function main() {
       return cmdMemory(pos, flags)
     case "dispatch":
       return cmdDispatch(pos, flags)
+    case "decide":
+      return cmdDecide(pos, flags)
     case "resume":
       return cmdResume(pos, flags)
     case "clean":
