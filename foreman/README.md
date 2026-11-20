@@ -126,7 +126,7 @@ worktree 建不出来时 run 当场 hold：回帖工单 + 打标签（`ready-for
 - Worker 收到普通消息写入后直接 `wake()`，1 秒轮询只负责漏唤醒与重启恢复。对 `schedule.event` 先按 `payload.type` 找直接处理器，找不到或无法识别的内容连同 text/JSON 交router agent判断；多条路由通知合并成一次运行。旧 `schedule.result` 只标记 `non-actionable` 丢弃，不再确认或转发。
 - 以最后一次成功投递为轮换基准；从未成功时从首次失败计时，连续 `router.recreateAfterHours`（默认 24 小时）未成功才新建路由会话。普通 Inbox 消息的 done 只表示 Worker 已成功交给处理器或 dws，不表示 Agent 已处理完。
 - `pickup` Schedule 只读取并筛选工单候选，不自行派单，Worker 也不替router agent做业务决策。router agent收到 `issue.candidates` 后先核对实时容量，再对通知中明确列出的工单执行 `foreman hand <owner/name>#N`，由该单编排会话 `dispatch` 编码智能体；不得用 `run --once` 扩大候选范围。router agent还负责健康检查、必要时 `hand --fresh` 重派独立编排、用 `issue settle` 修复本地完成状态。每轮先读 `foreman tasks --json`：主体是 `sessions` 父子树，节点 `state=running/idle/gone/unknown` 为会话状态，`issueKey/issueState` 仅作归属与容量元数据；在飞数取 `summary.unresolvedIssues`，PR 数取 `summary.prOpenIssues`，真实编码运行数只数编码节点 `state=running`。每轮执行 `foreman clean --all` 幂等清理 `done/cleaned` 残留。全部未收口合计最多 `pickup.maxRunning`（默认 2），`handed` 占槽，不是每轮新增 2 张；dry-run 只看候选优先级，满额禁止 `run/pickup/hand/orch start/dispatch`，每次接单后重新计数。每轮先读 `foreman tasks --json`：主体是 `sessions` 父子树，节点 `state=running/idle/gone/unknown` 为会话状态，`issueKey/issueState` 仅作归属与容量元数据；在飞数取 `summary.unresolvedIssues`，PR 数取 `summary.prOpenIssues`，真实编码运行数只数编码节点 `state=running`。每轮执行 `foreman clean --all` 幂等清理 `done/cleaned` 残留。全部未收口合计最多 `pickup.maxRunning`（默认 2），`handed` 占槽，不是每轮新增 2 张；dry-run 只看候选优先级，满额禁止 `run/pickup/hand/orch start/dispatch`，每次接单后重新计数。
-- `watch poll` 由 router Schedule 每 1 分钟执行，也保留人工/router agent按需补跑入口：观察已登记执行会话，把状态变化与最终回复写入 `task.update`，由 Worker queue 给所属编排。它不解析 RESULT、不自动 push/开 PR、不推进工单业务状态。
+- `watch poll` 由 router Schedule 每 1 分钟执行，也保留人工/router agent按需补跑入口：观察已登记执行会话，只有收工（`finished`/`settled`）与消失（`gone`）连同最终回复写入 `task.update`，`running` 只落本地账本、不入箱，由 Worker queue 给所属编排。它不解析 RESULT、不自动 push/开 PR、不推进工单业务状态。
 - **notify 节点不再承担执行会话投递**：其暂停状态仍会阻止任务事件入箱；成功投递以 Inbox done、Worker 日志和账本 `steers/notified` 为准，业务结论由编排判断。
 
 ### Always-on 持久记忆
@@ -249,8 +249,10 @@ Inbox、Outbox 与 ConsoleStore 共用 `~/.foreman/console.db` 的同一连接�
   点行尾「接单」= 建工作区 + 开执行会话，**显式人工动作，不受工作时间限制**，但 `run.lock`、节点暂停、账本查重照旧守着，
   不会和 CLI / router agent把同一张单派两遍。页脚显示「在跑 n/上限」。
   - **决策单**：工单带着 `pickup.excludeLabels` 里的标签（`needs-info` / `needs-human` / `ready-for-human` / `wontfix` / `agent-blocked`）
-    时，接单走另一套提示词（`decisionKickoff`）：让 agent 先读懂工单、自己判断该不该做——信息不够就把缺的和方案写清、
-    需要人答的回工单评论，判断能做才动手，不该做就说明理由（不许自己关单/改标签）。
+    时，接单走另一套提示词（`decisionKickoff`）：让 agent 先读工单、评论和代码做调研；信息不够或方向不确定时写清结论、
+    可选方案与推荐，可用 `foreman send --type mail` 发邮件请用户决策，未决策前不编码。确认可做且做法明确后，必须先用
+    `gitea issue-edit` 添加 `ready-for-agent` 并移除本单现有的人工处理/信息不足状态标签，重新读取工单确认
+    `ready-for-agent` 已存在且 `ready-for-human` 已移除，才能编码；切换或核验失败则不编码。不该做的说明理由，保持原状。
     这类单**不交给编排会话、不登记监听、不推 `session.dispatched`**，账本记 `decision:true`、`notify:false`，
     结论由 agent 在会话里写完整；接口返回 `decision:true`，页面顶部会提示「已接下（决策单）」。
 - 顶栏有「看哪天」日期选择（原生日历）：换一天，指标卡 / 任务表全部切成那天的口径（状态从 `events` 回放，标题写 `2026-11-11 分配任务`），非今天时出现「回到今天」；`/?day=YYYY-MM-DD` 也能直接打开那天。没有单独的「历史」面板。表格里的 `仓库#号` 是链接，点开就是 Gitea 的工单/PR 页面（新标签页）。
@@ -509,7 +511,7 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
 `pickup.auto` 控制独立的我的工单扫描 Schedule，按 `pickup.cron`（未配置时由 `intervalSeconds` 换算）运行。扫描只筛选 open、指派给 `pickup.me` 且带 `ready-for-agent` 的工单，并排除账本中 `handed/planned/working` 与已收口的单；候选写 `issue.candidates` Inbox，由 router agent 按容量 hand，绝不直接调用旧 `pickupOnce` 派单。手动「立即扫描」只绕过开关与工作时间窗。`pickup.kickAfterDone` 仍是历史配置，`run --every` 仍拒绝执行。
 
 - `router.enabled` 默认 `true`；起服务 1 秒后执行首轮代码轮询，之后每 `router.intervalSeconds`（默认 60 秒）运行 `src/service.mjs#pollOnce`；
-- 脚本路径、导出函数和参数在设置页可查看与编辑，默认 `src/service.mjs` / `pollOnce` / `{}`；普通检查完成不写 Inbox，真实状态变化写 `task.update`；
+- 脚本路径、导出函数和参数在设置页可查看与编辑，默认 `src/service.mjs` / `pollOnce` / `{}`；普通检查完成不写 Inbox，只有收工（`finished`/`settled`）与消失（`gone`）才写 `task.update` 事件，`running` 只记本地账本、不投递；
 - 连续 `router.recreateAfterHours`（默认 24）小时未成功投递才新建路由会话；这只适用于按需 Agent 投递，不影响代码轮询；
 - 手动 `foreman route`、PR 候选、邮件异常和 Worker 未识别事件仍调用 router Agent。Agent 被调用时先 `run --dry-run --once` 核对候选，再决定是否 `run --once`；优先级仍由 `pickup.priority` 等配置决定，容量为 `pickup.maxRunning`；
 - Agent 每轮以 `foreman tasks --json` 的实时 `sessions` 树和 `summary` 为准，只对 `done/cleaned` 执行 `foreman clean --all`，不得清理 `working/pr-open` 等非终态；

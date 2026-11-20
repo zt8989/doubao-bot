@@ -63,7 +63,8 @@ test("同一任务 pending 更新合并为最新状态，不制造一串过时�
     book.setIssue("demo/demo#7", { orchestrator: "conv-orch" })
     const watcher = { target: "conv-worker", name: "worker", issueKey: "demo/demo#7" }
     const ctx = { cfg, book, inbox }
-    enqueueTaskUpdate(ctx, { watcher, phase: "running", observedAt: new Date("2026-11-19T01:00:00Z") })
+    const running = enqueueTaskUpdate(ctx, { watcher, phase: "running", observedAt: new Date("2026-11-19T01:00:00Z") })
+    assert.equal(running.reason, "running-not-notified", "running 只是会话状态，不入箱")
     enqueueTaskUpdate(ctx, { watcher, phase: "finished", fingerprint: "new-final", finalText: "最终结果", observedAt: new Date("2026-11-19T01:01:00Z") })
     const events = inbox.list({ status: "pending" })
     assert.equal(events.length, 1)

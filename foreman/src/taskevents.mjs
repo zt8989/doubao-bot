@@ -35,7 +35,9 @@ export function taskUpdateText({ watcher = {}, phase = "", owner = "", finalText
 }
 
 // 只入持久 Inbox。调用方不得在 enqueue 成功后提前 markIdle/markNotified；这些账本由 Worker 送达后推进。
+// running 只是会话还在跑，不是业务状态变化：一律不投递，编排只收 finished/settled/gone。
 export function enqueueTaskUpdate(ctx, { watcher, phase, fingerprint = "", finalText = "", observedAt = new Date() } = {}) {
+  if (String(phase ?? "") === "running") return { ok: false, reason: "running-not-notified" }
   if (!ctx.inbox) return { ok: false, reason: "no-inbox" }
   const book = ctx.book ?? ctx.bookFactory?.()
   if (!book) throw new Error("task.update 缺少账本")

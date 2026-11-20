@@ -1367,11 +1367,9 @@ export async function pollOnce(ctx) {
       if (side?.running) {
         if (led.idle) book.clearIdle(key)
         if (led.gone) book.clearGone(key)
-        if (led.observedPhase !== "running") {
-          const published = enqueueTaskUpdate({ ...ctx, book }, { watcher: w, phase: "running" })
-          if (published.ok) book.markTaskObserved(key, "running")
-          else log(`任务 running 事件未入箱 ${key}：${published.reason}`)
-        }
+        // running 只是「还在跑」，不产生业务信息：只落本地账本，不入箱、不投递编排。
+        // 编排需要的只有收工（finished/settled）与消失（gone）两类状态变化。
+        if (led.observedPhase !== "running") book.markTaskObserved(key, "running")
         rec.lastPhase = "running"
         rec.lastPollAt = nowIso()
         continue

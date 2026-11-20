@@ -42,8 +42,8 @@ function mkCtx({ runningMap, status, notify }) {
   return { ctx, calls, dir, inbox, drain: () => worker.runOnce() }
 }
 
-test("侧边栏显示还在跑：不调用 dws.status，也就不切窗口", async () => {
-  const { ctx, calls, dir, drain } = mkCtx({
+test("侧边栏显示还在跑：不调用 dws.status，也不投递 running 状态", async () => {
+  const { ctx, calls, dir, inbox } = mkCtx({
     runningMap: async () => ({ "conv-a": { running: true, title: "w" } }),
     status: async () => { throw new Error("在跑的会话不该去读 status") },
   })
@@ -56,6 +56,8 @@ test("侧边栏显示还在跑：不调用 dws.status，也就不切窗口", asy
     assert.equal(calls.info, 0)
     assert.equal(calls.notified.length, 0)
     assert.equal(ctx.state.watchers.get("conv-a").lastPhase, "running")
+    assert.equal(new Book(ctx.cfg.stateFile).notified["conv-a"]?.observedPhase, "running", "本地账本记下 running")
+    assert.equal(inbox.list({ status: "pending" }).length, 0, "running 不入箱、不投递编排")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

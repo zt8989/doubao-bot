@@ -192,14 +192,15 @@ test("端到端：状态经 Inbox/Worker 投递，同指纹与重启都不重复
     server = await startServer({ cfg, book, dws, log: () => {} })
 
     const drain = async () => { await server.worker.idle(); await server.worker.runOnce() }
-    // 第一轮 running 也入箱，由 Worker queue 给所属 Agent
+    // 第一轮 running：只落本地账本，不入箱、不投递编排
     let r = await server.poll()
     assert.equal(r.checked, 1)
     assert.equal(r.settled, 0)
     assert.equal(r.notified, 0)
     await drain()
-    assert.equal(notified.length, 1, JSON.stringify({ r, events: server.inbox.list(), worker: server.worker.lastResult }))
-    assert.match(notified[0].text, /状态：running/)
+    assert.equal(notified.length, 0, JSON.stringify({ r, events: server.inbox.list(), worker: server.worker.lastResult }))
+    assert.equal(server.inbox.list({ status: "pending" }).length, 0, "running 不产生 task.update")
+    assert.equal(new Book(cfg.stateFile).notified["conv-e2e"]?.observedPhase, "running")
     sidebarRunning = false
 
     // 第二轮 finished + 指纹变化 → 先入箱，Worker 才投递并消费指纹
@@ -207,8 +208,8 @@ test("端到端：状态经 Inbox/Worker 投递，同指纹与重启都不重复
     assert.equal(r.settled, 1)
     assert.equal(r.notified, 0)
     await drain()
-    assert.equal(notified.length, 2)
-    assert.match(notified[1].text, /做完了，已提交并通过测试。/)
+    assert.equal(notified.length, 1)
+    assert.match(notified[0].text, /做完了，已提交并通过测试。/)
     const led = new Book(cfg.stateFile).notified["conv-e2e"]
     assert.match(led.fingerprint, /^[0-9a-f]{12}$/)
 
@@ -216,7 +217,7 @@ test("端到端：状态经 Inbox/Worker 投递，同指纹与重启都不重复
     r = await server.poll()
     assert.equal(r.enqueued ?? 0, 0)
     await drain()
-    assert.equal(notified.length, 2)
+    assert.equal(notified.length, 1)
 
     // 关闭服务（模拟重启）
     await server.close()
@@ -228,7 +229,7 @@ test("端到端：状态经 Inbox/Worker 投递，同指纹与重启都不重复
       r = await server2.poll()
       assert.equal(r.notified, 0, "重启后不重发")
       await server2.worker.idle()
-      assert.equal(notified.length, 2)
+      assert.equal(notified.length, 1)
       await server2.close()
     } catch (e) {
       await server2.close()
