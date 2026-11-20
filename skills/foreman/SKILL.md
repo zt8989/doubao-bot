@@ -147,6 +147,7 @@ foreman watch poll               # 立刻跑一轮（checked / settled / enqueue
 服务里还有一条独立定时器，每 `prWatch.intervalSeconds`（默认 300s）扫一遍 `repos[]` 下各仓库的 open PR：
 
 - 列表走 `gitea pull-list --repo <owner/name> --state open`（只读适配器命令，带回 `author`）。
+- **所有 open PR 的评论更新都由代码检查，不启动扫描 Agent**：逐条 `pr-view`，首次只记录评论指纹；后续发现新增或编辑评论时生成 `pr.updates` 写入 router agent Inbox，单纯提交变化不通知。通知只陈述评论变化，是否合并、是否关闭 issue 由 router agent 决定；同一评论指纹不重复通知，投递失败保留下轮补发。可用 `prWatch.routeUpdates: false` 关闭更新路由。
 - 本人账号（`prWatch.ignoreAuthors`，当前为 `233151`）的 PR 不进入他人合并助手链路。本人 PR 若涉及 UI，代码读取 PR 文件列表确认后，另发「本人 UI PR 待验收指派」给router agent；非 UI 仍只记 `skipped: "self"`。作者无法确认时记 `skipped: "unknown-author"`，也不进入候选；后续作者补全后可重新检查。
 - 其余 PR 合成候选消息，写入 `router.notice` Inbox，由 Worker 复用同一路由会话投递。router agent不需要主动读取 PR 列表，只核对代码送来的候选；决定处理时执行 `foreman pr assign <N> --repo R`，Foreman 校验确为他人 PR 后才新建一条合并会话（读合并提示词 + 监控项目，会话名 `foreman-合并-<YYYYMMDD-HHmm>`）。
 - 本人 UI 候选由router agent执行 `foreman pr ui-assign <N> --repo R`；Foreman 复核 open、本人、UI 和既有指派人后，按 `prWatch.uiReviewers` 顺序轮询指派。当前顺序为周晓亮（`ywwb1328`）→ 张振豪（`ywwb1797`），只改 Gitea 指派人，不建合并助手、不合并；成功后才推进游标，重复执行幂等。
