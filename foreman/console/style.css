@@ -196,10 +196,10 @@ fm-head { flex: 0 0 auto; }
 main {
   max-width: none;
   margin: 0;
-  padding: 16px;
+  padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 0;
 }
 
 /* ---------- 指标卡 ---------- */
@@ -260,6 +260,20 @@ main {
   background: var(--panel);
   box-shadow: var(--shadow);
   overflow: hidden;
+}
+
+.app-shell main > .panel,
+.app-shell main > :not(fm-chat) > .panel {
+  border-width: 0 0 1px;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.app-shell main .stats { gap: 0; }
+.app-shell main .stat {
+  border-width: 0 1px 1px 0;
+  border-radius: 0;
+  box-shadow: none;
 }
 
 .panel-head {
@@ -1013,7 +1027,7 @@ fm-chat { display: flex; flex: 1; width: 100%; min-height: 0; }
 @media (max-width: 980px) {
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .topbar { padding: 14px 18px; }
-  main { padding: 18px; }
+  main { padding: 0; }
   table.tasks th.col-branch, table.tasks td:nth-child(4) { display: none; }
   table.queue-table td:nth-child(4) { display: table-cell; }
 }
@@ -1037,7 +1051,7 @@ fm-chat { display: flex; flex: 1; width: 100%; min-height: 0; }
   .side-link { width: auto; flex: 0 0 auto; justify-content: center; padding: 8px 12px; }
   .side-collapse { display: none; }
 
-  main { padding: 12px 10px 8px; gap: 14px; max-width: none; }
+  main { padding: 0; gap: 0; max-width: none; }
 
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .pr-title { flex-basis: 100%; }
