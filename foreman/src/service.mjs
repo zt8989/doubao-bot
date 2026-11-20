@@ -36,7 +36,7 @@ import { acceptanceGate, detectUiChange, mailPollOnce, requestAcceptance, mailAc
 import { inflightIssues } from "./planner.mjs"
 import { routerOnce } from "./core/router.mjs"
 import { dreamOnce } from "./dreaming.mjs"
-import { listPulls, viewPr, mergePr, closeIssue, createPr, commentIssue } from "./gitea.mjs"
+import { listPulls, viewPr, mergePr, closeIssue, createPr, commentIssue, READY_FOR_AGENT } from "./gitea.mjs"
 import { ConsoleStore } from "./console.mjs"
 import { InboxStore, AgentWorker, ScheduleRunner } from "./core/inbox.mjs"
 import { OutboxStore, OutboxDispatcher } from "./core/outbox.mjs"
@@ -2304,6 +2304,24 @@ export async function handleRequest(ctx, req) {  const id = req?.id
       issue = { ...(await ctx.gitea.viewIssue(repoCfg.repo, number)), number }
     } catch (e) {
       return fail("gitea-error", `读不到工单 ${repoCfg.repo}#${number}：${e.message}`)
+    }
+    // 准入检查：没带 ready-for-agent 的单不直接派，先让 agent 给修改方案 + 邮件请人决策；--force 显式绕过。
+    // 自动巡检 pickupWatch 已经在源头过滤，所以这里主要约束 agent/CLI 主动 dispatch 的路径。
+    const labels = Array.isArray(issue.labels) ? issue.labels : []
+    const force = req.force === true
+    if (!force && !labels.includes(READY_FOR_AGENT)) {
+      const shown = labels.length ? labels.join(", ") : "（无标签）"
+      return fail(
+        "not-ready",
+        [
+          `工单 ${repoCfg.repo}#${number} 当前未标记 ${READY_FOR_AGENT}（现有标签：${shown}），不直接派活。`,
+          "请先按下面的流程推进：",
+          "1. 阅读工单与相关代码，给出可执行的修改方案（改动范围、涉及文件、验收方式），不要直接动手改业务代码；",
+          "2. 通过邮件把方案发给用户/负责人请求决策（参考 mail 技能），正文要写清方案与待决问题；",
+          "3. 等到工单被加上 ready-for-agent（或被切到 ready-for-human 等终态标签）后再派活；",
+          `4. 如果你判断这张单无需等待人工决策，可显式加 --force 跳过本检查。`,
+        ].join("\n"),
+      )
     }
     try {
       const extraRepos = (Array.isArray(req.repos) ? req.repos : req.repos ? [req.repos] : [])

@@ -479,7 +479,7 @@ test("dispatch RPC：达到定时巡检上限后，agent 仍能派且 ctx 不带
     const ctx = {
       ...mkCtx(cfg),
       dryRun: true,
-      gitea: { viewIssue: async (repoArg, n) => ({ number: n, title: "登录改造", body: "依赖 demo-b，但实际改动范围由编排显式指定", labels: [], assignees: [], url: `http://gitea/yyzl/demo/issues/${n}` }) },
+      gitea: { viewIssue: async (repoArg, n) => ({ number: n, title: "登录改造", body: "依赖 demo-b，但实际改动范围由编排显式指定", labels: ["ready-for-agent"], assignees: [], url: `http://gitea/yyzl/demo/issues/${n}` }) },
     }
     assert.equal(ctx.book, undefined, "这条 RPC 的 ctx 就是服务级 ctx，本身没有 book")
     const missing = await handleRequest(ctx, { id: "t0", cmd: "dispatch", issue: "yyzl/demo#7" })
@@ -506,6 +506,50 @@ test("dispatch RPC：达到定时巡检上限后，agent 仍能派且 ctx 不带
     assert.deepEqual(explicit.workspaces.map((w) => w.repo), ["yyzl/demo", "yyzl/demo-b"])
     assert.match(explicit.prompt, /### yyzl\/demo[\s\S]*# demo 原工程约定/)
     assert.match(explicit.prompt, /### yyzl\/demo-b[\s\S]*# demo-b 原工程约定\n先跑 demo-b 单测。/)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// 准入检查：dispatch 必须看到 ready-for-agent，否则提醒 agent 出方案 + 邮件决策；--force 显式跳过。
+test("dispatch RPC：缺 ready-for-agent 标签时返回 not-ready 并提示出方案+发邮件，--force 跳过", async () => {
+  const dir = tmpDir()
+  try {
+    const repoDir = path.join(dir, "demo")
+    fs.mkdirSync(repoDir, { recursive: true })
+    fs.writeFileSync(path.join(repoDir, "AGENTS.md"), "# demo 原工程约定\n")
+    const repo = { repo: "yyzl/demo", name: "demo", dir: repoDir, base: "sit-20261126", product: "demo" }
+    const cfg = mkCfg(dir, { worktreeDir: path.join(dir, "worktrees"), repos: [repo], sessionFlow: { enabled: true } })
+    let issueLabels = ["needs-human"]
+    const ctx = {
+      ...mkCtx(cfg),
+      dryRun: true,
+      gitea: { viewIssue: async (repoArg, n) => ({ number: n, title: "登录改造", body: "", labels: issueLabels, assignees: [], url: `http://gitea/yyzl/demo/issues/${n}` }) },
+    }
+    const prompt = "请派一个执行会话"
+    const noForce = await handleRequest(ctx, { id: "d0", cmd: "dispatch", issue: "yyzl/demo#7", prompt })
+    assert.equal(noForce.ok, false)
+    assert.equal(noForce.error, "not-ready")
+    assert.match(noForce.message, /ready-for-agent/)
+    assert.match(noForce.message, /needs-human/, "要把现有标签告诉 agent，便于它判断决策路径")
+    assert.match(noForce.message, /修改方案|方案/)
+    assert.match(noForce.message, /邮件/)
+    assert.match(noForce.message, /--force/)
+
+    issueLabels = []
+    const noLabels = await handleRequest(ctx, { id: "d1", cmd: "dispatch", issue: "yyzl/demo#7", prompt })
+    assert.equal(noLabels.ok, false)
+    assert.equal(noLabels.error, "not-ready")
+    assert.match(noLabels.message, /无标签/)
+
+    // 显式 --force 直接放行
+    const forced = await handleRequest(ctx, { id: "d2", cmd: "dispatch", issue: "yyzl/demo#7", prompt, force: true })
+    assert.equal(forced.ok, true)
+
+    // 正常带标签：不用 force 也能派
+    issueLabels = ["ready-for-agent"]
+    const ready = await handleRequest(ctx, { id: "d3", cmd: "dispatch", issue: "yyzl/demo#7", prompt })
+    assert.equal(ready.ok, true)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
