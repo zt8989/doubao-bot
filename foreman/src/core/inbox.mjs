@@ -123,7 +123,7 @@ export class InboxStore {
       const status = dedupeMode === "forever" ? "" : ` AND status IN ${statuses}`
       const duplicate = this.db.prepare(`SELECT id, status FROM agent_inbox WHERE dedupe_key = ?${status} ORDER BY id DESC LIMIT 1`).get(dedupeKey)
       if (duplicate) {
-        const reason = duplicate.status === "done" ? "duplicate-delivered" : "duplicate"
+        const reason = prNotice && duplicate.status === "done" ? "duplicate-delivered" : "duplicate"
         const id = this.insert({ kind, text, payload, dedupeKey, coalesceKey, availableAt, expiresAt, status: "dropped", reason }, at)
         return { id, status: "dropped", reason, duplicateOf: Number(duplicate.id) }
       }
