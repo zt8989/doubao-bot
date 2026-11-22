@@ -5,11 +5,11 @@ description: 通过 REST API 操作内网 Gitea（http://106.54.199.229:3000，�
 
 # Gitea（内网 106.54.199.229:3000）
 
-用 REST API，令牌放在 `~/.foreman/gitea-token`。统一走包装脚本 `scripts/gitea.sh`
-（已处理 PATH 并直接透传 JSON）：
+用 REST API，令牌放在 `~/.foreman/gitea-token`。统一走包装脚本 `scripts/gitea.mjs`
+（Node 版全平台可用，自动解软链、透传 JSON）：
 
 ```bash
-bash "$SKILL_DIR/scripts/gitea.sh" pr-view 217 --repo yyzl/win-ai-harness
+node "$SKILL_DIR/scripts/gitea.mjs" pr-view 217 --repo yyzl/win-ai-harness
 ```
 
 命令实现在仓库 `gitea/` 包（CLI 入口 `gitea/bin/gitea.mjs`），foreman 直接复用同一份
