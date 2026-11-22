@@ -43,17 +43,21 @@ const WIN_PATHEXT = (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";")
 
 function resolveWinBin(cmd) {
   if (path.isAbsolute(cmd)) return fs.existsSync(cmd) ? cmd : cmd
+  // 先试 PATHEXT：裸名文件是 npm 给 Git Bash 用的 sh 垫片，CreateProcess 跑不了
   for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
     if (!dir) continue
     const base = path.join(dir, cmd)
-    try {
-      if (fs.statSync(base).isFile()) return base
-    } catch {}
     for (const ext of WIN_PATHEXT) {
       try {
         if (fs.statSync(base + ext).isFile()) return base + ext
       } catch {}
     }
+  }
+  for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+    if (!dir) continue
+    try {
+      if (fs.statSync(path.join(dir, cmd)).isFile()) return path.join(dir, cmd)
+    } catch {}
   }
   return cmd
 }
@@ -129,6 +133,16 @@ export function exec(cmd, args, { cwd, timeout = 60000, input, env } = {}) {
     )
     child.stdin.end(input ?? "")
   })
+}
+
+// execShell：跑一段 shell 命令文本（verify 命令这类"一整行"），按平台选 shell。
+// Windows 用 cmd.exe（/s 让外层引号被正确剥掉），不依赖 Git Bash；
+// POSIX 保留 bash -lc：登录 shell 会补 PATH（nvm/homebrew 都在里面），行为不变。
+export function execShell(cmd, { cwd, timeout = 60000, env } = {}) {
+  if (process.platform === "win32") {
+    return exec("cmd.exe", ["/d", "/s", "/c", cmd], { cwd, timeout, env })
+  }
+  return exec("bash", ["-lc", cmd], { cwd, timeout, env })
 }
 
 export function commandExists(cmd) {

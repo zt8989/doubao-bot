@@ -4,7 +4,7 @@
 // 三个工具各管一段：gitea 管工单，herdr 管 worktree，dws 管豆包会话。
 import fs from "node:fs"
 import path from "node:path"
-import { exec, nowIso } from "./util.mjs"
+import { exec, execShell, nowIso } from "./util.mjs"
 import * as realGitea from "./gitea.mjs"
 import {
   commitsAhead,
@@ -446,7 +446,7 @@ export async function verify(ctx, wt, repoCfg) {
   if (!ahead) return { ok: false, why: `分支上没有新提交（origin/${repoCfg.base}..HEAD = 0）` }
   for (const cmd of repoCfg.verify ?? []) {
     try {
-      await exec("bash", ["-lc", cmd], { cwd: wt, timeout: 1800000 })
+      await execShell(cmd, { cwd: wt, timeout: 1800000 })
     } catch (e) {
       return {
         ok: false,

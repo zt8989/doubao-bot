@@ -43,7 +43,7 @@ if (global) {
 }
 
 process.stdout.write(
-  '{"ok":false,"error":{"code":"not_installed","message":"找不到 gitea CLI；先 scripts/publish.sh gitea 或 npm --prefix gitea link"}}\n',
+  '{"ok":false,"error":{"code":"not_installed","message":"找不到 gitea CLI；先 node scripts/publish.mjs gitea 或 npm --prefix gitea link"}}\n',
 )
 process.exit(127)
 
