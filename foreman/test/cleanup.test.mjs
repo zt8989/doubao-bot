@@ -12,7 +12,8 @@ function sh(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" })
 }
 
-// 造一个真仓库 + 一个 linked worktree，herdr 用临时 shell 脚本顶替（list 吐固定 JSON，close 记日志）。
+// 造一个真仓库 + 一个 linked worktree，herdr 用临时 node 脚本顶替（list 吐固定 JSON，close 记日志）。
+// 用 .mjs：exec 按扩展名换起 node，Windows 不认 shebang 也能跑。
 function fixture() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-cleanup-"))
   const repo = path.join(dir, "repo")
@@ -29,15 +30,16 @@ function fixture() {
   sh(repo, ["worktree", "add", "-q", "-b", "fix/issue-1", wt, base])
 
   const closedLog = path.join(dir, "closed.log")
-  const fake = path.join(dir, "fake-herdr.sh")
-  fs.writeFileSync(fake, `#!/bin/sh
-case "$1 $2" in
-  "workspace list") cat <<'JSON'
-{"id":"cli","result":{"workspaces":[{"workspace_id":"wX1","label":"fix-issue-1","worktree":{"checkout_path":"${wt}"}}]}}
-JSON
-;;
-  "workspace close") echo "$3" >> "${closedLog}" ;;
-esac
+  const fake = path.join(dir, "fake-herdr.mjs")
+  fs.writeFileSync(fake, `#!/usr/bin/env node
+import fs from "node:fs"
+const [, , a, b] = process.argv
+if (a === "workspace" && b === "list") {
+  process.stdout.write(JSON.stringify({ id: "cli", result: { workspaces: [{ workspace_id: "wX1", label: "fix-issue-1", worktree: { checkout_path: ${JSON.stringify(wt)} } }] } }))
+}
+if (a === "workspace" && b === "close") {
+  fs.appendFileSync(${JSON.stringify(closedLog)}, process.argv[4] + "\\n")
+}
 `)
   fs.chmodSync(fake, 0o755)
   return { dir, repo, wt, fake, closedLog }

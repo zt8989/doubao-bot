@@ -59,12 +59,13 @@ test("侧边栏显示还在跑：不调用 dws.status，也不投递 running 状
     assert.equal(new Book(ctx.cfg.stateFile).notified["conv-a"]?.observedPhase, "running", "本地账本记下 running")
     assert.equal(inbox.list({ status: "pending" }).length, 0, "running 不入箱、不投递编排")
   } finally {
+    inbox.close?.()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
 test("侧边栏显示没在跑：最终回复先入 Inbox，Worker 才 queue 并消费指纹", async () => {
-  const { ctx, calls, dir, drain } = mkCtx({
+  const { ctx, calls, dir, drain, inbox } = mkCtx({
     runningMap: async () => ({ "conv-a": { running: false, title: "w" } }),
     status: async () => ({ streaming: false, finished: true, chars: 500, head: "H", tail: "T", status: "ok" }),
   })
@@ -79,12 +80,13 @@ test("侧边栏显示没在跑：最终回复先入 Inbox，Worker 才 queue 并
     assert.equal(calls.queued[0].target, "boss")
     assert.match(new Book(ctx.cfg.stateFile).notified["conv-a"].fingerprint, /^[0-9a-f]{12}$/)
   } finally {
+    inbox.close?.()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
 test("侧边栏读不到：首个最终回复由 Worker 消费，之后同一会话进入 idle，不重复 status", async () => {
-  const { ctx, calls, dir, drain } = mkCtx({
+  const { ctx, calls, dir, drain, inbox } = mkCtx({
     runningMap: async () => { throw new Error("list 失败") },
     status: async () => ({ streaming: false, finished: true, chars: 500, head: "H", tail: "T", status: "ok" }),
   })
@@ -100,12 +102,13 @@ test("侧边栏读不到：首个最终回复由 Worker 消费，之后同一会
     assert.equal(calls.info, 1, "RESULT 已消费，也不应再读 info")
     assert.equal(ctx.state.watchers.get("conv-a").lastPhase, "idle")
   } finally {
+    inbox.close?.()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
 test("收工那一轮处理完就落 idle，下一轮不再读 status", async () => {
-  const { ctx, calls, dir, drain } = mkCtx({
+  const { ctx, calls, dir, drain, inbox } = mkCtx({
     runningMap: async () => ({ "conv-a": { running: false, title: "w" } }),
     status: async () => ({ streaming: false, finished: true, chars: 500, head: "H", tail: "T", status: "ok" }),
   })
@@ -120,6 +123,7 @@ test("收工那一轮处理完就落 idle，下一轮不再读 status", async ()
     assert.equal(calls.info, 1, "也不该再读 info")
     assert.equal(ctx.state.watchers.get("conv-a").lastPhase, "idle")
   } finally {
+    inbox.close?.()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
@@ -128,7 +132,7 @@ test("续跑后先读到旧完成指纹：不重新 idle，新结果仍会被消
   const oldStatus = { streaming: false, finished: true, chars: 500, head: "H1", tail: "T1", status: "ok" }
   const newStatus = { streaming: false, finished: true, chars: 900, head: "H2", tail: "T2", status: "ok" }
   let currentStatus = oldStatus
-  const { ctx, calls, dir, drain } = mkCtx({
+  const { ctx, calls, dir, drain, inbox } = mkCtx({
     runningMap: async () => ({ "conv-a": { running: false, title: "w" } }),
     status: async () => currentStatus,
     notify: async () => ({ ok: true }),
@@ -155,13 +159,14 @@ test("续跑后先读到旧完成指纹：不重新 idle，新结果仍会被消
     assert.notEqual(finished.fingerprint, first.fingerprint)
     assert.equal(finished.idle, true)
   } finally {
+    inbox.close?.()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
 test("侧边栏又报 running：清掉 idle，收工后再判一轮并再通知", async () => {
   let running = true
-  const { ctx, calls, dir, drain } = mkCtx({
+  const { ctx, calls, dir, drain, inbox } = mkCtx({
     runningMap: async () => ({ "conv-a": { running, title: "w" } }),
     status: async () => ({ streaming: false, finished: true, chars: 900, head: "H2", tail: "T2", status: "ok" }),
   })
@@ -178,12 +183,13 @@ test("侧边栏又报 running：清掉 idle，收工后再判一轮并再通知"
     assert.equal(calls.notified.length, 0, "不发任何消息")
     assert.match(new Book(ctx.cfg.stateFile).notified["conv-a"].fingerprint, /^[0-9a-f]{12}$/)
   } finally {
+    inbox.close?.()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
 test("侧边栏里没有这条、但上次已通知过：不再读 status", async () => {
-  const { ctx, calls, dir, drain } = mkCtx({
+  const { ctx, calls, dir, drain, inbox } = mkCtx({
     runningMap: async () => ({ "conv-b": { running: false, title: "别的会话" } }),
     status: async () => { throw new Error("不在侧边栏收工过的会话不该再读 status") },
   })
@@ -193,12 +199,13 @@ test("侧边栏里没有这条、但上次已通知过：不再读 status", asyn
     assert.equal(calls.status, 0)
     assert.equal(ctx.state.watchers.get("conv-a").lastPhase, "gone")
   } finally {
+    inbox.close?.()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
 test("侧边栏里没有这条、也从没通知过：只记 gone，不读 status", async () => {
-  const { ctx, calls, dir, drain } = mkCtx({
+  const { ctx, calls, dir, drain, inbox } = mkCtx({
     runningMap: async () => ({ "conv-b": { running: false, title: "别的会话" } }),
     status: async () => { throw new Error("不在侧边栏的会话不该读 status") },
   })
@@ -208,6 +215,7 @@ test("侧边栏里没有这条、也从没通知过：只记 gone，不读 statu
     assert.equal(new Book(ctx.cfg.stateFile).notified["conv-a"].gone, true)
     assert.equal(ctx.state.watchers.get("conv-a").lastPhase, "gone")
   } finally {
+    inbox.close?.()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
@@ -231,13 +239,14 @@ test("gone 多为正常归档：只落账本不投递，持续 gone 也不产生
     assert.equal(calls.queued.length, 0, "持续 gone 也不投递")
     assert.equal(new Book(ctx.cfg.stateFile).notified["conv-a"].gone, true)
   } finally {
+    inbox.close?.()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
 test("gone 之后又出现在侧边栏：清 gone 并重新判一轮", async () => {
   let present = false
-  const { ctx, calls, dir, drain } = mkCtx({
+  const { ctx, calls, dir, drain, inbox } = mkCtx({
     runningMap: async () => (present ? { "conv-a": { running: false, title: "w" } } : { "conv-b": { running: false, title: "别的会话" } }),
     status: async () => ({ streaming: false, finished: true, chars: 700, head: "H", tail: "T", status: "ok" }),
   })
@@ -251,6 +260,7 @@ test("gone 之后又出现在侧边栏：清 gone 并重新判一轮", async () 
     assert.equal(r2.notified, 0)
     assert.ok(!new Book(ctx.cfg.stateFile).notified["conv-a"].gone)
   } finally {
+    inbox.close?.()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
@@ -289,6 +299,7 @@ test("PR 已合并（会话已归档）：不再给编排会话补一条结论�
 
 test("普通最终回复：只入 Inbox，由 Worker 投给编排，不拼整段对话、不判失败", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-poll-final-reply-"))
+  let inbox
   try {
     const cfg = {
       stateFile: path.join(dir, "state.json"),
@@ -300,7 +311,7 @@ test("普通最终回复：只入 Inbox，由 Worker 投给编排，不拼整段
     book.setWatch({ target: "conv-worker", name: "w", issueKey: "demo/demo#1", repo: "demo/demo", number: 1, notifyTo: "boss" })
     book.setIssue("demo/demo#1", { state: "working", title: "统一路由", orchestrator: "conv-orch" })
     const queued = []
-    const inbox = new InboxStore(new DatabaseSync(path.join(dir, "console.db")))
+    inbox = new InboxStore(new DatabaseSync(path.join(dir, "console.db")))
     const ctx = {
       cfg, inbox, book,
       state: { polling: false, watchers: new Map(), dwsErrors: 0, notifiedCount: 0 },
@@ -332,12 +343,14 @@ test("普通最终回复：只入 Inbox，由 Worker 投给编排，不拼整段
     assert.equal(new Book(cfg.stateFile).issue("demo/demo#1").state, "working", "业务状态只由编排判断")
     assert.equal(new Book(cfg.stateFile).notified["conv-worker"].idle, true)
   } finally {
+    inbox.close?.()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
 test("Worker queue 失败：事件留在 Inbox，任务不 idle；重试成功后才消费", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-poll-queue-retry-"))
+  let inbox
   try {
     const cfg = {
       stateFile: path.join(dir, "state.json"),
@@ -350,7 +363,7 @@ test("Worker queue 失败：事件留在 Inbox，任务不 idle；重试成功�
     book.setIssue("demo/demo#1", { state: "working", title: "测试单", orchestrator: "conv-orch" })
     let fail = true
     const queued = []
-    const inbox = new InboxStore(new DatabaseSync(path.join(dir, "console.db")))
+    inbox = new InboxStore(new DatabaseSync(path.join(dir, "console.db")))
     const ctx = {
       cfg, inbox, book,
       state: { polling: false, watchers: new Map(), dwsErrors: 0, notifiedCount: 0 },
@@ -384,6 +397,7 @@ test("Worker queue 失败：事件留在 Inbox，任务不 idle；重试成功�
     assert.equal(queued[0].target, "conv-orch")
     assert.equal(new Book(cfg.stateFile).notified["conv-worker"].idle, true, "送达后才落 idle")
   } finally {
+    inbox.close?.()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })

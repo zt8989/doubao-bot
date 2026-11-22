@@ -78,6 +78,13 @@ export class InboxStore {
     this.db.exec(SCHEMA)
   }
 
+  // 关库：常驻进程退出与测试清理前调用；Windows 上库文件开着删不掉（rmSync EPERM）。
+  close() {
+    try {
+      this.db.close()
+    } catch {}
+  }
+
   tx(fn) {
     this.db.exec("BEGIN IMMEDIATE")
     try {

@@ -370,6 +370,7 @@ test("失败处理提示：带会话 id，由编排归因选择补派、续跑�
 
 test("pollOnce：工作会话最终回复经 Inbox/Worker queue 给所属编排", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-poll-"))
+  let inbox
   try {
     const cfg = mkCfg(dir)
     const book = new Book(cfg.stateFile)
@@ -379,7 +380,7 @@ test("pollOnce：工作会话最终回复经 Inbox/Worker queue 给所属编排"
     book.setWatch({ target: "conv-a", name: "foreman-demo-1", issueKey: "demo/demo#1", repo: "demo/demo", number: 1, notifyTo: "" })
 
     const queued = []
-    const inbox = new InboxStore(new DatabaseSync(path.join(dir, "console.db")))
+    inbox = new InboxStore(new DatabaseSync(path.join(dir, "console.db")))
     const ctx = {
       cfg, book, inbox,
       state: { polling: false, watchers: new Map(), dwsErrors: 0, notifiedCount: 0 },
@@ -408,6 +409,7 @@ test("pollOnce：工作会话最终回复经 Inbox/Worker queue 给所属编排"
     assert.doesNotMatch(queued[0].text, /自动开 PR|foreman pr merge/)
     assert.match(new Book(cfg.stateFile).notified["conv-a"].fingerprint, /^[0-9a-f]{12}$/)
   } finally {
+    inbox.close?.()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
@@ -661,6 +663,7 @@ test("用户自主发起 hand：直接交给调用方会话（不开全局编排
 
 test("pollOnce：任务事件 queue 到工单绑定的发起方，而不是全局编排", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-poll-caller-"))
+  let inbox
   try {
     const cfg = mkCfg(dir)
     const book = new Book(cfg.stateFile)
@@ -674,7 +677,7 @@ test("pollOnce：任务事件 queue 到工单绑定的发起方，而不是全�
     book.setWatch({ target: "conv-a", name: "foreman-demo-1", issueKey: "demo/demo#1", repo: "demo/demo", number: 1, notifyTo: "" })
 
     const queued = []
-    const inbox = new InboxStore(new DatabaseSync(path.join(dir, "console.db")))
+    inbox = new InboxStore(new DatabaseSync(path.join(dir, "console.db")))
     const ctx = {
       cfg, book, inbox,
       state: { polling: false, watchers: new Map(), dwsErrors: 0, notifiedCount: 0 },
@@ -699,6 +702,7 @@ test("pollOnce：任务事件 queue 到工单绑定的发起方，而不是全�
     assert.match(queued[0].text, /还需要修改另一个仓库/)
     assert.doesNotMatch(queued[0].text, /foreman resume conv-a/, "Worker 不自动补业务下一步")
   } finally {
+    inbox.close?.()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })

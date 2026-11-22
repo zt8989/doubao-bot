@@ -8,7 +8,7 @@ function localDay(date) {
 function dreamingPrompt({ store, day, runId, session, source, configPath = "" }) {
   const core = store.show()
   const configRule = configPath
-    ? `本次所有 foreman 命令都必须追加 --config ${JSON.stringify(configPath)}，确保读写同一记忆目录。`
+    ? `本次所有 foreman 命令都必须追加 --config "${configPath}"，确保读写同一记忆目录。`
     : "本次 foreman 命令使用默认配置。"
   return `# 每日记忆 dreaming
 

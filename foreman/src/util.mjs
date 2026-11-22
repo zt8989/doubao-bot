@@ -37,16 +37,53 @@ export function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
 }
 
+// Windows 的 CreateProcess 不认 shebang、不认 .mjs/.js，也不认裸命令名（npm 垫片是
+// .cmd）：按扩展名换起方式——脚本交给 node，垫片走 cmd，其余按 PATH+PATHEXT 解析。
+const WIN_PATHEXT = (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";")
+
+function resolveWinBin(cmd) {
+  if (path.isAbsolute(cmd)) return fs.existsSync(cmd) ? cmd : cmd
+  for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+    if (!dir) continue
+    const base = path.join(dir, cmd)
+    try {
+      if (fs.statSync(base).isFile()) return base
+    } catch {}
+    for (const ext of WIN_PATHEXT) {
+      try {
+        if (fs.statSync(base + ext).isFile()) return base + ext
+      } catch {}
+    }
+  }
+  return cmd
+}
+
+function quoteWinArg(arg) {
+  return /[\s"]/.test(arg) ? `"${String(arg).replaceAll('"', '\\"')}"` : String(arg)
+}
+
+// 返回 spawn 入参：[命令, args 数组或 null（null 表示命令串 + shell:true）]
+function prepareSpawn(cmd, args) {
+  if (process.platform !== "win32") return [cmd, args]
+  const bin = resolveWinBin(cmd)
+  const ext = path.extname(bin).toLowerCase()
+  if (ext === ".mjs" || ext === ".js") return [process.execPath, [bin, ...args]]
+  if (ext === ".cmd" || ext === ".bat") return [`${quoteWinArg(bin)} ${args.map(quoteWinArg).join(" ")}`, null]
+  return [bin, args]
+}
+
 // exec：统一的子进程出口。超时用 SIGKILL，错误里带上 stdout/stderr 片段，
 // 免得调用方只看 exit code 猜原因。
 export function exec(cmd, args, { cwd, timeout = 60000, input, env } = {}) {
   return new Promise((resolve, reject) => {
+    const [file, spawnArgs] = prepareSpawn(cmd, args)
     let child
     try {
-      child = spawn(cmd, args, {
+      child = spawn(file, spawnArgs ?? [], {
         cwd,
         env: { ...process.env, ...env },
         stdio: ["pipe", "pipe", "pipe"],
+        ...(spawnArgs === null ? { shell: true } : {}),
       })
     } catch (e) {
       return reject(Object.assign(e, { code: "spawn", cmd, args }))
@@ -95,14 +132,18 @@ export function exec(cmd, args, { cwd, timeout = 60000, input, env } = {}) {
 }
 
 export function commandExists(cmd) {
-  const dirs = (process.env.PATH ?? "").split(":")
-  return dirs.some((d) => {
-    try {
-      return fs.existsSync(path.join(d, cmd)) && fs.statSync(path.join(d, cmd)).isFile()
-    } catch {
-      return false
-    }
-  })
+  const exts = process.platform === "win32" ? ["", ...WIN_PATHEXT] : [""]
+  const dirs = (process.env.PATH ?? "").split(path.delimiter)
+  return dirs.some((d) =>
+    exts.some((ext) => {
+      const p = path.join(d, cmd + ext)
+      try {
+        return fs.existsSync(p) && fs.statSync(p).isFile()
+      } catch {
+        return false
+      }
+    })
+  )
 }
 
 // opencli / herdr 常把 “Update available …” 之类的噪声混在 JSON 前后，

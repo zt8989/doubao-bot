@@ -6,12 +6,12 @@ import { builtinPrompt } from "../builtin-prompts.mjs"
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 
 // 脚本型定时任务一律按绝对路径加载：入口就在本包的 src 里，按当前运行副本（dist 或源码）定位，
-// 不配相对路径，两份副本也不会互相解析到对方的文件上。
+// 不配相对路径，两份副本也不会互相解析到对方的文件上。路径用 path.join，Windows 上不会出混排分隔符。
 const SCRIPT_DEFAULTS = {
-  pickup: { path: `${PACKAGE_ROOT}/src/service.mjs`, exportName: "pickupPollOnce", args: {} },
-  prWatch: { path: `${PACKAGE_ROOT}/src/service.mjs`, exportName: "prPollOnce", args: {} },
-  mail: { path: `${PACKAGE_ROOT}/src/mailflow.mjs`, exportName: "mailPollOnce", args: {} },
-  router: { path: `${PACKAGE_ROOT}/src/service.mjs`, exportName: "pollOnce", args: {} },
+  pickup: { path: path.join(PACKAGE_ROOT, "src", "service.mjs"), exportName: "pickupPollOnce", args: {} },
+  prWatch: { path: path.join(PACKAGE_ROOT, "src", "service.mjs"), exportName: "prPollOnce", args: {} },
+  mail: { path: path.join(PACKAGE_ROOT, "src", "mailflow.mjs"), exportName: "mailPollOnce", args: {} },
+  router: { path: path.join(PACKAGE_ROOT, "src", "service.mjs"), exportName: "pollOnce", args: {} },
 }
 
 const object = (value) => value && typeof value === "object" && !Array.isArray(value)
