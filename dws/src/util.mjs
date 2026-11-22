@@ -5,22 +5,29 @@ import os from "node:os"
 import path from "node:path"
 
 // 非登录 shell 里 opencli / agently-cli / pnpm 常常不在 PATH 里：
-// 统一把几个已知目录补在最前面。
-export const EXTRA_BIN_DIRS = [
+// 统一把几个已知目录补在最前面。分隔符按平台（Windows 是 ;，POSIX 是 :）。
+const POSIX_BIN_DIRS = [
   path.join(os.homedir(), ".nvm/versions/node/v22.21.1/bin"),
   "/opt/homebrew/bin",
   "/usr/local/bin",
   path.join(os.homedir(), ".local/bin"),
 ]
+const WIN32_BIN_DIRS = [
+  path.join(os.homedir(), "scoop", "shims"),
+  path.join(os.homedir(), "AppData", "Roaming", "npm"),
+]
+
+export const EXTRA_BIN_DIRS = process.platform === "win32" ? WIN32_BIN_DIRS : POSIX_BIN_DIRS
 
 export function envWithBins(extra = {}) {
+  const sep = path.delimiter
   const dirs = [...EXTRA_BIN_DIRS]
   const seen = new Set()
-  const rest = (process.env.PATH ?? "").split(":").filter((d) => d && !seen.has(d))
+  const rest = (process.env.PATH ?? "").split(sep).filter((d) => d && !seen.has(d))
   for (const d of rest) {
     if (!dirs.includes(d)) dirs.push(d)
   }
-  return { ...process.env, PATH: dirs.join(":"), ...extra }
+  return { ...process.env, PATH: dirs.join(sep), ...extra }
 }
 
 export const sleep = (ms, signal) =>

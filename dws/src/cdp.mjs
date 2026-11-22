@@ -40,7 +40,14 @@ export async function targets(port) {
 // processes 列出正在跑这个二进制的进程（pid + 命令行）。
 // 发现“用户自己开的那个”和 `dws start --force` 该杀谁，都靠它：只认主进程，
 // 不碰 Chromium 的 Helper 子进程（主进程退了，子进程跟着退）。
+// Windows 没有 ps：走 PowerShell CIM（wmic 在新系统已移除，命令行经 -EncodedCommand
+// 传入，避开引号转义）；POSIX 仍用 ps -axww。
 export function processes(binary) {
+  const rows = process.platform === "win32" ? processesWin(binary) : processesPs(binary)
+  return rows.filter((p) => commandMatchesBinary(p.command, binary))
+}
+
+function processesPs(binary) {
   let out = ""
   try {
     out = execFileSync("ps", ["-axww", "-o", "pid=,command="], {
@@ -54,11 +61,48 @@ export function processes(binary) {
   for (const line of out.split("\n")) {
     const m = line.trim().match(/^(\d+)\s+(.*)$/)
     if (!m) continue
-    const command = m[2]
-    if (command !== binary && !command.startsWith(binary + " ")) continue
-    list.push({ pid: Number(m[1]), command })
+    list.push({ pid: Number(m[1]), command: m[2] })
   }
   return list
+}
+
+function processesWin(binary) {
+  const name = path.win32.basename(binary).replaceAll("'", "''") // WQL 转义单引号
+  const script =
+    `Get-CimInstance Win32_Process -Filter "Name='${name}'" | ` +
+    `Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress`
+  let out = ""
+  try {
+    out = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 15000,
+      windowsHide: true,
+    })
+  } catch {
+    return []
+  }
+  let rows
+  try {
+    rows = JSON.parse(out || "null")
+  } catch {
+    return []
+  }
+  if (!rows) return []
+  return (Array.isArray(rows) ? rows : [rows])
+    .filter((r) => Number.isInteger(r?.ProcessId) && typeof r?.CommandLine === "string")
+    .map((r) => ({ pid: r.ProcessId, command: r.CommandLine }))
+}
+
+// commandMatchesBinary 判断一条命令行是不是在跑这个二进制。
+// Windows 的 CommandLine 里 exe 常带引号（"C:\…\Doubao.exe" args…），且盘符、
+// 分隔符、大小写都可能不同：比较前统一剥引号、归一斜杠、转小写。
+export function commandMatchesBinary(command, binary, platform = process.platform) {
+  if (platform !== "win32") return command === binary || command.startsWith(binary + " ")
+  const norm = (s) => s.replaceAll('"', "").replaceAll("\\", "/").toLowerCase()
+  const c = norm(command)
+  const b = norm(binary)
+  return c === b || c.startsWith(b + " ")
 }
 
 // copies 只留命令行（老接口，别删：App 的 others 注入还按它来）。
@@ -181,7 +225,7 @@ export class App {
           Error(
             `豆包已经在运行（PID ${pids}），但没有可用的 CDP 调试端口，dws 接管不了。\n` +
               `  要独占启动就加 --force：dws start --force（会先杀掉豆包进程再启动）\n` +
-              `  或者自己 ⌘Q 退出豆包后重跑`
+              `  或者自己退出豆包后重跑`
           ),
           { code: "app_busy", pids: st.procs.map((p) => p.pid) }
         )

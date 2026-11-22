@@ -66,7 +66,7 @@ const HELP_BY_CMD = {
   ],
   open: [
     "dws open --name <会话名> [--repo <owner/name>] [--project <项目名>] [--prompt <文字> | --file <文件>]\n            [--mode local|cloud] [--model auto|<模型 id>] [--no-wait]",
-    "新建一条工作任务（会话）。带 --prompt/--file 会顺带把第一句发出去并等它跑完；不带就只建任务。豆包是单实例：先用 dws start 独占启动（自己开着的豆包会占住单实例，先 ⌘Q 退出，或 dws start --force 杀掉它再起）。",
+    "新建一条工作任务（会话）。带 --prompt/--file 会顺带把第一句发出去并等它跑完；不带就只建任务。豆包是单实例：先用 dws start 独占启动（自己开着的豆包会占住单实例，先退出豆包，或 dws start --force 杀掉它再起）。",
     "--no-wait 只确认首句送达并回读新会话 id，不等第一轮回复（每次新建会话的通知用）。",
   ],
   projects: ["dws projects", "列出豆包侧边栏「项目」分组下的项目。"],

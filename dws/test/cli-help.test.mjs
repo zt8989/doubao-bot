@@ -88,6 +88,7 @@ test("-c 短参与 --config 等价", () => {
   fs.rmSync(cwd, { recursive: true, force: true })
   for (const [label, r] of [["-c", short], ["--config", long]]) {
     assert.ok(!String(r.stderr).includes("startsWith"), `${label} 报了解析错误：${r.stderr}`)
-    assert.ok(r.stdout.includes(cfgFile), `${label} 没读到指定配置：${r.stdout}`)
+    // doctor 输出是 JSON：Windows 路径的反斜杠会被转义，按 JSON 字面量比对
+    assert.ok(r.stdout.includes(JSON.stringify(cfgFile)), `${label} 没读到指定配置：${r.stdout}`)
   }
 })
