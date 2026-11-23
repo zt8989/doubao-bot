@@ -1183,18 +1183,12 @@ fm-chat { display: flex; flex: 1; width: 100%; min-height: 0; }
 }
 
 @media (max-width: 620px) {
-  /* 顶栏：品牌一行，其余状态换行排；不再挤成一根竖条 */
-  .topbar { flex-wrap: wrap; align-items: flex-start; gap: 8px; padding: 10px 12px; }
-  .brand { flex: 1 1 auto; }
+  /* 顶栏基础间距（单行布局在下方 nav-burger 段统一覆盖） */
+  .topbar { padding: 8px 12px; }
   .brand-text { font-size: 13px; letter-spacing: 0.1em; }
-  .meta { width: 100%; gap: 6px; }
-  .meta-item { font-size: 11.5px; padding: 3px 8px; }
-  .meta-item.mono { font-variant-numeric: tabular-nums; }
 
   /* 手机端两级导航：侧栏收成滑出层（汉堡开关），Chat 一级菜单/二级聊天 */
   fm-console { flex-direction: column; }
-  .nav-burger { display: inline-flex; align-items: center; justify-content: center; width: 38px; height: 38px; padding: 0; flex: none; }
-  .nav-burger svg { width: 20px; height: 20px; }
   .nav-backdrop {
     display: block; position: fixed; inset: 0; z-index: 40;
     background: color-mix(in srgb, black 45%, transparent);
@@ -1212,14 +1206,29 @@ fm-chat { display: flex; flex: 1; width: 100%; min-height: 0; }
   .side-sessions { max-height: none; flex: 1; overflow-y: auto; }
   .main-col { flex: 1; min-height: 0; }
 
-  /* Chat 两级：无选中 = 全屏会话菜单；选中 = 全屏聊天（顶栏有「‹ 会话列表」返回） */
-  main[data-pane="menu"] > fm-chat { display: none; }
-  main[data-pane="chat"] > fm-session-menu { display: none; }
+  /* Chat 两级：无选中 = 全屏会话菜单；选中 = 全屏聊天（顶栏有「‹ 会话列表」返回）。
+     hide 用 fm-console 祖先多提一级优先级，稳定压过 main.is-chat > fm-chat 的 display:flex，
+     不靠源码顺序也不用 !important。 */
+  fm-console main[data-pane="menu"] > fm-chat,
+  fm-console main[data-pane="chat"] > fm-session-menu { display: none; }
   main[data-pane="menu"] > fm-session-menu { display: flex; flex: 1; min-height: 0; }
   main.is-chat { display: flex; flex-direction: column; }
   main.is-chat > fm-chat { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   main.is-chat > fm-chat .chat-panel { flex: 1; min-height: 0; }
   .chat-back { font-size: 12.5px; }
+
+  /* 手机顶栏固定单行：汉堡 | 标题(flex:1) | 状态区（横排不换行） */
+  .topbar { flex-wrap: nowrap; align-items: center; gap: 10px; padding: 8px 12px; }
+  .topbar-title { flex: 1; min-width: 0; }
+  .topbar-title h2 { font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .meta { width: auto; flex: none; flex-wrap: nowrap; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+  .meta::-webkit-scrollbar { display: none; }
+  .nav-burger {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 38px; height: 38px; padding: 0; flex: none;
+    border: 1px solid var(--line); border-radius: 8px; background: var(--panel, transparent);
+  }
+  .nav-burger svg { width: 20px; height: 20px; }
 
   main { padding: 0; gap: 0; max-width: none; }
 
