@@ -7,7 +7,7 @@ import { spawn } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { exec, extractJson, sleep } from "./util.mjs"
+import { exec, expandHome, extractJson, sleep } from "./util.mjs"
 
 export class ZcodeError extends Error {
   constructor(message, extra = {}) {
@@ -25,9 +25,14 @@ function isScriptPath(p) {
   return /\.(cjs|mjs|js)$/i.test(String(p ?? ""))
 }
 
+// 会话账本默认路径：stateFile 同目录（CLI 的 foreman sessions 与适配器共用同一推导）。
+export function defaultLedgerPath(cfg = {}) {
+  const stateFile = expandHome(String(cfg?.stateFile ?? "state.json"))
+  return path.join(path.dirname(path.resolve(stateFile)), "zcode-sessions.json")
+}
+
 // bin 解析：显式配置（可为带空格的一条命令，如 `node /path/fake.cjs`）→ PATH 上的 zcode → 桌面版内置 cjs。
-export function resolveZcodeCommand(binCfg = "", { platform = process.platform, execPath = process.execPath, exists = (p) => fs.existsSync(p) } = {}) {
-  const raw = String(binCfg ?? "").trim()
+export function resolveZcodeCommand(binCfg = "", { platform = process.platform, execPath = process.execPath, exists = (p) => fs.existsSync(p) } = {}) {  const raw = String(binCfg ?? "").trim()
   if (raw) {
     const parts = raw.split(/\s+/)
     if (parts.length > 1) return { cmd: parts[0], baseArgs: parts.slice(1) }

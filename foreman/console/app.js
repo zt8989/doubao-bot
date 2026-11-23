@@ -141,6 +141,7 @@ class FmSidebar extends LitElement {
       { id: "inbox", label: "Inbox" },
       { id: "outbox", label: "Outbox" },
       { id: "tasks", label: "Tasks" },
+      { id: "sessions", label: "Sessions" },
       { id: "schedules", label: "Schedule" },
       { id: "operations", label: "操作日志" },
     ]
@@ -212,7 +213,7 @@ class FmHead extends LitElement {
               <h2>Chat</h2>
             </div>`
           : html`<div class="topbar-title">
-              <h2>${({ inbox: "Inbox", outbox: "Outbox", tasks: "Tasks", schedules: "Schedule", operations: "操作日志" })[this.view] || "Foreman"}</h2>
+              <h2>${({ inbox: "Inbox", outbox: "Outbox", tasks: "Tasks", sessions: "智能体会话", schedules: "Schedule", operations: "操作日志" })[this.view] || "Foreman"}</h2>
             </div>`}
         <div class="meta">
           ${this.view === "chat" ? html`
@@ -1165,6 +1166,55 @@ class FmOperations extends LitElement {
   }
 }
 
+/* ---------------- 智能体会话（zcode 账本只读视图） ---------------- */
+class FmAgentSessions extends LitElement {
+  static properties = { sessions: { attribute: false }, carrier: { type: String } }
+  createRenderRoot() {
+    return this
+  }
+  render() {
+    const rows = this.sessions || []
+    const statusLabel = { running: "进行中", done: "已完成", error: "出错" }
+    return html`
+      <section class="panel">
+        <div class="panel-head">
+          <h2>智能体会话</h2>
+          <div class="panel-side">
+            <span class="hint">${this.carrier === "zcode"
+              ? "zcode 载体的 headless 会话不进 ZCode 桌面列表；这里看账本全量，每 15 秒刷新"
+              : `当前载体 ${this.carrier || "（未配置）"} 不产生 zcode 会话账本`}</span>
+          </div>
+        </div>
+        ${rows.length ? html`
+          <div class="table-wrap">
+            <table class="tasks session-table">
+              <thead>
+                <tr><th>状态</th><th>会话</th><th>sessionId / 恢复命令</th><th>最近回复（尾部）</th><th>更新时间</th></tr>
+              </thead>
+              <tbody>
+                ${rows.map((s) => html`
+                  <tr>
+                    <td><span class=${"badge op-" + (s.status === "running" ? "running" : s.status === "error" ? "failed" : "success")}>${statusLabel[s.status] || s.status}</span></td>
+                    <td>
+                      <div class="op-title">${s.name}</div>
+                      ${s.error ? html`<div class="op-detail">${s.error}</div>` : ""}
+                    </td>
+                    <td class="mono">
+                      ${s.sessionId
+                        ? html`<div>${s.sessionId}</div><div class="pr-note">zcode --resume ${s.sessionId}</div>`
+                        : html`<span class="pr-note">首轮运行中，结束后出 sessionId</span>`}
+                    </td>
+                    <td><div class="op-detail">${s.replyTail || "（尚无回复）"}</div></td>
+                    <td class="mono">${s.updatedAt ? s.updatedAt.replace("T", " ").slice(0, 19) : "—"}</td>
+                  </tr>`)}
+              </tbody>
+            </table>
+          </div>`
+          : html`<div class="empty"><div class="empty-title">还没有会话记录</div><div class="empty-sub">zcode 载体派单后，router / 编码 / 审查会话会出现在这里</div></div>`}
+      </section>`
+  }
+}
+
 /* ---------------- 根组件：取数、主题、轮询 ---------------- */
 class FmConsole extends LitElement {
   static properties = {
@@ -1201,6 +1251,8 @@ class FmConsole extends LitElement {
     completeError: { type: String },
     opFilter: { type: String },
     opPage: { type: Number },
+    agentSessions: { attribute: false },
+    agentCarrier: { type: String },
     schedBusy: { type: String },
     schedError: { type: String },
     schedNote: { type: String },
@@ -1290,6 +1342,7 @@ class FmConsole extends LitElement {
       if (this.view === "inbox" || this.view === "outbox") this.loadQueue(this.view)
       if (this.view === "schedules") this.loadSchedules()
       if (this.view === "operations") this.loadOperations()
+      if (this.view === "sessions") this.loadAgentSessions()
     }
     this._onSidebarToggle = () => {
       this.sidebarCollapsed = !this.sidebarCollapsed
@@ -1369,6 +1422,7 @@ class FmConsole extends LitElement {
       if (this.view === "inbox" || this.view === "outbox") this.loadQueue(this.view)
       if (this.view === "schedules") this.loadSchedules()
       if (this.view === "operations") this.loadOperations()
+      if (this.view === "sessions") this.loadAgentSessions()
     }
     window.addEventListener("focus", this._onFocus)
 
@@ -1384,6 +1438,7 @@ class FmConsole extends LitElement {
       if (this.view === "inbox" || this.view === "outbox") this.loadQueue(this.view)
       if (this.view === "schedules") this.loadSchedules()
       if (this.view === "operations") this.loadOperations()
+      if (this.view === "sessions") this.loadAgentSessions()
     }, 15000)
   }
 
@@ -1594,6 +1649,18 @@ class FmConsole extends LitElement {
     }
   }
 
+  async loadAgentSessions() {
+    try {
+      const res = await fetch("/api/agent-sessions", { cache: "no-store" })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const body = await res.json()
+      this.agentSessions = body.sessions || []
+      this.agentCarrier = body.carrier || ""
+    } catch (e) {
+      this.error = `服务 · 拿不到智能体会话（${e.message}）`
+    }
+  }
+
   async saveSchedule(id, patch) {
     if (this.schedBusy || !patch) return
     this.schedError = ""
@@ -1678,6 +1745,8 @@ class FmConsole extends LitElement {
           ? html`<fm-schedules .schedules=${this.schedules} .workHours=${this.workHours} .busy=${this.schedBusy} .error=${this.schedError} .note=${this.schedNote}></fm-schedules>`
           : this.view === "operations"
           ? html`<fm-operations .operations=${this.operations} .filter=${this.opFilter} .page=${this.opPage}></fm-operations>`
+          : this.view === "sessions"
+          ? html`<fm-agent-sessions .sessions=${this.agentSessions || []} .carrier=${this.agentCarrier || ""}></fm-agent-sessions>`
           : this.view === "inbox"
           ? html`<fm-queue
               kind="inbox"
@@ -1747,4 +1816,5 @@ customElements.define("fm-tasks", FmTasks)
 customElements.define("fm-queue", FmQueue)
 customElements.define("fm-schedules", FmSchedules)
 customElements.define("fm-operations", FmOperations)
+customElements.define("fm-agent-sessions", FmAgentSessions)
 customElements.define("fm-console", FmConsole)

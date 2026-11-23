@@ -274,6 +274,36 @@ export function startConsoleHttp({ store, ctx, dir, host, port, token = "", log 
         return sendJson(res, 200, { ok: true, polls: store.polls(limit) })
       }
 
+      if (pathname === "/api/agent-sessions") {
+        // zcode 载体的会话账本只读视图：headless 会话在 ZCode 桌面列表不可见，这里给统一观察窗口。
+        // 账本是适配器写、这里只读——不经过服务状态，重启/换载体也不影响历史查看。
+        const carrier = String(ctx.cfg?.agent ?? "").trim().toLowerCase()
+        let ledgerFile = ""
+        const sessions = []
+        if (carrier === "zcode") {
+          try {
+            const { defaultLedgerPath } = await import("./zcodedrv.mjs")
+            ledgerFile = String(ctx.cfg?.zcode?.ledger ?? "").trim() || defaultLedgerPath(ctx.cfg)
+            const data = JSON.parse(fs.readFileSync(ledgerFile, "utf8"))
+            for (const s of Object.values(data.sessions ?? {})) {
+              sessions.push({
+                name: s.name,
+                convId: s.convId,
+                sessionId: s.sessionId || "",
+                status: s.status,
+                error: s.error || "",
+                replyTail: String(s.lastReply ?? "").slice(-800),
+                updatedAt: s.updatedAt ? new Date(s.updatedAt).toISOString() : "",
+              })
+            }
+            sessions.sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")))
+          } catch (e) {
+            return sendJson(res, 200, { ok: true, carrier, ledgerFile, sessions, error: `账本读不回：${e.message}` })
+          }
+        }
+        return sendJson(res, 200, { ok: true, carrier, ledgerFile, sessions })
+      }
+
       if (pathname === "/api/history") {
         const days = Number(url.searchParams.get("days") ?? 7)
         return sendJson(res, 200, {

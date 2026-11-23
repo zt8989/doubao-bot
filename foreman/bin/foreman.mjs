@@ -72,6 +72,7 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman clean --all                  清所有终端态工单残留的工作区与会话
   foreman pickup [-c <配置>]        手动催一轮自动巡检（服务按 pickup 配置捞一轮单）
   foreman tasks [--json]                    已分配会话的实时状态与父子树（工单仅作节点元数据）
+  foreman sessions                          zcode 载体的会话账本：名字/状态/回复尾部 + zcode --resume 打开命令
   foreman retry <仓库名|owner/name> <工单号> [-c <配置>]
   foreman doctor [-c <配置>] [--start]
   foreman help
@@ -562,6 +563,41 @@ async function cmdMemory(pos, flags) {
   throw new Error(`未知 memory 子命令：${action}（show|set|forget|note|search|dream|dream-status|dream-report）`)
 }
 
+async function cmdSessions(_pos, flags) {
+  const cfg = loadConfig(flags.config)
+  const { defaultLedgerPath } = await import("../src/zcodedrv.mjs")
+  const carrier = String(cfg.agent ?? "").trim().toLowerCase()
+  const ledgerFile = String(cfg.zcode?.ledger ?? "").trim() || defaultLedgerPath(cfg)
+  const sessions = []
+  if (fs.existsSync(ledgerFile)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(ledgerFile, "utf8"))
+      for (const s of Object.values(data.sessions ?? {})) {
+        sessions.push({
+          name: s.name,
+          convId: s.convId,
+          sessionId: s.sessionId || "",
+          status: s.status,
+          error: s.error || "",
+          replyTail: String(s.lastReply ?? "").slice(-300),
+          updatedAt: s.updatedAt ? new Date(s.updatedAt).toISOString() : "",
+          resume: s.sessionId ? `zcode --resume ${s.sessionId}` : "首轮运行中，结束后出 sessionId",
+        })
+      }
+    } catch (e) {
+      throw new Error(`会话账本读不回：${ledgerFile}（${e.message}）`)
+    }
+  }
+  sessions.sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")))
+  return out({
+    ok: true,
+    carrier,
+    ledger: ledgerFile,
+    sessions,
+    note: "zcode 载体的会话跑在 headless 短进程里，ZCode 桌面列表不显示；想看完整过程用上面 resume 命令在终端打开（zcode CLI 能打开账本里任何会话）",
+  })
+}
+
 async function cmdDoctor(pos, flags) {
   const cfg = loadConfig(flags.config)
   const checks = []
@@ -827,6 +863,8 @@ async function main() {
       return cmdPickup(pos, flags)
     case "tasks":
       return cmdTasks(pos, flags)
+    case "sessions":
+      return cmdSessions(pos, flags)
     case "retry":
       return cmdRetry(pos, flags)
     case "mail":
