@@ -27,6 +27,7 @@ console.log(JSON.stringify({ ok: true, convId: "dream-session" }))
 `, { mode: 0o755 })
   fs.writeFileSync(config, JSON.stringify({
     service: { enabled: false },
+    agent: "dws",
     memory: { dir: "memory" },
     dws: { bin: fakeDws },
   }))
@@ -165,6 +166,7 @@ test("服务 Schedule 注册每日 03:00 dreaming，并能手动整理前一日"
   }
   const cfg = {
     stateFile: path.join(dir, "state.json"),
+    agent: "dws",
     memory: { dir: memoryDir, dreaming: { enabled: true, cron: "0 3 * * *" } },
     router: { enabled: false },
     prWatch: { enabled: false },

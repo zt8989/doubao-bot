@@ -39,9 +39,10 @@ test("noop 适配器：契约方法齐全，开/投递返回假 convId，status 
   assert.ok(logs.some((m) => m.includes("noop open")))
 })
 
-test("makeSessionAdapter：agent=noop 选 Noop，其他值（含缺省）选豆包", () => {
+test("makeSessionAdapter：agent=noop 选 Noop，缺省也选 Noop（默认不碰豆包），dws 显式才选豆包", () => {
   assert.equal(makeSessionAdapter({ agent: "noop" }).constructor.name, "NoopSessionAdapter")
   assert.equal(makeSessionAdapter({ agent: "NOOP" }).constructor.name, "NoopSessionAdapter")
-  assert.equal(makeSessionAdapter({}).constructor.name, "DoubaoSessionAdapter")
+  assert.equal(makeSessionAdapter({}).constructor.name, "NoopSessionAdapter")
+  assert.equal(makeSessionAdapter({ agent: "随便写" }).constructor.name, "NoopSessionAdapter")
   assert.equal(makeSessionAdapter({ agent: "dws" }).constructor.name, "DoubaoSessionAdapter")
 })

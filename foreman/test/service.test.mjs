@@ -26,6 +26,7 @@ function tmpDir() {
 function mkCfg(dir, over = {}) {
   return {
     stateFile: path.join(dir, "state.json"),
+    agent: "dws",
     pollSeconds: 20,
     notify: { enabled: true, session: "auto", events: ["done", "needs-human", "blocked", "failed"] },
     service: {

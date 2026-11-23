@@ -849,7 +849,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   }
 
   // 通用 workflow：生命周期 + 适配器。ctx.dws / ctx.gitea 现在是**适配器**（旧调用面保留）。
-  // agent 相关的一切（单实例护栏、读状态、归档）都收在适配器里：dws = 豆包，noop = 不碰豆包。
+  // agent 相关的一切（单实例护栏、读状态、归档）都收在适配器里：dws = 豆包，zcode = ZCode CLI，noop = 不碰任何前端。
   const engine = new WorkflowEngine({
     cfg,
     session: makeSessionAdapter(cfg, { driver: dws, log }),

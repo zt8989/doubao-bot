@@ -15,6 +15,7 @@ function baseCfg(dir) {
   return {
     stateFile: path.join(dir, "state.json"),
     worktreeDir: path.join(dir, "worktrees"),
+    agent: "dws",
     pollSeconds: 20,
     timeoutMinutes: 90,
     maxAttempts: 3,

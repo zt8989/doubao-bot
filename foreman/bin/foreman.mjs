@@ -109,8 +109,9 @@ run 以主智能体为中心：捞到单先交给本单主智能体，由它在 
 两个内部 sub agent 的结果直接返回主智能体，不经 Foreman 工作会话。主智能体原样汇总审查、通知验收并维护状态，
 合并关单后由主智能体调 foreman clean。--direct 退回旧外部会话行为（需 agent）。
 
-执行载体（配置 agent）：dws = 豆包桌面端（默认）；noop = 不开会话、不碰豆包——clean/tasks/ws/pr/issue
-照常工作，派单与投递「成功」但无人干活，inbox 只记账。豆包只是可选 agent 之一，换载体不改命令。
+执行载体（配置 agent）：noop = 不开会话（默认）——clean/tasks/ws/pr/issue
+照常工作，派单与投递「成功」但无人干活，inbox 只记账；dws = 豆包桌面端；
+zcode = ZCode CLI headless（真正有人干活，不依赖豆包）。豆包只是可选 agent 之一，换载体不改命令。
 
 主智能体从哪来：
   1. 路由智能体接单：hand 按工单新建/复用独立主智能体；
@@ -601,11 +602,23 @@ async function cmdDoctor(pos, flags) {
 
   if (truthy(flags.start)) {
     const ctx = makeCtx(cfg)
-    try {
-      await ctx.dws.start()
-      checks.push({ name: "dws 窗口/登录", ok: true, detail: "窗口可用，已登录" })
-    } catch (e) {
-      checks.push({ name: "dws 窗口/登录", ok: false, detail: e.message })
+    // 执行载体按配置分流探活：noop 不碰任何前端；zcode 探 CLI 可用；dws 查窗口与登录。
+    if (cfg.agent === "noop") {
+      checks.push({ name: "执行载体 noop", ok: true, detail: "不碰任何前端，无人真正干活" })
+    } else if (cfg.agent === "zcode") {
+      try {
+        const started = await ctx.dws.start()
+        checks.push({ name: "zcode CLI", ok: true, detail: String(started?.version ?? "") || "可用" })
+      } catch (e) {
+        checks.push({ name: "zcode CLI", ok: false, detail: e.message })
+      }
+    } else {
+      try {
+        await ctx.dws.start()
+        checks.push({ name: "dws 窗口/登录", ok: true, detail: "窗口可用，已登录" })
+      } catch (e) {
+        checks.push({ name: "dws 窗口/登录", ok: false, detail: e.message })
+      }
     }
   }
 

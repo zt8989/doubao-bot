@@ -54,6 +54,7 @@ console.log("herdr 0.9.3")
       service: { enabled: false },
       repos: [],
       mail: { enabled: false },
+      agent: "dws",
       dws: { bin: fakeDws },
       herdr: { bin: fakeHerdr },
     }))

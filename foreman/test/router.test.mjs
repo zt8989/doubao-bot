@@ -12,6 +12,7 @@ function fixture(over = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-router-"))
   const cfg = {
     stateFile: path.join(dir, "state.json"),
+    agent: "dws",
     router: { intervalSeconds: 600, recreateAfterHours: 24 },
     ...over,
   }

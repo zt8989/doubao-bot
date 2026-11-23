@@ -42,7 +42,8 @@ router agent 决定接单时，每张工单仍有自己的一条主智能体会�
 - **dws 的边界**：dws 可以承载主智能体及既有外部会话，不用于创建、续问或中转编码与对抗审查 sub agent。
 - **旧路径已删**：`foreman dispatch/resume/orch start/sessions/decide` 命令已移除；`task.update` 与外部工作会话监听仅兼容读取。
 - **全部由 router agent 路由**：`hand`/`run`/`pickup`/控制台接单只把派单请求投进 router Inbox（账本记 handed 占槽）；他人 PR 合并请求（pr.merge 扫描事件、`pr assign` 人工补派）也只投 router，不再建合并助手会话。router 是服务唯一主动维护的 agent 会话、每张单的唯一编排者——消费事件后在会话内用内部编码/审查 sub agent 开工，自己执行 `pr merge`/`ui-assign`/`issue settle`/`clean`。不依赖 agent 的命令（issue/ws/pr/outbox/clean/tasks）不经 router。
-- **一条龙（无 agent 也能走完）**：`issue create [--ws]` → `ws add`（账本没建档会回查 tracker 自举成 planned，并把分支写进工单右侧 ref——走 tracker 能力位，GitHub 类 tracker 没有 ref 字段时自动跳过）→ 写码 → `pr open` → 验收 → `pr merge`（只合并，不动工作区；全工程 PR 合完后用 `clean` 关单+清尾）。执行载体选 `agent: "dws"|"noop"`（豆包只是可选 agent 之一）；noop 下派单/合并请求照常入 Inbox，但 router 会话也是假的——事件堆积、无人接单。
+- **一条龙（无 agent 也能走完）**：`issue create [--ws]` → `ws add`（账本没建档会回查 tracker 自举成 planned，并把分支写进工单右侧 ref——走 tracker 能力位，GitHub 类 tracker 没有 ref 字段时自动跳过）→ 写码 → `pr open` → 验收 → `pr merge`（只合并，不动工作区；全工程 PR 合完后用 `clean` 关单+清尾）。执行载体选 `agent: "noop"|"dws"|"zcode"`（**默认 noop**，不碰任何前端；豆包与 ZCode CLI 都是可选 agent 之一）；noop 下派单/合并请求照常入 Inbox，但 router 会话也是假的——事件堆积、无人接单。
+- **zcode 载体（ZCode CLI headless）**：`agent: "zcode"` 时会话走 `zcode -p "<首句>" --json`——首轮阻塞跑完返回 `{sessionId, response}`；续说用 `--resume`（带完整上下文）；通知/steer 排到该会话当前轮次之后**后台跑**（只确认派出去了，不等这轮跑完）。无单实例限制，多张单可并行；名字/伪 id/sess id 的互查与会话账本在 `<stateFile 同目录>/zcode-sessions.json`，服务重启后旧会话仍可解析。`zcode.bin` 留空按「PATH 上的 zcode → ZCode.app 内置 CLI」解析；超长 prompt（>90KB）自动转临时文件走 `--attach`。
 - **收尾**：最终验收与合并由人类/独立验收系统完成；保护分支要求人工批准和 CI 通过。确认全部 PR 合并后，`foreman clean <键>` 清理工作区与监听。
 
 配置（默认已开，不用写也能用）：
@@ -510,7 +511,8 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
   "maxAttempts": 3,
   "perRepoPerRound": 1,
   "dws": { "bin": "dws", "mode": "local", "model": "auto" },
-  "agent": "dws",   // dws = 豆包（默认）；noop = 不开会话不碰豆包，clean/ws/pr 照常工作
+  "agent": "noop",   // 默认 noop：不开会话不碰任何前端，clean/ws/pr 照常工作；dws = 豆包；zcode = ZCode CLI（真正有人干活）
+  "zcode": { "bin": "", "mode": "", "ledger": "" },   // zcode 载体：bin 留空自动解析（PATH 上的 zcode → ZCode.app 内置 CLI）；mode 透传 --mode；ledger 会话账本路径（默认 stateFile 同目录）
   "herdr": { "bin": "herdr", "enabled": true },
   "pickup": {
     "labelIds": [5],

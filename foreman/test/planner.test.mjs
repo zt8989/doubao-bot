@@ -15,6 +15,7 @@ function tmpDir() {
 function mkCfg(dir, over = {}) {
   return {
     stateFile: path.join(dir, "state.json"),
+    agent: "dws",
     pollSeconds: 20,
     maxAttempts: 3,
     repos: [{ name: "demo", repo: "demo/demo", dir: dir, base: "sit-20261126", labelIds: [5] }],

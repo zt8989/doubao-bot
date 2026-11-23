@@ -253,6 +253,7 @@ test("端到端：任务回复只 queue 给所属 Agent，不走 deliver.new 或
     const cfg = {
       stateFile: path.join(dir, "state.json"),
       worktreeDir: path.join(dir, "worktrees"),
+      agent: "dws",
       pollSeconds: 20,
       timeoutMinutes: 90,
       maxAttempts: 3,

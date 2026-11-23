@@ -22,8 +22,13 @@ export const DEFAULTS = {
   stateFile: "state.json",
   worktreeDir: "~/.foreman/worktrees",
   dws: { bin: "dws", mode: "local", model: "auto" },
-  // 执行载体：dws = 豆包桌面端（默认）；noop = 不开会话、不碰豆包（clean/tasks 照常工作，无人真正干活）。
-  agent: "dws",
+  // 执行载体：noop = 不开会话（默认，没人真正干活但 clean/tasks 照常工作）；
+  // dws = 豆包桌面端；zcode = ZCode CLI headless（真正有人干活，不依赖豆包）。
+  // zcode 细节见 zcodedrv.mjs：bin 留空自动解析（PATH 上的 zcode → ZCode.app 内置 CLI）。
+  agent: "noop",
+  // ZCode CLI：bin 显式配置（可写带空格的一条命令）；mode 透传 --mode（留空用 CLI 默认）；
+  // ledger 会话账本路径（留空放 stateFile 同目录的 zcode-sessions.json）。
+  zcode: { bin: "", mode: "", ledger: "" },
   herdr: { bin: "herdr", enabled: true },
   // Gitea REST：baseUrl 用于控制台拼链接；令牌实际由 gitea 包按 ~/.foreman/gitea-token 解析。
   gitea: { baseUrl: "http://106.54.199.229:3000", tokenFile: "~/.foreman/gitea-token" },
@@ -275,8 +280,9 @@ export function loadConfig(explicit, env = process.env) {
   }
   const normalizedUser = !isObj(user.router) && isObj(user.inspector) ? { ...user, router: user.inspector } : user
   const cfg = merge(DEFAULTS, normalizedUser)
-  // agent 只认 dws / noop，写错按默认 dws 走（不炸配置，别让一台机器起不来服务）。
-  cfg.agent = String(cfg.agent ?? "dws").trim().toLowerCase() === "noop" ? "noop" : "dws"
+  // agent 只认 noop / dws / zcode，写错兜底到 noop（不炸配置，也绝不因写错值把豆包拉起来）。
+  const agentRaw = String(cfg.agent ?? "noop").trim().toLowerCase()
+  cfg.agent = ["noop", "dws", "zcode"].includes(agentRaw) ? agentRaw : "noop"
   // 旧 inspector 配置只作内存别名；新配置与公开文案使用 router。
   cfg.inspector = cfg.router
   // 测试目录只替换未显式配置的运行路径；业务凭证与 worktree 仍按原配置共享。
