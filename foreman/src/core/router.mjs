@@ -1,7 +1,30 @@
 // router agent：接收未定向消息、巡检、接单与异常分派；Foreman 只负责持久投递和会话轮换。
 import { Book } from "../book.mjs"
 import { agentExecutor } from "./executors.mjs"
+import { builtinAgentPromptPath } from "../builtin-prompts.mjs"
 import { memoryBootstrap } from "./memory.mjs"
+
+// 子智能体分配协议：编码/审查不再由 router 亲自干或用无模板的内部 sub agent，
+// 而是用 ZCode 自带 CreateSession 开独立根会话，各自读共享目录里自己的岗位提示词文件。
+// 绝对路径在组装首句时现算（src/dist 各自成立）；delivered 会话无 --cwd，必须绝对路径。
+// 实机探针（2026-11-23）：headless 下 CreateSession/SendToSession/WaitSessions/ReadSession 可用，
+// CreateSession 只有 prompt/model/retryOf——没有 project/工作目录参数，任务包必须自带 worktree 绝对路径。
+function agentProtocol() {
+  const coder = builtinAgentPromptPath("coder")
+  const reviewer = builtinAgentPromptPath("reviewer")
+  return [
+    "## 子智能体分配协议（编码/审查必须这样派，不要在自己会话内串行写码或审查）",
+    "",
+    "用你的 CreateSession 工具为编码与对抗审查各开一条独立根会话：",
+    `1. 编码智能体提示词文件：${coder}`,
+    `2. 审查智能体提示词文件：${reviewer}`,
+    "3. CreateSession 只收 prompt/model/retryOf，没有 project/工作目录参数——新会话工作目录不可指定，任务包必须自带 worktree 绝对路径，让子智能体自己 cd。",
+    "4. 子会话首句固定两段：第一段「先完整阅读你的提示词文件 <对应绝对路径>，严格遵照执行」；第二段注入任务包（工单键与链接、正文与验收标准、涉及工程及基线——含各工程 worktree 绝对路径与工作分支、补充约束、审查意见；审查会话则给 PR 列表与测试报告）。",
+    "5. 等待用 WaitSessions（传 create 返回的 operation），读结果用 ReadSession（view=summary）。",
+    "6. 同一工单始终复用同一条编码会话：审查有阻断时用 SendToSession 把审查 JSON 原文续说给原编码会话逐项修复，修复完成后重开审查会话复审。",
+    "7. 会话工具不可用时才允许回退：改用 Agent 工具创建 sub agent，prompt 同样以「先完整阅读提示词文件 <绝对路径>」开头并注入相同任务包。",
+  ].join("\n")
+}
 
 function stamp(date) {
   return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z").replace("T", "-")
@@ -43,6 +66,7 @@ async function deliver(ctx, rec, text, { now, action, reason = "", scheduled = f
       agentExecutor(cfg).prompt,
       memoryBootstrap(cfg),
       projectDir ? `监控项目目录：${projectDir}` : "",
+      agentProtocol(),
       rec?.convId ? `上一条 router agent 会话 ${rec.convId} 已连续 24 小时未成功接收消息；你接替它，不假定旧会话仍可用。` : "",
       scheduled
         ? "这是首次巡检，请按上面的职责开始检查。"
@@ -126,8 +150,14 @@ export async function routerOnce(ctx, { now = new Date(), force = false, notice 
     const at = now.toISOString()
     const failed = new Book(ctx.cfg.stateFile)
     const previous = routerRecord(failed)
+    // 目标会话已不存在（载体切换/会话被清）时立刻清掉死绑定：下一轮重试直接新建，
+    // 不用干等 recreateAfterHours 的 24h stale——2026-11-23 切 zcode 载体时实测踩过。
+    const targetMissing =
+      e?.code === "session_missing" ||
+      /侧边栏里没有任务|没找到这个会话|账本里没有会话/.test(String(e?.message ?? ""))
     saveRouterRecord(failed, {
       ...previous,
+      ...(targetMissing ? { convId: "", name: "" } : {}),
       lastAttemptAt: at,
       failingSince: previous.failingSince || at,
       error: e.message,

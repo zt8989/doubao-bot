@@ -79,6 +79,14 @@ test("router agent首轮新建，后续巡检复用同一条会话", async () =>
     assert.equal(f.queued[0].target, "router-1")
     assert.match(f.opened[0].prompt, /## 职责/)
     assert.match(f.opened[0].prompt, /## 技能调用时机/)
+    // 子智能体分配协议：首句必须带上两个岗位提示词文件的绝对路径与 CreateSession 分配方式
+    assert.match(f.opened[0].prompt, /## 子智能体分配协议/)
+    assert.match(f.opened[0].prompt, /CreateSession/)
+    assert.match(f.opened[0].prompt, /编码智能体提示词文件：.*agents[/\\]coder\.md/)
+    assert.match(f.opened[0].prompt, /审查智能体提示词文件：.*agents[/\\]reviewer\.md/)
+    assert.match(f.opened[0].prompt, /没有 project\/工作目录参数/)
+    assert.match(f.opened[0].prompt, /WaitSessions/)
+    assert.match(f.opened[0].prompt, /SendToSession/)
     assert.match(f.opened[0].prompt, /修正本地账本/)
     assert.match(f.opened[0].prompt, /foreman tasks --json/)
     assert.match(f.opened[0].prompt, /真实运行/)
@@ -278,6 +286,40 @@ test("服务 Schedule 用代码轮询执行会话，手动 route 仍调用路由
     assert.equal(server.inbox.count(), 0)
   } finally {
     if (server) await server.close()
+    fs.rmSync(f.dir, { recursive: true, force: true })
+  }
+})
+
+test("投递目标不存在时清掉死绑定，下一轮直接新建（不等 24h stale）", async () => {
+  const f = fixture()
+  try {
+    const book = new Book(f.cfg.stateFile)
+    book.data.router = {
+      convId: "noop-foreman-router-dead-1",
+      name: "foreman-router-dead",
+      lastSentAt: "2026-11-19T00:05:00.000Z",
+    }
+    book.save()
+
+    const dead = new Error("zcode 账本里没有会话：noop-foreman-router-dead-1（可能从没派过，或账本被清了）")
+    dead.code = "session_missing"
+    f.dws.queue = async () => {
+      throw dead
+    }
+    const first = await routerOnce(f, { now: new Date("2026-11-19T00:10:00Z") })
+    assert.equal(first.ok, false)
+    const afterFail = new Book(f.cfg.stateFile)
+    assert.equal(afterFail.data.router.convId, "", "死绑定应被立即清空，不等 recreateAfterHours")
+    assert.equal(afterFail.data.router.name, "")
+
+    f.dws.queue = async (target, text) => {
+      f.queued.push({ target, text })
+      return { ok: true }
+    }
+    const second = await routerOnce(f, { now: new Date("2026-11-19T00:11:00Z") })
+    assert.equal(second.action, "created", "清掉死绑定后下一轮应直接新建")
+    assert.equal(f.opened.length, 1)
+  } finally {
     fs.rmSync(f.dir, { recursive: true, force: true })
   }
 })

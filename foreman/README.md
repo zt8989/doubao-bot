@@ -18,7 +18,7 @@ Gitea 侧一律走 REST（`gitea` 包/CLI）。
 
 ## 以主智能体和内部 sub agent 为中心（默认）
 
-router agent 决定接单时，每张工单仍有自己的一条主智能体会话（`foreman-<仓库>-<单号>-编排`），绑定在 `issues[键].orchestrator`。编码和对抗审查不再由 Foreman 分配成外部工作会话，而是由主智能体通过当前 Agent 的原生能力创建内部 sub agent。
+router agent 决定接单时，每张工单仍有自己的一条主智能体会话（`foreman-<仓库>-<单号>-编排`），绑定在 `issues[键].orchestrator`。编码和对抗审查不再由 Foreman 分配成外部工作会话，而是由主智能体通过当前载体的原生能力创建子智能体（dws=内部 sub agent；zcode=自带 CreateSession 开独立会话）。
 
 ```
 捞到工单 → hand：新建/复用这张单的主智能体，首句带完整主提示词与工单（账本记 handed）
@@ -37,7 +37,8 @@ router agent 决定接单时，每张工单仍有自己的一条主智能体会�
 ```
 
 - **按单独立**：`ensureIssueOrchestrator` 只负责主智能体的创建与复用。不同工单不共用主智能体；确认原主智能体失联时才用 `foreman hand <键> --fresh` 重派。
-- **内部 sub agent**：主提示词内包含完整的编码与对抗审查提示词。主智能体保存两个 agent id，修复时续问同一个编码 sub agent，复审时续问审查 sub agent；二者不直接互联，也不写入 `agentConvId`、`watch` 或 `task.update`。
+- **内部 sub agent（dws 等旧载体）**：主提示词内包含完整的编码与对抗审查提示词（`src/builtin/orchestrator-prompt.md` 的两段模板）。主智能体保存两个 agent id，修复时续问同一个编码 sub agent，复审时续问审查 sub agent；二者不直接互联，也不写入 `agentConvId`、`watch` 或 `task.update`。
+- **独立子智能体会话（zcode 载体，2026-11-23 起）**：提示词按 agent 拆分在 `src/builtin/agents/`（`coder.md`/`reviewer.md`），router 用 ZCode 自带 **CreateSession** 为编码与审查各开一条独立根会话——首句固定两段：「先完整阅读你的提示词文件 <绝对路径>」+ 任务包（CreateSession 没有 project/工作目录参数，任务包必须自带 worktree 绝对路径）；等待用 WaitSessions、读结果用 ReadSession、修复续问用 SendToSession（同工单复用同一条编码会话）。子会话是 router 私有编排，不进账本/watch。
 - **Foreman 的边界**：默认主链路只用 Foreman 提供工单、工作区、PR、邮件、账本和清理能力。编码 sub agent 只调用 `ws add` 与 `pr open`；主智能体不调用 `dispatch`、`resume`、PR 创建或合并。
 - **dws 的边界**：dws 可以承载主智能体及既有外部会话，不用于创建、续问或中转编码与对抗审查 sub agent。
 - **旧路径已删**：`foreman dispatch/resume/orch start/sessions/decide` 命令已移除；`task.update` 与外部工作会话监听仅兼容读取。
@@ -56,13 +57,13 @@ router agent 决定接单时，每张工单仍有自己的一条主智能体会�
 ## 默认主链路做什么
 
 1. `hand` 把工单交给本单主智能体，首句同时携带主提示词与工单正文。
-2. 主智能体整理任务包，在 Agent 内部创建编码 sub agent；编码 sub agent 自行调用 `foreman ws add` 准备工作区，按基线建分支。
-3. 编码 sub agent 实现、自测、commit，只 push 非保护工作分支，并逐工程调用 `foreman pr open`，填写模板、关联工单和测试结果。
-4. 主智能体收到交付后，在 Agent 内部创建对抗审查 sub agent。审查 sub agent 只读 diff、验收标准和测试结果，输出结构化 JSON。
-5. 主智能体原样汇总结论。阻断项交同一编码 sub agent 修复并复审；无阻断后发验收邮件。
+2. 主智能体整理任务包，创建编码子智能体（dws=内部 sub agent；zcode=CreateSession 独立会话，读 `src/builtin/agents/coder.md`）；编码侧自行调用 `foreman ws add` 准备工作区，按基线建分支。
+3. 编码侧实现、自测、commit，只 push 非保护工作分支，并逐工程调用 `foreman pr open`，填写模板、关联工单和测试结果。
+4. 主智能体收到交付后，创建对抗审查子智能体（zcode=CreateSession 独立会话，读 `src/builtin/agents/reviewer.md`）。审查侧只读 diff、验收标准和测试结果，输出结构化 JSON。
+5. 主智能体原样汇总结论。阻断项交同一编码子智能体修复并复审；无阻断后发验收邮件。
 6. 人类/独立验收系统最终验收与合并，保护分支须人工批准且 CI 通过；主智能体确认合并后清理。
 
-内部 sub agent 的交付与续问都在 Agent 内完成，不产生 Foreman 外部工作会话，也不依赖 `watch poll`、`task.update` 或 dws 中转。旧外部会话路径仍按原有 Inbox/Worker 机制兼容运行。
+子智能体的交付与续问都在主智能体编排内完成（zcode 下是它用自带会话工具开的独立根会话），不产生 Foreman 外部工作会话，也不依赖 `watch poll`、`task.update` 或 dws 中转。旧外部会话路径仍按原有 Inbox/Worker 机制兼容运行。
 
 ## 两条通道：派单与合并彻底分开
 

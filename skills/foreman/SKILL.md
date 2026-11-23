@@ -9,7 +9,7 @@ CLI 源码在 `doubao-bot/foreman`，已 `npm link` 全局；改源码 → commi
 
 ## 两个可插拔的载体
 
-- **执行载体**（配置 `agent`，当前 **noop**）：agent 载体可插拔，桌面 AI agent 只是可选载体之一。`noop` 不开任何真实会话、不碰任何 agent——`issue/ws/pr/outbox/clean/tasks` 照常工作；派单/投递「成功」但无人干活，inbox 只记账会堆积。`dws` = 豆包桌面端（当前登录过期，别用）。`zcode` = ZCode CLI headless（真正有人干活）：首轮 `zcode -p --json` 阻塞跑完，续说 `--resume`，通知/steer 排到当前轮之后后台跑；bin 留空自动解析（PATH → ZCode.app 内置 CLI）。**zcode 适配器代码已合入源码，本机要启用：commit → `node scripts/publish.mjs foreman` → 重启服务 → 把 `agent` 改成 `"zcode"`**（旧版服务不认 zcode，会当 dws 去拉豆包——没发布前别翻配置）。
+- **执行载体**（配置 `agent`，当前 **zcode**）：agent 载体可插拔，桌面 AI agent 只是可选载体之一。`noop` 不开任何真实会话、不碰任何 agent——`issue/ws/pr/outbox/clean/tasks` 照常工作；派单/投递「成功」但无人干活，inbox 只记账会堆积。`dws` = 豆包桌面端（当前登录过期，别用）。`zcode` = ZCode CLI headless（真正有人干活）：首轮 `zcode -p --json` 阻塞跑完，续说 `--resume`，通知/steer 排到当前轮之后后台跑；bin 留空自动解析（PATH → ZCode.app 内置 CLI）。**子智能体形态**：zcode 下 router 用自带 **CreateSession** 为编码/审查各开独立根会话，各自读 `foreman/src/builtin/agents/` 下的岗位提示词（coder.md/reviewer.md，首句注入绝对路径）；dws 下是模板注入的内部 sub agent。
 - **tracker 适配器**（当前 Gitea）：工单/PR 读写走适配器契约；`Issue.ref`（工单右侧分支）是 Gitea 特有能力位，换 GitHub/Jira 自动跳过。
 
 ## 一条龙工作流（noop 下由人或外部 agent 承担全部智能工作）
@@ -45,7 +45,7 @@ foreman clean <owner/name>#<N>   # 关单+清尾：要求该单 PR 已全合并�
 
 - `hand` / `run` / `pickup` / 控制台接单：只把派单请求投进 router Inbox（账本记 handed 占槽），不再直接开任何编排/工作会话；`decide` 已删除，决策单由 router 自行调研。
 - 他人 PR 合并：扫描 pr.merge 事件与 `pr assign` 人工补派也只投 router（不再建合并助手会话）；router 核对后自己执行 `foreman pr merge`（幂等）。
-- router 是服务唯一主动维护的 agent 会话、每张单的唯一编排者：消费事件后在会话内创建编码与对抗审查内部 sub agent（编码侧 ws add / pr open），验收邮件、issue settle、clean 也归它。
+- router 是服务唯一主动维护的 agent 会话、每张单的唯一编排者：消费事件后创建编码与对抗审查子智能体（zcode=自带 CreateSession 独立会话，各自读 `foreman/src/builtin/agents/` 岗位提示词；编码侧 ws add / pr open），验收邮件、issue settle、clean 也归它。
 - **noop（当前生效）下**：以上请求照常入 Inbox、账本照记，但 router 会话也是假的——事件堆积、无人接单，挑单和编排实际由人或外部 agent 承担。`watch *` / `pr poll` / `mail poll` / `worker run` 产出只会进 noop，无意义；定时任务当前全部 off。
 - 已删除的旧命令：`dispatch`、`resume`、`orch start`、`sessions`、`decide`，遇到相关提示不要再引用。
 
