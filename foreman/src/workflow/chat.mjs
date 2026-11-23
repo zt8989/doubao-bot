@@ -68,20 +68,26 @@ export function createChatWorkflow(ctx) {
       if (typeof ctx.dws?.info !== "function") throw new Error("dws 缺少 info，无法读取 Router Agent 会话")
       const info = await ctx.dws.info(router.convId)
       const raw = Array.isArray(info?.messages) ? info.messages : []
-      // zcode 账本留痕的 user 消息带显式 role 且无 finished/id，这里统一补齐；
-      // running 判定优先用适配器状态（zcode 的账本 status），避免「回复已回但尾部没对齐」误判。
-      const messages = raw.map((message, index) => ({
-        id: String(message.id || `${index}`),
-        role: message.role === "user" ? "user" : chatRole(message),
-        text: message.role === "user"
-          ? String(message.text ?? "").replace(/^【Chat UI 用户消息】\s*/, "")
-          : chatText(message),
-        finished: message.finished !== false,
-        ...(message.error ? { error: String(message.error) } : {}),
-      }))
+      // 「Chat 用户气泡」只认【Chat UI 用户消息】标记，载体无关（dws 首句混着提示词、
+      // zcode 账本留痕的 user 是整段派活 prompt）——有标记才是用户消息，其余一律按事件展示。
+      const messages = raw.map((message, index) => {
+        const text = String(message.text ?? "")
+        const marked = text.includes("【Chat UI 用户消息】")
+        return {
+          id: String(message.id || `${index}`),
+          role: marked ? "user" : chatRole(message),
+          text: marked ? text.slice(text.indexOf("【Chat UI 用户消息】") + "【Chat UI 用户消息】".length).trim() : text,
+          finished: message.finished !== false,
+          ...(message.error ? { error: String(message.error) } : {}),
+        }
+      })
+      // running 判定：适配器显式给状态（zcode 账本 status）就用它；否则看尾部——
+      // 尾部是 user 气泡或 Foreman 事件都算还在等回复。
+      const tail = raw[raw.length - 1]
       const running =
-        String(info?.status ?? "") === "running" ||
-        (raw.length > 0 && raw[raw.length - 1]?.role === "user" && raw[raw.length - 1]?.finished === false)
+        info?.status != null
+          ? String(info.status) === "running"
+          : Boolean(tail && (tail.role !== "assistant" || tail.finished === false))
       const last = messages[messages.length - 1]
       return {
         ok: true,

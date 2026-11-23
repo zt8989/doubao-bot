@@ -139,3 +139,26 @@ test("HTTP /api/chat 提供读会话与写入 Inbox 的统一入口", async (t) 
     { cmd: "chat messages", text: undefined, clientId: undefined },
   ])
 })
+
+test("zcode 账本留痕经 messages() 归一化：派活 prompt 是事件气泡，Chat 用户消息仍认标记", async (t) => {
+  const f = fixture()
+  t.after(() => fs.rmSync(f.dir, { recursive: true, force: true }))
+  // messages() 只读 book.data.router 绑定的会话：先写一条绑定再 mock info。
+  const { Book } = await import("../src/book.mjs")
+  const book = new Book(f.ctx.cfg.stateFile)
+  book.data.router = { convId: "router-1", name: "foreman-router-test" }
+  book.save()
+  f.ctx.dws.info = async () => ({
+    status: "running",
+    messages: [
+      { role: "user", text: "# Foreman 路由智能体\n\n【Foreman · 接单】工单 demo/demo#1" },
+      { role: "assistant", text: "已接单开工" },
+      { role: "user", text: "【Chat UI 用户消息】\n现在进展如何" },
+    ],
+  })
+
+  const conversation = await f.chat.messages()
+  assert.deepEqual(conversation.messages.map((m) => m.role), ["event", "assistant", "user"])
+  assert.equal(conversation.messages[2].text, "现在进展如何")
+  assert.equal(conversation.running, true, "适配器 status=running 时 Chat 保持正在回复")
+})
