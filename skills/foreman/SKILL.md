@@ -1,6 +1,6 @@
 ---
 name: foreman
-description: 交付一条龙 CLI（doubao-bot/foreman，命令 foreman）：建单 `issue create [--ws]`、开工作区+分支+回写工单右侧分支 `ws add`、建 PR `pr open`、幂等合并+关单+清尾 `pr merge`；派单/合并请求一律经 router agent 路由（hand/run/pickup 只投 router Inbox，服务不直接开任何 agent 会话，router 是唯一编排者）。执行载体 agent 可插拔，noop 载体下不开任何真实会话、机械动作照常工作。用户提到建工单、开工单分支、worktree、建 PR、合并 PR 关单、接单派单、foreman/工单/worktree 报错时使用。
+description: 交付一条龙 CLI（doubao-bot/foreman）：覆盖工单交付全流程——建单、开工作区与分支（自动回写工单关联分支）、建 PR、验收后幂等合并并关单清尾；派单与合并请求一律经 router agent 路由，服务不直接开任何 agent 会话，router 是唯一编排者。执行载体 agent 可插拔，noop 载体下不开任何真实会话、机械动作照常工作。用户提到建工单、开工单分支、worktree、建 PR、合并 PR 关单、接单派单、foreman/工单/worktree 报错时使用。
 ---
 
 # foreman：交付一条龙
