@@ -259,7 +259,7 @@ class FmHead extends LitElement {
         <div class="meta">
           ${this.view === "chat" ? html`
             <span class=${"chat-status " + chatStatusClass}>${chatStatusText}</span>
-            <button class="ghost" type="button" ?disabled=${cs.loading} @click=${() => this.refreshChat()}>
+            <button class="ghost chat-refresh" type="button" ?disabled=${cs.loading} @click=${() => this.refreshChat()}>
               ${cs.loading ? "刷新中…" : "刷新"}
             </button>
           ` : ""}
