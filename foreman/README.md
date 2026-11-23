@@ -40,7 +40,7 @@ router agent 决定接单时，每张工单仍有自己的一条主智能体会�
 - **内部 sub agent**：主提示词内包含完整的编码与对抗审查提示词。主智能体保存两个 agent id，修复时续问同一个编码 sub agent，复审时续问审查 sub agent；二者不直接互联，也不写入 `agentConvId`、`watch` 或 `task.update`。
 - **Foreman 的边界**：默认主链路只用 Foreman 提供工单、工作区、PR、邮件、账本和清理能力。编码 sub agent 只调用 `ws add` 与 `pr open`；主智能体不调用 `dispatch`、`resume`、PR 创建或合并。
 - **dws 的边界**：dws 可以承载主智能体及既有外部会话，不用于创建、续问或中转编码与对抗审查 sub agent。
-- **旧路径兼容**：`foreman dispatch/resume`、外部工作会话监听与 `task.update` 仍保留给旧会话及 `--direct`，不是默认主链路的角色分配方式。
+- **旧路径已删**：`foreman dispatch/resume/orch start/sessions` 命令已移除；`task.update` 与外部工作会话监听仅兼容读取。
 - **收尾**：最终验收与合并由人类/独立验收系统完成；保护分支要求人工批准和 CI 通过。确认全部 PR 合并后，`foreman clean <键>` 清理工作区与监听。
 
 配置（默认已开，不用写也能用）：
@@ -302,7 +302,7 @@ foreman watch poll                       # 立刻跑一轮（checked / settled /
 - `running` 假、还没处理过 → 收工这轮读一次 `dws status` 和最终回复，写入 `task.update`；Worker 投递成功后才落 `idle`；
 - 侧边栏再把它报成 `running` 时清掉 `idle`，等下一次收工重新判一轮。
 
-读不到侧边栏（`dws list` 失败）时，尚未消费的会话仍退化为逐条 `dws status`；一旦最终回复已由 Worker 投递就同样落 `idle`，不再每轮重读。后续由侧边栏重新出现 `running`，或 `resume` / 重派 steer 显式清掉 `idle`，再读取下一次结果。
+读不到侧边栏（`dws list` 失败）时，尚未消费的会话仍退化为逐条 `dws status`；一旦最终回复已由 Worker 投递就同样落 `idle`，不再每轮重读。后续由侧边栏重新出现 `running`，或重派 steer 显式清掉 `idle`，再读取下一次结果。
 
 router agent决定执行 `run` / `pickup` 时也会先读侧边栏，但**默认不因此停派**（派单通道要并行 2 张单）：只有显式打开 `pickup.pauseWhileRunning: true` 时，才有在跑会话就跳过本轮（`window-busy`）。
 
@@ -318,7 +318,7 @@ router agent决定执行 `run` / `pickup` 时也会先读侧边栏，但**默认
 - `watch poll` 把 `running/gone/finished/settled` 状态写入 `task.update`；完成状态同时保留 `dws.info` 的普通最终回复原文，不解析 RESULT，也不把 finished/settled 当成工单完成。
 - 入箱时按 `issues[键].orchestrator` → 补派 `parent` / 显式 `notifyTo` → 全局编排 → router agent的顺序确定并固化归属；Worker 按事件里的归属 `dws msg --mode queue` 投递，不广播、不新建派单会话、不 steer。
 - 同一任务的 pending 更新合并为最新状态；不同任务逐条投递。失败保留事件并重试，重启由 SQLite 租约恢复；Worker 成功交给 dws 后才消费 `(会话, 指纹)` 并落 `idle`。
-- 主智能体收到最终回复后核对交付并监听 PR，触发对抗审查、原样汇总结论、通知验收和维护状态机；编码智能体自行 push 非保护分支并 `pr open`，经主智能体 `resume` 后按审查意见修复。最终验收与合并由人类/独立验收系统完成，主智能体不代开 PR、不合并、不改审查结论。
+- 主智能体收到最终回复后核对交付并监听 PR，触发对抗审查、原样汇总结论、通知验收和维护状态机；编码智能体自行 push 非保护分支并 `pr open`，由主智能体在 Agent 内续问同一个编码 sub agent 按审查意见修复。最终验收与合并由人类/独立验收系统完成，主智能体不代开 PR、不合并、不改审查结论。
 - notify 节点的暂停开关仍会阻止任务事件入箱；PR 扫描与验收邮件仍走各自 Inbox 事件。`--no-notify` 仍表示这一轮不登记监听，因此不会产生该执行会话的 `task.update`。
 
 ### 服务没在跑时，结论没人判
@@ -404,15 +404,8 @@ foreman run --once               # 跑一轮：捞到单交给编排会话（han
 foreman run --direct --once      # 这一轮自己派活（老行为，不交给编排）
 foreman run --notify <会话id|标题>  # 这一轮派出的会话，登记监听时通知目标写谁
 foreman run --no-notify          # 这一轮不登记监听，因此不会有通知（连同其它参数一起用）
-foreman orch start               # 手工兼容入口：起/复用顶层全局编排（router agent接单不用它）
 foreman orch show                 # 每条编排会话绑了哪些工作会话、最近 steer 了什么
-foreman sessions                  # 只列当前会话派出的工作/补派会话（默认取 MCP_VM_CONVERSATION_ID）
-foreman sessions --orchestrator <会话id>  # 终端里查询指定会话派出的全部会话
-foreman hand <owner/name>#N [--fresh]  # 默认复用本单编排；确认原编排失联时才 --fresh 重派
-foreman dispatch <owner/name>#N (--prompt <编排指令> | --file <指令文件>) [--repo <工程名|owner/name>]...
-                                 # 旧外部工作会话兼容；默认主链路不用，也不用于创建内部 sub agent
-foreman resume <执行会话id>   # 旧外部会话 steer 续跑；内部 sub agent 由原 agent id 续问
-                                 # hand 支持 --orchestrator；旧 dispatch/resume 同样保留原参数
+foreman hand <owner/name>#N [--fresh]  # 默认复用本单编排；确认原编排失联时才 --fresh 重派（支持 --orchestrator）
 foreman clean <owner/name>#N     # 合并关单后清 worktree / 分支 / 工作会话（幂等）
 foreman clean --all              # 清所有终端态工单的残留（worktree / 分支 / 会话）
 foreman pickup                   # 手动/router agent处理一轮候选；没有代码定时器会自动调用它
@@ -514,6 +507,7 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
   "maxAttempts": 3,
   "perRepoPerRound": 1,
   "dws": { "bin": "dws", "mode": "local", "model": "auto" },
+  "agent": "dws",   // dws = 豆包（默认）；noop = 不开会话不碰豆包，clean/ws/pr 照常工作
   "herdr": { "bin": "herdr", "enabled": true },
   "pickup": {
     "labelIds": [5],

@@ -14,6 +14,16 @@
 //   on(event, payload)                     生命周期钩子
 // 能力标记：
 //   capabilities.singleInstance            单实例桌面应用（同时只能有一条前台会话，需要 window-busy 护栏）
+import { DoubaoSessionAdapter } from "./doubao.mjs"
+import { NoopSessionAdapter } from "./noop.mjs"
+
+// 按配置选执行载体：agent = "dws"（豆包桌面端，默认）| "noop"（不开会话、不碰豆包）。
+// 豆包只是可选的 agent 之一：换载体不动 workflow，clean/tasks 这类命令在 noop 下照常工作。
+export function makeSessionAdapter(cfg = {}, { driver = null, log = () => {} } = {}) {
+  if (String(cfg.agent ?? "").trim().toLowerCase() === "noop") return new NoopSessionAdapter({ cfg, log })
+  return new DoubaoSessionAdapter({ driver, cfg, log })
+}
+
 export function assertSessionAdapter(adapter, name = "session") {
   const missing = ["openExecution", "resumeExecution", "deliver", "status", "info", "notify"]
     .filter((m) => typeof adapter?.[m] !== "function")

@@ -15,6 +15,7 @@ import { git, branchExists } from "../src/gitx.mjs"
 import { ensureService, callRaw, ServiceError, resolvePort, resolveTarget, portFileOf, readPortFile } from "../src/svclient.mjs"
 import { startServer, pingOnce } from "../src/service.mjs"
 import { sessionTasks, formatSessionTasks } from "../src/tasktree.mjs"
+import { makeSessionAdapter } from "../src/workflow/adapters/session.mjs"
 import { MemoryStore } from "../src/core/memory.mjs"
 import { dreamOnce } from "../src/dreaming.mjs"
 
@@ -61,18 +62,11 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman issue comment <N> --repo R --body <正文>
   foreman issue close <N> --repo R
   foreman run   [--once] [--dry-run] [--direct] [--repo <名字|owner/name>] [--notify <会话id|标题>] [--no-notify] [-c <配置>]
-  foreman orch start [--name <会话名>]   起/复用全局编排会话（幂等；只有自动接单用这条）
   foreman orch show                    看每条编排会话绑了哪些工作会话、最近 steer 了什么
-  foreman sessions [--orchestrator <id>]  查当前会话分配出去的所有会话（默认取当前豆包会话）
-  foreman hand <owner/name>#<单号> [--orchestrator <id>]      把工单交给编排会话（它再自己调 dispatch）
-  foreman dispatch <owner/name>#<单号> (--prompt <编排指令> | --file <指令文件>) [--orchestrator <id>] [--repo <工程名|owner/name>]... [--force]
-                                      默认只建工单所在仓；额外工程必须重复传 --repo，正文提到不会自动建
-                                      提示词必填：编排分析、任务范围与验收要求随首句注入，头部带工单 ID 和 URL
-                                      准入：工单需带 ready-for-agent；缺标签时返回 not-ready 并要求先出方案 + 邮件决策，--force 显式跳过
+  foreman hand <owner/name>#<单号> [--orchestrator <id>]      把工单交给本单主智能体（接单入口）
   foreman decide <owner/name>#<单号> [--orchestrator <id>]
                                       router agent 消费 issue.decision 时调用：用决策提示词开一条新会话
                                       不绑编排、不监听、不进 PR 链；agent 先调研再决定要不要切 ready-for-agent
-  foreman resume <执行会话id> [--orchestrator <id>]          失败/卡住：在指定工作会话里 steer 续跑（不新开）
   foreman clean <owner/name>#<单号>     合并关单后清 worktree、本地分支、工作会话与这张单的编排会话（幂等）
   foreman clean --all                  清所有终端态工单残留的工作区与会话
   foreman pickup [-c <配置>]        手动催一轮自动巡检（服务按 pickup 配置捞一轮单）
@@ -111,11 +105,14 @@ const HELP = `foreman — 接单编排 + 常驻服务
               监听端口仍由 config.json 的 service.http.port 配置；显式 -c <配置> 优先于环境目录。
 
 run 以主智能体为中心：捞到单先交给本单主智能体，由它在 Agent 内部创建编码与对抗审查 sub agent；
-两个内部 sub agent 的结果直接返回主智能体，不经 Foreman/dws 工作会话。主智能体原样汇总审查、通知验收并维护状态。
-foreman dispatch/resume 仅保留给旧外部工作会话；合并关单后由主智能体调 foreman clean。--direct 退回旧外部会话行为。
+两个内部 sub agent 的结果直接返回主智能体，不经 Foreman 工作会话。主智能体原样汇总审查、通知验收并维护状态，
+合并关单后由主智能体调 foreman clean。--direct 退回旧外部会话行为（需 agent）。
+
+执行载体（配置 agent）：dws = 豆包桌面端（默认）；noop = 不开会话、不碰豆包——clean/tasks/ws/pr/issue
+照常工作，派单与投递「成功」但无人干活，inbox 只记账。豆包只是可选 agent 之一，换载体不改命令。
 
 主智能体从哪来：
-  1. 路由智能体接单：hand 按工单新建/复用独立主智能体；手工 orch start 仍可起全局兼容会话；
+  1. 路由智能体接单：hand 按工单新建/复用独立主智能体；
   2. 用户自主发起：发起那条会话自己就是主智能体，hand 自动取 MCP_VM_CONVERSATION_ID
      （或显式 --orchestrator <会话id|标题>，--no-orchestrator 关掉自动识别）。
   编码与对抗审查 sub agent 由主智能体在 Agent 内部创建，结果直接返回，不登记为外部工作会话。
@@ -142,7 +139,7 @@ function makeCtx(cfg, extra = {}) {
   return {
     cfg,
     book: new Book(cfg.stateFile),
-    dws: new DwsDriver({ bin: cfg.dws?.bin ?? "dws", mode: cfg.dws?.mode, model: cfg.dws?.model, log }),
+    dws: makeSessionAdapter(cfg, { log }),
     log,
     ...extra,
   }
@@ -559,7 +556,7 @@ async function cmdMemory(pos, flags) {
   const store = new MemoryStore(cfg)
   if (action === "show") return out({ ok: true, ...store.show() })
   if (action === "dream") {
-    const dws = new DwsDriver({ bin: cfg.dws?.bin ?? "dws", mode: cfg.dws?.mode, model: cfg.dws?.model })
+    const dws = makeSessionAdapter(cfg, {})
     return out(await dreamOnce({ cfg, dws }, { day: strFlag(flags.day), force: flags.force === true }))
   }
   if (action === "dream-status") return out(store.dreamStatus())
@@ -649,21 +646,13 @@ async function cmdDoctor(pos, flags) {
 async function cmdOrch(pos, flags) {
   const cfg = loadConfig(flags.config)
   const action = String(pos[0] ?? "show")
-  if (!["start", "show"].includes(action)) throw new Error("用法：foreman orch start|show")
+  if (action !== "show") throw new Error("用法：foreman orch show（orch start 已删除：接单自动按单建编排）")
   const port = await resolvePort(cfg)
   const r = await callRaw(port, { id: "cli", cmd: `orch ${action}`, name: flags.name && flags.name !== true ? String(flags.name) : "" }, 600000)
   if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
   return out({ ok: true, ...r })
 }
 
-async function cmdSessions(pos, flags) {
-  const cfg = loadConfig(flags.config)
-  const orchestrator = callerOrchestrator(flags)
-  if (!orchestrator) throw new Error("用法：foreman sessions [--orchestrator <会话id>]（豆包会话里会自动识别当前会话）")
-  const r = await callRaw(resolveTarget(cfg), { id: "cli", cmd: "sessions", orchestrator }, 60000)
-  if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
-  return out({ ok: true, ...r })
-}
 
 // 调用方会话 = 谁发起的这张单。两种来源：
 //   1) 路由智能体接单：服务进程没有用户会话 → hand 按工单建独立编排；手工兼容场景才用全局编排；
@@ -680,7 +669,7 @@ function callerOrchestrator(flags = {}) {
 function orchestratorArg(flags = {}) {
   const who = callerOrchestrator(flags)
   if (who) process.stderr.write(`  编排：${who}（调用方会话，更新会 steer 到这里）\n`)
-  else process.stderr.write("  编排：全局编排会话（foreman orch start 起的那条）\n")
+  else process.stderr.write("  编排：这张单自己的主智能体（hand 自动按单建）\n")
   return who ? { orchestrator: who } : {}
 }
 
@@ -748,28 +737,6 @@ async function cmdWorker(pos, flags) {
   return out({ ok: true, ...r })
 }
 
-async function cmdDispatch(pos, flags) {
-  const ref = String(pos[0] ?? flags.issue ?? "").trim()
-  if (!ref) throw new Error("用法：foreman dispatch <owner/name>#<单号> (--prompt <编排指令> | --file <指令文件>)")
-  const inlinePrompt = strFlag(flags.prompt).trim()
-  const promptFile = strFlag(flags.file || flags["prompt-file"]).trim()
-  const filePrompt = promptFile ? fs.readFileSync(expandHome(promptFile), "utf8").trim() : ""
-  const prompt = [inlinePrompt, filePrompt].filter(Boolean).join("\n\n")
-  if (!prompt) throw new Error("dispatch 必须提供非空编排指令：--prompt <工单分析、任务范围与验收要求>，或 --file <指令文件>")
-  const repoFlags = Array.isArray(flags.repo) ? flags.repo : flags.repo === undefined ? [] : [flags.repo]
-  if (repoFlags.some((repo) => typeof repo !== "string" || !repo.trim())) {
-    throw new Error("dispatch 的 --repo 需要工程名或 owner/name；可重复传入多个额外工程")
-  }
-  const extraRepos = repoFlags.map((repo) => repo.trim())
-  const cfg = loadConfig(flags.config)
-  const port = await resolvePort(cfg)
-  // 派活要建 worktree、开工作会话（no-wait）；窗口忙时可能等一会儿，给足时间。
-  const r = await callRaw(port, {
-    id: "cli", cmd: "dispatch", issue: ref, prompt, repos: extraRepos, force: flags.force === true, ...orchestratorArg(flags),
-  }, 900000)
-  if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
-  return out({ ok: true, ...r })
-}
 
 async function cmdDecide(pos, flags) {
   const ref = String(pos[0] ?? flags.issue ?? "").trim()
@@ -781,15 +748,6 @@ async function cmdDecide(pos, flags) {
   return out({ ok: true, ...r })
 }
 
-async function cmdResume(pos, flags) {
-  const sessionId = String(pos[0] ?? flags.session ?? "").trim()
-  if (!sessionId) throw new Error("用法：foreman resume <执行会话id>（在指定工作会话里 steer 续跑，不传工单号）")
-  const cfg = loadConfig(flags.config)
-  const port = await resolvePort(cfg)
-  const r = await callRaw(port, { id: "cli", cmd: "resume", sessionId, ...orchestratorArg(flags) }, 600000)
-  if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
-  return out({ ok: true, ...r })
-}
 
 async function cmdClean(pos, flags) {
   const cfg = loadConfig(flags.config)
@@ -852,8 +810,6 @@ async function main() {
       return cmdRun(pos, flags)
     case "orch":
       return cmdOrch(pos, flags)
-    case "sessions":
-      return cmdSessions(pos, flags)
     case "hand":
       return cmdHand(pos, flags)
     case "route":
@@ -870,12 +826,8 @@ async function main() {
       return cmdWorker(pos, flags)
     case "memory":
       return cmdMemory(pos, flags)
-    case "dispatch":
-      return cmdDispatch(pos, flags)
     case "decide":
       return cmdDecide(pos, flags)
-    case "resume":
-      return cmdResume(pos, flags)
     case "clean":
       return cmdClean(pos, flags)
     case "pickup":

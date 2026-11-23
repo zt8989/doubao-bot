@@ -22,6 +22,8 @@ export const DEFAULTS = {
   stateFile: "state.json",
   worktreeDir: "~/.foreman/worktrees",
   dws: { bin: "dws", mode: "local", model: "auto" },
+  // 执行载体：dws = 豆包桌面端（默认）；noop = 不开会话、不碰豆包（clean/tasks 照常工作，无人真正干活）。
+  agent: "dws",
   herdr: { bin: "herdr", enabled: true },
   // Gitea REST：baseUrl 用于控制台拼链接；令牌实际由 gitea 包按 ~/.foreman/gitea-token 解析。
   gitea: { baseUrl: "http://106.54.199.229:3000", tokenFile: "~/.foreman/gitea-token" },
@@ -273,6 +275,8 @@ export function loadConfig(explicit, env = process.env) {
   }
   const normalizedUser = !isObj(user.router) && isObj(user.inspector) ? { ...user, router: user.inspector } : user
   const cfg = merge(DEFAULTS, normalizedUser)
+  // agent 只认 dws / noop，写错按默认 dws 走（不炸配置，别让一台机器起不来服务）。
+  cfg.agent = String(cfg.agent ?? "dws").trim().toLowerCase() === "noop" ? "noop" : "dws"
   // 旧 inspector 配置只作内存别名；新配置与公开文案使用 router。
   cfg.inspector = cfg.router
   // 测试目录只替换未显式配置的运行路径；业务凭证与 worktree 仍按原配置共享。

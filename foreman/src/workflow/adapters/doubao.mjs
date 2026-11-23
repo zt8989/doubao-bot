@@ -71,6 +71,11 @@ export class DoubaoSessionAdapter {
     return this.driver.archive(target)
   }
 
+  // start：连接/检查窗口与登录态（doctor --start 用），透传驱动。
+  start() {
+    return this.driver.start()
+  }
+
   // ---- 豆包特有的护栏 ----
   // 被监听的会话里还在跑的那些：单实例下这时候开新会话必然失败或写错会话。
   async busyWatchers(watcherIds = []) {

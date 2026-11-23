@@ -12,13 +12,10 @@ import { notifyTarget, shouldNotify, notifyText, runRound, acquireLock, releaseL
 import {
   cleanIssue,
   cleanableIssues,
-  delegatedSessions,
-  ensureOrchestrator,
   handToOrchestrator,
   orchestratorInfo,
   orchestratorTarget,
   ownedIssueOrchestrator,
-  resumeWorker,
   sessionFlowEnabled,
   TERMINAL_ISSUE_STATES,
 } from "./sessionflow.mjs"
@@ -26,7 +23,7 @@ import { enqueueTaskUpdate, deliverTaskUpdate } from "./taskevents.mjs"
 import { findWorkspace, mergeWorkspace, upsertPr } from "./workspaces.mjs"
 import { WorkflowEngine } from "./workflow/engine.mjs"
 import { NODE_TEARDOWN, runNodeCleanup, resolveIssueKey, issueKeyForPr } from "./workflow/cleaners.mjs"
-import { DoubaoSessionAdapter } from "./workflow/adapters/doubao.mjs"
+import { makeSessionAdapter } from "./workflow/adapters/session.mjs"
 import { createChatWorkflow } from "./workflow/chat.mjs"
 import { GiteaTrackerAdapter } from "./workflow/adapters/gitea.mjs"
 import { prWatchOnce, prWatchTarget, mergeFailureReason, prNotifyText, shouldReport, ownedPrKeys, prKey, uiReviewers, uiReviewersReady, isOwnPr, isUiPrView } from "./prwatch.mjs"
@@ -814,10 +811,10 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   }
 
   // 通用 workflow：生命周期 + 适配器。ctx.dws / ctx.gitea 现在是**适配器**（旧调用面保留）。
-  // 豆包相关的一切（单实例护栏、侧边栏读状态、归档）都在 DoubaoSessionAdapter 里。
+  // agent 相关的一切（单实例护栏、读状态、归档）都收在适配器里：dws = 豆包，noop = 不碰豆包。
   const engine = new WorkflowEngine({
     cfg,
-    session: new DoubaoSessionAdapter({ driver: dws, cfg, log }),
+    session: makeSessionAdapter(cfg, { driver: dws, log }),
     tracker: new GiteaTrackerAdapter({ impl: gitea }),
     log,
   })
@@ -2259,26 +2256,6 @@ export async function handleRequest(ctx, req) {  const id = req?.id
 
   // ---- 以工单绑定的编排会话为中心（每单独立编排 → 派单 → steer 回本单编排 → merge → clean）----
 
-  // orch start：手工兼容入口，起/复用顶层全局编排；自动巡检不再调用它。
-  if (cmd === "orch start") {
-    if (!sessionFlowEnabled(ctx.cfg)) return fail("disabled", "sessionFlow.enabled=false（老的多会话模型），不需要编排会话")
-    let out
-    try {
-      out = await ensureOrchestrator(ctx, { name: String(req.name ?? "") })
-    } catch (e) {
-      return fail(e.code === "app_unavailable" ? "app_unavailable" : "orchestrator-failed", e.message)
-    }
-    return ok({ ...out, orchestrator: orchestratorInfo(new Book(ctx.cfg.stateFile)) })
-  }
-
-  // sessions：只列指定编排会话派出去的会话，不把其他用户/工单的会话混进来。
-  if (cmd === "sessions") {
-    const orchestrator = String(req.orchestrator ?? "").trim()
-    if (!orchestrator) return fail("bad-request", "sessions 需要当前会话 id；在豆包会话里会自动识别，终端里请传 --orchestrator <会话id>")
-    const sessions = delegatedSessions(new Book(ctx.cfg.stateFile), orchestrator)
-    return ok({ orchestrator, count: sessions.length, sessions })
-  }
-
   // orch show：整条链路现在绑在哪条会话上、最近 steer 了什么。
   if (cmd === "orch show") {
     const book = new Book(ctx.cfg.stateFile)
@@ -2332,65 +2309,6 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     }
   }
 
-  // dispatch：编排会话调它分配工作——建一工程一工作区、开工作会话、把会话 id 绑回编排会话。
-  // 已经派过就 steer 同一条工作会话续跑（不新开）。
-  // 这是 agent 主动派发入口：不读取 pickup.maxRunning / maxPerRound；这两个上限只约束 pickupOnce 定时巡检。
-  if (cmd === "dispatch") {
-    if (!sessionFlowEnabled(ctx.cfg)) return fail("disabled", "sessionFlow.enabled=false，不走编排会话；用 foreman run --direct")
-    const ref = String(req.issue ?? "").trim()
-    const m = ref.match(/([^#\s]+)#([0-9]+)$/)
-    if (!m) return fail("bad-request", `dispatch 的 --issue 要写成 <owner/name>#<工单号>，收到：${ref || "（空）"}`)
-    const repoCfg = findRepoCfg(ctx.cfg, m[1])
-    if (!repoCfg) return fail("bad-request", `配置里没有这个工程：${m[1]}`)
-    const number = Number(m[2])
-    const dispatchPrompt = String(req.prompt ?? "").trim()
-    if (!dispatchPrompt) {
-      return fail("bad-request", "dispatch 必须提供非空编排指令：--prompt <工单分析、任务范围与验收要求>，或 --file <指令文件>")
-    }
-    // 用户自主发起：调用方会话就是这张单的编排，工作会话更新经 task.update 由 Worker queue 回它。
-    // 不传调用方时，由 handleIssue 新建/复用这张单自己的编排会话。
-    const orchestrator = String(req.orchestrator ?? "").trim()
-    let issue
-    try {
-      issue = { ...(await ctx.gitea.viewIssue(repoCfg.repo, number)), number }
-    } catch (e) {
-      return fail("gitea-error", `读不到工单 ${repoCfg.repo}#${number}：${e.message}`)
-    }
-    // 准入检查：没带 ready-for-agent 的单不直接派，先让 agent 给修改方案 + 邮件请人决策；--force 显式绕过。
-    // 自动巡检 pickupWatch 已经在源头过滤，所以这里主要约束 agent/CLI 主动 dispatch 的路径。
-    const labels = Array.isArray(issue.labels) ? issue.labels : []
-    const force = req.force === true
-    if (!force && !labels.includes(READY_FOR_AGENT)) {
-      const shown = labels.length ? labels.join(", ") : "（无标签）"
-      return fail(
-        "not-ready",
-        [
-          `工单 ${repoCfg.repo}#${number} 当前未标记 ${READY_FOR_AGENT}（现有标签：${shown}），不直接派活。`,
-          "请先按下面的流程推进：",
-          "1. 阅读工单与相关代码，给出可执行的修改方案（改动范围、涉及文件、验收方式），不要直接动手改业务代码；",
-          "2. 通过邮件把方案发给用户/负责人请求决策（参考 mail 技能），正文要写清方案与待决问题；",
-          "3. 等到工单被加上 ready-for-agent（或被切到 ready-for-human 等终态标签）后再派活；",
-          `4. 如果你判断这张单无需等待人工决策，可显式加 --force 跳过本检查。`,
-        ].join("\n"),
-      )
-    }
-    try {
-      const extraRepos = (Array.isArray(req.repos) ? req.repos : req.repos ? [req.repos] : [])
-        .map((repo) => String(repo).trim())
-        .filter(Boolean)
-      const out = await handleIssue({ ...ctx, orchestrator, dispatchPrompt, extraRepos }, repoCfg, issue)
-      // 派活这一步补推 session.dispatched：hand 时只推了 issue.picked。
-      await ctx.engine?.emit("session.dispatched", {
-        issueKey: `${repoCfg.repo}#${number}`,
-        target: out.convId ?? out.agent ?? "",
-        workflow: "own",
-      })
-      return ok(out)
-    } catch (e) {
-      return fail(e.code === "app_unavailable" ? "app_unavailable" : "dispatch-failed", e.message)
-    }
-  }
-
   // decide：router agent 消费 issue.decision Inbox 事件后调它，开一条决策会话。
   // 决策单不绑编排会话、不监听、不进「跑完→验收→出 PR」链；提示词由代码内置（decisionKickoff）。
   // 不校验 ready-for-agent：决策单的意义就是先调研再决定要不要切 ready-for-agent。
@@ -2416,24 +2334,6 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     } catch (e) {
       return fail(e.code === "app_unavailable" ? "app_unavailable" : "decide-failed", e.message)
     }
-  }
-
-  // resume：入口只认工作会话 id。由会话绑定/监听反查工单，再 steer 指定会话，不新开。
-  if (cmd === "resume") {
-    const sessionId = String(req.sessionId ?? "").trim()
-    const out = await resumeWorker(ctx, { sessionId })
-    if (out.ok && String(req.orchestrator ?? "").trim()) {
-      new Book(ctx.cfg.stateFile).setIssue(out.issueKey, { orchestrator: String(req.orchestrator).trim() })
-    }
-    if (!out.ok) {
-      const msg =
-        out.reason === "unknown-session" ? `账本里找不到这个工作会话：${sessionId || "（空）"}（先 foreman orch show / watch list 核对会话 id）`
-        : out.reason === "bad-session" ? "resume 需要执行会话 id：foreman resume <执行会话id>"
-        : out.reason === "no-worker" ? "这个会话没有可续跑的目标"
-        : `resume 失败：${out.reason}`
-      return fail("bad-request", msg)
-    }
-    return ok(out)
   }
 
   // clean：合并关单之后清残留 worktree、本地分支、工作会话与监听（幂等，重复调没副作用）。
