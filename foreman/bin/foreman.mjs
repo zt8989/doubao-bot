@@ -718,9 +718,18 @@ async function cmdClean(pos, flags) {
   const ref = String(pos[0] ?? flags.issue ?? "").trim()
   const all = truthy(flags.all)
   if (!ref && !all) throw new Error("用法：foreman clean <owner/name>#<单号>（或 --all）")
+  if (all && (flags.remote !== undefined || flags.local !== undefined)) {
+    throw new Error("clean --all 不支持 --remote/--local（--all 永远做全量收尾）")
+  }
+  // 远程/本地拆分：显式给了才限定范围，缺省两部都跑（--remote 关单摘标签；--local 清工作区/监听/归档）。
+  const hasScope = flags.remote !== undefined || flags.local !== undefined
+  const scope = hasScope
+    ? { remote: truthy(flags.remote), local: truthy(flags.local) }
+    : { remote: true, local: true }
+  if (!scope.remote && !scope.local) throw new Error("--remote / --local 至少要选一个")
   const port = await resolvePort(cfg)
   // 带上调用方会话 id：clean 会顺手归档这张单的编排会话，但要放过正在执行这条命令的那条。
-  const r = await callRaw(port, { id: "cli", cmd: "clean", issue: ref, all, ...callerOrchestratorArg(flags) }, 900000)
+  const r = await callRaw(port, { id: "cli", cmd: "clean", issue: ref, all, ...scope, ...callerOrchestratorArg(flags) }, 900000)
   if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
   return out({ ok: true, ...r })
 }

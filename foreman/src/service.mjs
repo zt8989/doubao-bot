@@ -2404,21 +2404,28 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     const ref = String(req.issue ?? "").trim()
     const m = ref.match(/([^#\s]+)#([0-9]+)$/)
     if (!m) return fail("bad-request", "clean 需要 --issue <owner/name>#<工单号>（或 --all）")
-    const out = await cleanIssue(ctx, { issueKey: `${m[1]}#${Number(m[2])}`, currentConv })
+    // 远程/本地拆分：显式给了 --remote/--local 才限定范围，缺省两部都跑。
+    const hasScope = req.remote !== undefined || req.local !== undefined
+    const scope = {
+      remote: hasScope ? req.remote === true : true,
+      local: hasScope ? req.local === true : true,
+    }
+    if (!scope.remote && !scope.local) return fail("bad-request", "--remote / --local 至少要选一个")
+    const out = await cleanIssue(ctx, { issueKey: `${m[1]}#${Number(m[2])}`, currentConv, ...scope })
     if (!out.ok) {
       return fail(
         out.reason === "pr-not-merged" ? "pr-not-merged" : "bad-request",
         out.reason === "pr-not-merged"
-          ? `${out.notes[0] ?? "还有 PR 没合并"}（先 foreman pr merge，全合完再 clean）`
+          ? `${out.notes[0] ?? "还有 PR 没合并"}（先 foreman pr merge，全合完再 clean --remote）`
           : `账本里没有这条单：${m[1]}#${m[2]}`,
       )
     }
-    ctx.log?.(`clean ${out.issueKey}：${out.notes.join("；") || "没有要清的"}`)
+    ctx.log?.(`clean ${out.issueKey}：${out.notes.join("；") || "没有要清的"}（scope ${scope.remote ? "远程" : ""}${scope.remote && scope.local ? "+" : ""}${scope.local ? "本地" : ""}）`)
     // 收尾即完成：立刻补下一张，不用等巡检 cron（编排合完调 clean 就是这条路径）。
     if (["done", "cleaned"].includes(String(new Book(ctx.cfg.stateFile).issue(out.issueKey)?.state ?? ""))) {
       kickPickup(ctx, `${out.issueKey} clean 收尾`)
     }
-    return ok(out)
+    return ok({ ...out, scope: out.scope ?? { remote: true, local: true } })
   }
 
   if (cmd === "pr merge") {

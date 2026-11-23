@@ -339,6 +339,71 @@ test("steerOrchestrator：账本留痕；没有编排会话直接回 no-orchestr
   }
 })
 
+test("clean --local：PR 未全合也能单独清本地（不关单、账本不动）", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-clean-local-"))
+  try {
+    const cfg = mkCfg(dir)
+    cfg.repos = [mkRepo(dir, "demo")]
+    const book = new Book(cfg.stateFile)
+    const gone = path.join(dir, "wt-9")
+    book.setIssue("yyzl/demo#9", {
+      state: "pr-open",
+      repo: "yyzl/demo",
+      prs: [{ repo: "yyzl/demo", pr: 9, branch: "fix/issue-9" }],
+      workspaces: [{ repo: "yyzl/demo", branch: "fix/issue-9", worktree: gone }],
+    })
+    const remoteCalls = []
+    const ctx = {
+      cfg,
+      dws: mkDws(),
+      log: () => {},
+      gitea: { closeIssue: async (r, n) => { remoteCalls.push(`${r}#${n}`) } },
+    }
+    const out = await cleanIssue(ctx, { issueKey: "yyzl/demo#9", remote: false, local: true })
+    assert.equal(out.ok, true)
+    assert.deepEqual(out.scope, { remote: false, local: true })
+    assert.deepEqual(remoteCalls, [], "--local 不碰远端")
+    assert.equal(out.notes.some((n) => /worktree 已不在/.test(n)), true, "本地工作区照常清")
+    const after = new Book(cfg.stateFile).issue("yyzl/demo#9")
+    assert.equal(after.state, "pr-open", "账本状态不动（还没关单）")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("clean --remote：PR 全合并时只关单摘标签，不删工作区", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-clean-remote-"))
+  try {
+    const cfg = mkCfg(dir)
+    cfg.repos = [mkRepo(dir, "demo")]
+    const book = new Book(cfg.stateFile)
+    const wt10 = path.join(dir, "wt-10")
+    fs.mkdirSync(wt10, { recursive: true })
+    fs.writeFileSync(path.join(wt10, ".git"), "gitdir: .\n")
+    book.setIssue("yyzl/demo#10", {
+      state: "pr-open",
+      repo: "yyzl/demo",
+      prs: [{ repo: "yyzl/demo", pr: 10, branch: "fix/issue-10" }],
+      workspaces: [{ repo: "yyzl/demo", branch: "fix/issue-10", worktree: wt10 }],
+    })
+    book.markPrSeen("yyzl/demo#10", { repo: "yyzl/demo", pr: 10, merged: true })
+    book.markMergeAsked("yyzl/demo#10", { pr: 10, status: "merged" })
+    const ctx = {
+      cfg,
+      dws: mkDws(),
+      log: () => {},
+      gitea: { closeIssue: async () => {}, editLabels: async () => ({ changed: true }) },
+    }
+    const out = await cleanIssue(ctx, { issueKey: "yyzl/demo#10", remote: true, local: false })
+    assert.equal(out.ok, true)
+    assert.deepEqual(out.scope, { remote: true, local: false })
+    assert.equal(new Book(cfg.stateFile).issue("yyzl/demo#10").state, "done")
+    assert.ok(fs.existsSync(path.join(dir, "wt-10")), "--remote 不动本地工作区")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("clean 拆分：pr-open 且 PR 全合并 → clean 关单（closeIssue + 摘标签 + done）再清尾", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-clean-close-"))
   try {

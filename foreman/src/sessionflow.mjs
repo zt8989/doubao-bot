@@ -418,7 +418,10 @@ export function nextStepLine({ issueKey = "", result = null, sessionId = "" } = 
 
 // clean：合并关单之后清残留 worktree、本地分支、工作会话、编排会话与监听。
 // 幂等：没有产物、已经清过都只回一条 notes；worktree 有未提交改动就保留（不删别人正在写的东西）。
-export async function cleanIssue(ctx, { issueKey, archive = true, currentConv = "" } = {}) {
+// clean 拆成远程/本地两段：remote = 关远端单 + 摘接单标签 + 账本 done（要求 PR 全合并）；
+// local = 删 worktree/本地分支、摘监听、归档会话记录。缺省两部都跑；只要显式给了 scope，
+// 没给的那部就不跑（--local 允许在 PR 未全合时单独清本地，branch -d 自带未合并保护）。
+export async function cleanIssue(ctx, { issueKey, archive = true, currentConv = "", remote = true, local = true } = {}) {
   const cfg = ctx?.cfg ?? {}
   const key = String(issueKey ?? "").trim()
   const book = new Book(cfg.stateFile)
@@ -428,9 +431,9 @@ export async function cleanIssue(ctx, { issueKey, archive = true, currentConv = 
   const keyNo = Number(String(key).split("#")[1] ?? 0)
   const notes = []
 
-  // 0) 关单（拆分 merge/clean 后归这里）：工单还没到终态时，要求它的 PR 已经全部合并——
-  //    没合完的单不清理、不关单（先去 `pr merge`）。已 done/cleaned 的直接走清尾。
-  if (!["done", "cleaned"].includes(String(rec.state ?? ""))) {
+  // 0) 远程关单：工单还没到终态时，要求它的 PR 已经全部合并——
+  //    没合完的单不关单（先去 `pr merge`）。已 done/cleaned 的直接跳过这步。
+  if (remote && !["done", "cleaned"].includes(String(rec.state ?? ""))) {
     const prs = (Array.isArray(rec.prs) && rec.prs.length
       ? rec.prs
       : Number(rec.pr) > 0
@@ -463,7 +466,9 @@ export async function cleanIssue(ctx, { issueKey, archive = true, currentConv = 
     book.setIssue(key, { state: "done", mergeError: "" })
     notes.push("工单置 done")
   }
+  if (!local) return { ok: true, issueKey: key, notes, cleanedAt: nowIso(), scope: { remote, local: false } }
 
+  // —— 本地清尾（worktree / 本地分支 / 监听 / 会话记录 / 归档）——
   // 1) 工作区与本地分支（一工程一工作区）
   const wsList = Array.isArray(rec.workspaces) && rec.workspaces.length
     ? rec.workspaces
@@ -560,13 +565,17 @@ export async function cleanIssue(ctx, { issueKey, archive = true, currentConv = 
     }
   }
 
-  // 3) 账本收尾：会话字段清空，已合并的单落到 done
-  const state = ["done", "pr-open", "cleaned"].includes(String(rec.state ?? "")) ? "done" : String(rec.state ?? "")
+  // 3) 账本收尾：会话字段清空。pr-open → done 只在远程段关过单（或本来已 done）时才落；
+  //    --local 单独清时工单还没关单，状态保持 pr-open 等 clean --remote。
+  const curState = String((book.issue(key) ?? {}).state ?? rec.state ?? "")
+  const state = remote || ["done", "cleaned"].includes(curState)
+    ? (["done", "pr-open", "cleaned"].includes(curState) ? "done" : curState)
+    : curState
   book.setIssue(key, { agent: "", agentConvId: "", cleanedAt: nowIso(), ...(state ? { state } : {}) })
   try {
     ctx.consoleStore?.sync(new Book(cfg.stateFile))
   } catch {}
-  return { ok: true, issueKey: key, notes, cleanedAt: nowIso() }
+  return { ok: true, issueKey: key, notes, cleanedAt: nowIso(), scope: { remote, local } }
 }
 
 // --all 时清哪些：终端态（已合并/已关单）且有工作区痕迹的单，
