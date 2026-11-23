@@ -819,6 +819,38 @@ fm-console > fm-sidebar {
 .side-session .side-session-name { overflow: hidden; text-overflow: ellipsis; }
 .side-sessions-empty { padding: 4px 10px; font-size: 11.5px; color: var(--dimmer, var(--dim)); }
 
+/* 会话菜单页（手机端 Chat 一级）：桌面隐藏，手机在 ≤620px 断点按 data-pane 显示 */
+main > fm-session-menu { display: none; }
+.session-menu { display: flex; flex-direction: column; gap: 2px; padding: 0; overflow: hidden; }
+.session-menu .menu-head { padding: 14px 16px 8px; }
+.session-menu .menu-head .hint { margin: 4px 0 0; }
+.menu-item {
+  appearance: none; display: flex; align-items: center; gap: 12px;
+  width: 100%; padding: 13px 16px; border: none; border-top: 1px solid var(--line, color-mix(in srgb, var(--dim) 12%, transparent));
+  background: transparent; color: var(--text); font: 14px inherit; text-align: left; cursor: pointer;
+}
+.menu-item:active { background: var(--panel-2); }
+.menu-item.is-router { border-top: none; }
+.menu-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dimmer, var(--dim)); flex: none; }
+.menu-dot.on { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
+.menu-dot.done { background: color-mix(in srgb, var(--dim) 55%, transparent); }
+.menu-dot.off { background: color-mix(in srgb, var(--red, #ef4444) 65%, transparent); }
+.menu-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.menu-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu-sub { font-size: 11.5px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu-arrow { color: var(--dimmer, var(--dim)); font-size: 18px; flex: none; }
+.menu-empty { padding: 18px 16px; font-size: 12.5px; color: var(--dimmer, var(--dim)); }
+.menu-nav { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px 16px; margin-top: auto; border-top: 1px solid var(--line, color-mix(in srgb, var(--dim) 12%, transparent)); }
+.menu-chip {
+  appearance: none; padding: 8px 14px; border-radius: 999px; border: 1px solid var(--line, color-mix(in srgb, var(--dim) 20%, transparent));
+  background: transparent; color: var(--dim); font: 12.5px inherit; cursor: pointer;
+}
+.menu-chip:active { color: var(--text); background: var(--panel-2); }
+
+/* 汉堡按钮与滑出层：桌面隐藏 */
+.nav-burger { display: none; }
+.nav-backdrop { display: none; }
+
 .side-link,
 .side-collapse {
   appearance: none;
@@ -1159,17 +1191,35 @@ fm-chat { display: flex; flex: 1; width: 100%; min-height: 0; }
   .meta-item { font-size: 11.5px; padding: 3px 8px; }
   .meta-item.mono { font-variant-numeric: tabular-nums; }
 
-  /* 侧栏改成顶部一条可横向滚动的导航，不再占掉正文宽度 */
+  /* 手机端两级导航：侧栏收成滑出层（汉堡开关），Chat 一级菜单/二级聊天 */
   fm-console { flex-direction: column; }
-  fm-console > fm-sidebar { flex: 0 0 auto; }
-  .sidebar { width: 100%; height: auto; padding: 6px; border-width: 0 0 1px; flex-direction: column; }
-  .sidebar .brand { padding: 4px 8px 10px; }
-  .side-nav { flex-direction: row; overflow-x: auto; gap: 4px; scrollbar-width: none; }
-  .side-nav::-webkit-scrollbar { display: none; }
-  .sidebar .side-text { display: none; }
-  .side-link { width: auto; flex: 0 0 auto; justify-content: center; padding: 8px 12px; }
+  .nav-burger { display: inline-flex; align-items: center; justify-content: center; width: 38px; height: 38px; padding: 0; flex: none; }
+  .nav-burger svg { width: 20px; height: 20px; }
+  .nav-backdrop {
+    display: block; position: fixed; inset: 0; z-index: 40;
+    background: color-mix(in srgb, black 45%, transparent);
+  }
+  fm-console > fm-sidebar {
+    position: fixed; z-index: 41; top: 0; bottom: 0; left: 0;
+    width: min(78vw, 300px);
+    transform: translateX(-105%);
+    transition: transform 0.2s ease;
+    visibility: hidden;
+  }
+  fm-console > fm-sidebar.is-open { transform: none; visibility: visible; }
+  .sidebar { width: 100%; height: 100%; padding: 10px; border-width: 0 1px 0 0; }
   .side-collapse { display: none; }
+  .side-sessions { max-height: none; flex: 1; overflow-y: auto; }
   .main-col { flex: 1; min-height: 0; }
+
+  /* Chat 两级：无选中 = 全屏会话菜单；选中 = 全屏聊天（顶栏有「‹ 会话列表」返回） */
+  main[data-pane="menu"] > fm-chat { display: none; }
+  main[data-pane="chat"] > fm-session-menu { display: none; }
+  main[data-pane="menu"] > fm-session-menu { display: flex; flex: 1; min-height: 0; }
+  main.is-chat { display: flex; flex-direction: column; }
+  main.is-chat > fm-chat { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  main.is-chat > fm-chat .chat-panel { flex: 1; min-height: 0; }
+  .chat-back { font-size: 12.5px; }
 
   main { padding: 0; gap: 0; max-width: none; }
 

@@ -221,6 +221,8 @@ class FmHead extends LitElement {
     today: { type: String },
     view: { type: String },
     chatState: { attribute: false },
+    // Chat 视图手机端：非空 = 正在看具体会话，顶栏出「‹ 会话」返回按钮。
+    chatConv: { type: String },
   }
   createRenderRoot() {
     return this
@@ -240,15 +242,20 @@ class FmHead extends LitElement {
     const chatStatusClass = cs.running || cs.pending ? "is-running" : ""
     return html`
       <header class="topbar">
+        <button class="ghost nav-burger" type="button" aria-label="打开导航" @click=${() => emit(this, "nav-toggle")}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+        </button>
         ${this.view === "chat"
           ? html`<div class="topbar-title">
-              <div class="eyebrow">Router Agent</div>
+              <div class="eyebrow">${this.chatConv ? "会话观察（只读）" : "Router Agent"}</div>
               <h2>Chat</h2>
             </div>`
           : html`<div class="topbar-title">
               <h2>${({ inbox: "Inbox", outbox: "Outbox", tasks: "Tasks", sessions: "智能体会话", schedules: "Schedule", operations: "操作日志" })[this.view] || "Foreman"}</h2>
             </div>`}
         <div class="meta">
+          ${this.view === "chat" && this.chatConv ? html`
+            <button class="ghost chat-back" type="button" @click=${() => emit(this, "chat-target", { conv: "" })}>‹ 会话列表</button>` : ""}
           ${this.view === "chat" ? html`
             <span class=${"chat-status " + chatStatusClass}>${chatStatusText}</span>
             <button class="ghost" type="button" ?disabled=${cs.loading} @click=${() => this.refreshChat()}>
@@ -1248,6 +1255,47 @@ class FmAgentSessions extends LitElement {
   }
 }
 
+/* ---------------- 手机端会话菜单（一级：全屏列表，点进二级聊天） ---------------- */
+class FmSessionMenu extends LitElement {
+  static properties = { sessions: { attribute: false }, carrier: { type: String } }
+  createRenderRoot() {
+    return this
+  }
+  render() {
+    const rows = this.sessions || []
+    const statusLabel = { running: "进行中", done: "已完成", error: "出错" }
+    return html`
+      <section class="panel session-menu">
+        <div class="menu-head">
+          <div class="eyebrow">会话</div>
+          <p class="hint">点一条进完整聊天；消息发送走 Router（当前）</p>
+        </div>
+        <button class="menu-item is-router" @click=${() => emit(this, "chat-target", { conv: "" })}>
+          <span class="menu-dot on"></span>
+          <span class="menu-main">
+            <span class="menu-name">Router（当前）</span>
+            <span class="menu-sub">可发消息 · 唯一编排者</span>
+          </span>
+          <span class="menu-arrow">›</span>
+        </button>
+        ${rows.slice(0, 50).map((s) => html`
+          <button class="menu-item" @click=${() => emit(this, "chat-target", { conv: s.convId })}>
+            <span class=${"menu-dot " + (s.status === "running" ? "on" : s.status === "error" ? "off" : "done")}></span>
+            <span class="menu-main">
+              <span class="menu-name">${s.name}</span>
+              <span class="menu-sub">${statusLabel[s.status] || s.status}${s.updatedAt ? ` · ${s.updatedAt.replace("T", " ").slice(5, 16)}` : ""}${s.replyTail ? ` · ${s.replyTail.slice(-60).replace(/\s+/g, " ")}` : ""}</span>
+            </span>
+            <span class="menu-arrow">›</span>
+          </button>`)}
+        ${rows.length ? "" : html`<div class="menu-empty">还没有会话留痕；zcode 载体派单后出现在这里</div>`}
+        <div class="menu-nav">
+          ${[["inbox", "Inbox"], ["tasks", "Tasks"], ["sessions", "Sessions"], ["schedules", "Schedule"], ["operations", "日志"]].map(([id, label]) => html`
+            <button class="menu-chip" @click=${() => emit(this, "view-set", { view: id })}>${label}</button>`)}
+        </div>
+      </section>`
+  }
+}
+
 /* ---------------- 根组件：取数、主题、轮询 ---------------- */
 class FmConsole extends LitElement {
   static properties = {
@@ -1287,6 +1335,7 @@ class FmConsole extends LitElement {
     agentSessions: { attribute: false },
     agentCarrier: { type: String },
     chatConv: { type: String },
+    navOpen: { type: Boolean },
     schedBusy: { type: String },
     schedError: { type: String },
     schedNote: { type: String },
@@ -1373,6 +1422,7 @@ class FmConsole extends LitElement {
     }
     this._onView = (e) => {
       this.view = e.detail.view
+      this.navOpen = false
       if (this.view === "inbox" || this.view === "outbox") this.loadQueue(this.view)
       if (this.view === "schedules") this.loadSchedules()
       if (this.view === "operations") this.loadOperations()
@@ -1380,11 +1430,17 @@ class FmConsole extends LitElement {
       // Chat 视图侧边栏的会话列表也用同一份账本数据。
       if (this.view === "chat") this.loadAgentSessions()
     }
-    // 侧边栏点选会话：切 Chat 的观察目标（空 = router 当前会话）。
+    // 侧边栏点选会话：切 Chat 的观察目标（空 = router 当前会话）。手机端顺带开聊天二级页。
     this._onChatTarget = (e) => {
       this.chatConv = String(e.detail.conv ?? "")
+      this.navOpen = false
     }
     this.addEventListener("chat-target", this._onChatTarget)
+    // 顶栏汉堡：手机端滑出导航层。
+    this._onNavToggle = () => {
+      this.navOpen = !this.navOpen
+    }
+    this.addEventListener("nav-toggle", this._onNavToggle)
     this._onSidebarToggle = () => {
       this.sidebarCollapsed = !this.sidebarCollapsed
       try {
@@ -1764,8 +1820,11 @@ class FmConsole extends LitElement {
   }
 
   render() {
+    const watching = Boolean(this.chatConv)
     return html`
+      ${this.navOpen ? html`<div class="nav-backdrop" @click=${() => (this.navOpen = false)}></div>` : ""}
       <fm-sidebar
+        class=${this.navOpen ? "is-open" : ""}
         .view=${this.view}
         .collapsed=${this.sidebarCollapsed}
         .alive=${this.data?.service?.alive !== false}
@@ -1781,10 +1840,13 @@ class FmConsole extends LitElement {
           .today=${this.data?.today || ""}
           .view=${this.view}
           .chatState=${this.chatState || {}}
+          .chatConv=${this.chatConv || ""}
         ></fm-head>
-        <main class=${this.view === "chat" ? "is-chat" : ""}>
+        <main class=${this.view === "chat" ? "is-chat" : ""} data-pane=${watching ? "chat" : "menu"}>
         ${this.view === "chat"
-          ? html`<fm-chat .conv=${this.chatConv || ""}></fm-chat>`
+          ? html`
+              <fm-session-menu .sessions=${this.agentSessions || []} .carrier=${this.agentCarrier || ""}></fm-session-menu>
+              <fm-chat .conv=${this.chatConv || ""}></fm-chat>`
           : this.view === "schedules"
           ? html`<fm-schedules .schedules=${this.schedules} .workHours=${this.workHours} .busy=${this.schedBusy} .error=${this.schedError} .note=${this.schedNote}></fm-schedules>`
           : this.view === "operations"
@@ -1861,4 +1923,5 @@ customElements.define("fm-queue", FmQueue)
 customElements.define("fm-schedules", FmSchedules)
 customElements.define("fm-operations", FmOperations)
 customElements.define("fm-agent-sessions", FmAgentSessions)
+customElements.define("fm-session-menu", FmSessionMenu)
 customElements.define("fm-console", FmConsole)
