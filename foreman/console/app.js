@@ -221,10 +221,10 @@ class FmHead extends LitElement {
     today: { type: String },
     view: { type: String },
     chatState: { attribute: false },
-    // 手机端 Chat 两级：chatInto=true 已进入二级聊天页（顶栏出「‹ 会话列表」返回）；
-    // chatConv 非空 = 正在看具体会话（eyebrow 标只读观察）。
+    // 手机端 Chat 两级：chatInto=true 已进入二级聊天页——顶栏整条换成「← + 会话标题 + 主题」。
     chatInto: { type: Boolean },
     chatConv: { type: String },
+    chatTitle: { type: String },
   }
   createRenderRoot() {
     return this
@@ -242,8 +242,9 @@ class FmHead extends LitElement {
     const cs = this.chatState || {}
     const chatStatusText = cs.running ? "处理中" : cs.pending ? "等待 Worker" : "已连接"
     const chatStatusClass = cs.running || cs.pending ? "is-running" : ""
+    const chatIntoView = this.view === "chat" && this.chatInto === true
     return html`
-      <header class="topbar">
+      <header class=${"topbar" + (chatIntoView ? " is-chat-into" : "")}>
         <button class="ghost nav-burger" type="button" aria-label="打开导航" @click=${() => emit(this, "nav-toggle")}>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
         </button>
@@ -256,8 +257,6 @@ class FmHead extends LitElement {
               <h2>${({ inbox: "Inbox", outbox: "Outbox", tasks: "Tasks", sessions: "智能体会话", schedules: "Schedule", operations: "操作日志" })[this.view] || "Foreman"}</h2>
             </div>`}
         <div class="meta">
-          ${this.view === "chat" && this.chatInto ? html`
-            <button class="ghost chat-back" type="button" @click=${() => emit(this, "chat-target", { conv: "", back: true })}>‹ 会话列表</button>` : ""}
           ${this.view === "chat" ? html`
             <span class=${"chat-status " + chatStatusClass}>${chatStatusText}</span>
             <button class="ghost" type="button" ?disabled=${cs.loading} @click=${() => this.refreshChat()}>
@@ -283,6 +282,12 @@ class FmHead extends LitElement {
           </span>` : ""}
           <fm-theme-switch .mode=${this.mode}></fm-theme-switch>
         </div>
+        <!-- 手机端聊天二级页：整条替换常规标题栏 = ← + 会话标题 + 主题（CSS 按 is-chat-into 切换） -->
+        <button class="ghost chat-back-icon" type="button" aria-label="返回会话列表" @click=${() => emit(this, "chat-target", { conv: "", back: true })}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+        </button>
+        <div class="topbar-title chat-title"><h2>${this.chatTitle || "Chat"}</h2></div>
+        <fm-theme-switch class="chat-theme" .mode=${this.mode}></fm-theme-switch>
       </header>`
   }
 }
@@ -1828,6 +1833,10 @@ class FmConsole extends LitElement {
   }
 
   render() {
+    // 手机端聊天二级页顶栏标题：观察会话名，Router（当前）会话就叫 Router Agent。
+    const chatTitle = this.chatConv
+      ? (this.agentSessions || []).find((s) => s.convId === this.chatConv)?.name || this.chatConv
+      : "Router Agent"
     return html`
       ${this.navOpen ? html`<div class="nav-backdrop" @click=${() => (this.navOpen = false)}></div>` : ""}
       <fm-sidebar
@@ -1849,6 +1858,7 @@ class FmConsole extends LitElement {
           .chatState=${this.chatState || {}}
           .chatInto=${this.chatInto === true}
           .chatConv=${this.chatConv || ""}
+          .chatTitle=${chatTitle}
         ></fm-head>
         <main class=${this.view === "chat" ? "is-chat" : ""} data-pane=${this.chatInto ? "chat" : "menu"}>
         ${this.view === "chat"
