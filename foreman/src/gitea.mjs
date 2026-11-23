@@ -41,6 +41,13 @@ export const listIssues = wrap(async (repo, { state = "open", label = "", page =
 
 export const viewIssue = wrap(async (repo, n) => api.viewIssue(repo, n))
 
+// 建单：一条龙的起点。labels/assignees 走 Gitea REST 的 id/用户名数组，先不暴露（要时再加解析）。
+export const createIssue = wrap(async (repo, { title, body = "" } = {}) =>
+  api.createIssue(repo, { title, body }))
+
+// 改单字段（标题/正文/分支 ref…）：Issue.ref（右侧分支）是 Gitea 特有，适配器按能力位暴露。
+export const editIssue = wrap(async (repo, n, patch) => api.editIssue(repo, n, patch))
+
 export const commentIssue = wrap(async (repo, n, body) => api.commentIssue(repo, n, body))
 
 export const closeIssue = wrap(async (repo, n) => api.setIssueState(repo, n, "closed"))

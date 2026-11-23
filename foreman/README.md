@@ -41,6 +41,7 @@ router agent 决定接单时，每张工单仍有自己的一条主智能体会�
 - **Foreman 的边界**：默认主链路只用 Foreman 提供工单、工作区、PR、邮件、账本和清理能力。编码 sub agent 只调用 `ws add` 与 `pr open`；主智能体不调用 `dispatch`、`resume`、PR 创建或合并。
 - **dws 的边界**：dws 可以承载主智能体及既有外部会话，不用于创建、续问或中转编码与对抗审查 sub agent。
 - **旧路径已删**：`foreman dispatch/resume/orch start/sessions` 命令已移除；`task.update` 与外部工作会话监听仅兼容读取。
+- **一条龙（无 agent 也能走完）**：`issue create [--ws]` → `ws add`（账本没建档会回查 tracker 自举成 planned，并把分支写进工单右侧 ref——走 tracker 能力位，GitHub 类 tracker 没有 ref 字段时自动跳过）→ 写码 → `pr open` → 验收 → `pr merge`（全工程合完才关单+清 worktree/分支）。执行载体选 `agent: "dws"|"noop"`（豆包只是可选 agent 之一）；noop 下派单类命令（hand/run/pickup/route/decide）假成功不干活，别用。
 - **收尾**：最终验收与合并由人类/独立验收系统完成；保护分支要求人工批准和 CI 通过。确认全部 PR 合并后，`foreman clean <键>` 清理工作区与监听。
 
 配置（默认已开，不用写也能用）：
@@ -404,6 +405,8 @@ foreman run --once               # 跑一轮：捞到单交给编排会话（han
 foreman run --direct --once      # 这一轮自己派活（老行为，不交给编排）
 foreman run --notify <会话id|标题>  # 这一轮派出的会话，登记监听时通知目标写谁
 foreman run --no-notify          # 这一轮不登记监听，因此不会有通知（连同其它参数一起用）
+foreman issue create --repo R --title <标题> [--body <正文>] [--ws]
+                                 # 一条龙起点：tracker 建单 + 账本建档；--ws 立即开工单所在仓工作区
 foreman orch show                 # 每条编排会话绑了哪些工作会话、最近 steer 了什么
 foreman hand <owner/name>#N [--fresh]  # 默认复用本单编排；确认原编排失联时才 --fresh 重派（支持 --orchestrator）
 foreman clean <owner/name>#N     # 合并关单后清 worktree / 分支 / 工作会话（幂等）

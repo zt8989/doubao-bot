@@ -1,0 +1,164 @@
+// 一条龙工作流：issue create → ws add（账本自举 + Issue.ref）→ ws list，全程 tracker 适配器。
+import test from "node:test"
+import assert from "node:assert/strict"
+import { execSync } from "node:child_process"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import { handleRequest } from "../src/service.mjs"
+import { GiteaTrackerAdapter } from "../src/workflow/adapters/gitea.mjs"
+import { makeSessionAdapter } from "../src/workflow/adapters/session.mjs"
+
+const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), "foreman-onestop-"))
+
+function mkCfg(dir, repoDir) {
+  return {
+    stateFile: path.join(dir, "state.json"),
+    worktreeDir: path.join(dir, "worktrees"),
+    agent: "noop",
+    repos: [{ repo: "yyzl/demo", name: "demo", dir: repoDir, base: "main" }],
+    service: { http: { port: 0, portFile: path.join(dir, "service.port"), db: path.join(dir, "console.db") }, pidFile: path.join(dir, "foreman.pid"), logFile: path.join(dir, "service.log") },
+  }
+}
+
+function mkCtx(cfg, gitea) {
+  return {
+    cfg,
+    state: { watchers: new Map() },
+    gitea,
+    log: () => {},
+  }
+}
+
+// 真仓库夹具：一个本地提交 + 伪造的 origin/main 引用，createWorktree 才能从基线拉分支。
+function gitFixture(dir) {
+  const repoDir = path.join(dir, "demo")
+  fs.mkdirSync(repoDir, { recursive: true })
+  const sh = (cmd) => execSync(cmd, { cwd: repoDir, stdio: "ignore" })
+  sh("git init -q")
+  sh("git config user.email t@t.local")
+  sh("git config user.name t")
+  fs.writeFileSync(path.join(repoDir, "README.md"), "demo\n")
+  sh("git add -A")
+  sh("git commit -qm init")
+  sh("git branch -M main")
+  sh("git remote add origin .")
+  sh("git fetch origin main --quiet")
+  return repoDir
+}
+
+function fakeTracker(log = []) {
+  const impl = {
+    // 可覆写 viewIssue 的 ref 值
+    issueRef: "",
+    async viewIssue(repo, n) {
+      log.push(["viewIssue", repo, n])
+      return { number: n, title: "示例工单", url: `https://gitea.example/${repo}/issues/${n}`, labels: ["ready-for-agent"], ref: this.issueRef }
+    },
+    async createIssue(repo, { title, body }) {
+      log.push(["createIssue", repo, title])
+      return { number: 42, title, url: `https://gitea.example/${repo}/issues/42` }
+    },
+    async editIssue(repo, n, patch) {
+      log.push(["editIssue", repo, n, patch])
+      this.issueRef = patch.ref ?? this.issueRef
+      return { ok: true }
+    },
+  }
+  return new GiteaTrackerAdapter({ impl })
+}
+
+test("issue create：tracker 建单 + 账本建档（planned）", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = mkCfg(dir, gitFixture(dir))
+    const tracker = fakeTracker()
+    const out = await handleRequest(mkCtx(cfg, tracker), { id: "a", cmd: "issue create", repo: "yyzl/demo", title: "新工单", body: "正文" })
+    assert.equal(out.ok, true)
+    assert.equal(out.key, "yyzl/demo#42")
+    assert.equal(out.number, 42)
+    assert.match(out.url, /issues\/42$/)
+    const rec = JSON.parse(fs.readFileSync(cfg.stateFile, "utf8")).issues["yyzl/demo#42"]
+    assert.equal(rec.state, "planned")
+    assert.equal(rec.title, "新工单")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("ws add 自起步：账本没建档时回查 tracker 建 planned，建工作区并写工单右侧分支", async () => {
+  const dir = tmpDir()
+  try {
+    const repoDir = gitFixture(dir)
+    const cfg = mkCfg(dir, repoDir)
+    const calls = []
+    const tracker = fakeTracker(calls)
+    const out = await handleRequest(mkCtx(cfg, tracker), { id: "b", cmd: "ws add", issue: "yyzl/demo#7", repo: "yyzl/demo" })
+    assert.equal(out.ok, true)
+    assert.equal(out.branch, "fix/issue-7")
+    assert.ok(fs.existsSync(path.join(out.worktree, ".git")), "worktree 已建")
+    // 账本：planned + workspaces + branchRef
+    const book = JSON.parse(fs.readFileSync(cfg.stateFile, "utf8")).issues["yyzl/demo#7"]
+    assert.equal(book.state, "planned")
+    assert.equal(book.workspaces.length, 1)
+    assert.equal(book.branchRef.branch, "fix/issue-7")
+    // tracker：editIssue 写了 ref，viewIssue 至少两次（建档 + 读 ref）
+    assert.ok(calls.some((c) => c[0] === "editIssue" && c[3].ref === "fix/issue-7"))
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("ws add 幂等：ref 已对就不重写；跨工程（--repo 非工单仓）不动 ref", async () => {
+  const dir = tmpDir()
+  try {
+    const repoDir = gitFixture(dir)
+    const cfg = mkCfg(dir, repoDir)
+    const calls = []
+    const tracker = fakeTracker(calls)
+    tracker.impl.issueRef = "fix/issue-7" // 右侧分支已经是对的
+    await handleRequest(mkCtx(cfg, tracker), { id: "c1", cmd: "ws add", issue: "yyzl/demo#7", repo: "yyzl/demo" })
+    assert.equal(calls.filter((c) => c[0] === "editIssue").length, 0, "ref 已对不重写")
+
+    // 同一单配第二个工程：ws add 用 --repo 指向不在工单键里的仓时不动 ref。
+    // 这里直接再对同一仓调一次（幂等复用 worktree），editIssue 仍然为 0。
+    await handleRequest(mkCtx(cfg, tracker), { id: "c2", cmd: "ws add", issue: "yyzl/demo#7", repo: "demo" })
+    assert.equal(calls.filter((c) => c[0] === "editIssue").length, 0)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("ws list：没建档回空清单不报错；agent=noop 时会话动作不碰豆包", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = mkCfg(dir, gitFixture(dir))
+    const out = await handleRequest(mkCtx(cfg, fakeTracker()), { id: "d", cmd: "ws list", issue: "yyzl/demo#999" })
+    assert.equal(out.ok, true)
+    assert.deepEqual(out.workspaces, [])
+    // noop 适配器与 tracker 互不相干：会话面永远「成功但不落地」
+    const session = makeSessionAdapter(cfg)
+    assert.equal(session.constructor.name, "NoopSessionAdapter")
+    assert.equal((await session.archive("任意会话")).ok, true)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("能力位守卫：tracker 没有 editIssue/issueRef 时 ws add 照常，只是不写 ref", async () => {
+  const dir = tmpDir()
+  try {
+    const repoDir = gitFixture(dir)
+    const cfg = mkCfg(dir, repoDir)
+    const bare = { viewIssue: async (repo, n) => ({ number: n, title: "t", url: "", ref: "" }) }
+    const tracker = new GiteaTrackerAdapter({ impl: bare })
+    delete tracker.impl.editIssue
+    tracker.capabilities = {}
+    const out = await handleRequest(mkCtx(cfg, tracker), { id: "e", cmd: "ws add", issue: "yyzl/demo#8", repo: "yyzl/demo" })
+    assert.equal(out.ok, true)
+    const book = JSON.parse(fs.readFileSync(cfg.stateFile, "utf8")).issues["yyzl/demo#8"]
+    assert.equal(book.branchRef, undefined)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

@@ -59,6 +59,8 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman mail reject  <owner/repo>#<N> [--by <人>] [--note <原因>]
   foreman ws add --repo <工程名|owner/name> --issue <owner/name>#<单号> [--base <基线>]
   foreman ws list --issue <owner/name>#<单号>
+  foreman issue create --repo R --title <标题> [--body <正文>] [--ws]
+                                      一条龙起点：建单 + 账本建档；--ws 立即开工单所在仓的工作区
   foreman issue comment <N> --repo R --body <正文>
   foreman issue close <N> --repo R
   foreman run   [--once] [--dry-run] [--direct] [--repo <名字|owner/name>] [--notify <会话id|标题>] [--no-notify] [-c <配置>]
@@ -379,7 +381,20 @@ async function cmdIssue(pos, flags) {
   const sub = pos.shift()
   const repo = strFlag(flags.repo)
   const number = Number(pos[0] ?? strFlag(flags.number)) || 0
-  if (!sub) throw new Error("用法：foreman issue comment <N> --repo R --body <正文> | foreman issue close <N> --repo R")
+  if (!sub) throw new Error("用法：foreman issue create --repo R --title <标题> [--body <正文>] [--ws]\n      foreman issue comment <N> --repo R --body <正文> | foreman issue close <N> --repo R")
+  if (sub === "create") {
+    const title = (strFlag(flags.title) || pos.join(" ")).trim()
+    if (!repo || !title) throw new Error("issue create 需要 --repo <owner/name> 与 --title <标题>")
+    const r = await callRaw(resolveTarget(cfg), { id: "cli", cmd: "issue create", repo, title, body: strFlag(flags.body) }, 60000)
+    if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
+    let ws = null
+    if (truthy(flags.ws)) {
+      // 一条龙：建完单立刻开工单所在仓的工作区（该仓要在配置 repos[] 里）。
+      ws = await callRaw(resolveTarget(cfg), { id: "cli", cmd: "ws add", issue: r.key, repo }, 300000)
+      if (!ws.ok) throw new Error(`ws add 失败：${ws.error ?? "error"}：${ws.message ?? ""}`)
+    }
+    return out({ ok: true, ...r, ...(ws ? { ws: { repo: ws.repo, branch: ws.branch, worktree: ws.worktree } } : {}) })
+  }
   if (!repo || !number) throw new Error("issue 子命令需要 --repo 与工单号")
   if (sub === "comment") {
     const body = strFlag(flags.body) || pos.slice(1).join(" ")
@@ -400,7 +415,7 @@ async function cmdIssue(pos, flags) {
     if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
     return out({ ok: true, ...r })
   }
-  throw new Error(`未知 issue 子命令：${sub}（comment|close）`)
+  throw new Error(`未知 issue 子命令：${sub}（create|comment|close）`)
 }
 
 // 手动催一轮自动巡检：服务侧按 pickup 配置捞一轮（不影响命令行 run 的锁）。

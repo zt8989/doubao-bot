@@ -33,7 +33,7 @@ import { acceptanceGate, detectUiChange, mailPollOnce, requestAcceptance, mailAc
 import { inflightIssues } from "./planner.mjs"
 import { routerOnce } from "./core/router.mjs"
 import { dreamOnce } from "./dreaming.mjs"
-import { listPulls, viewPr, mergePr, closeIssue, createPr, commentIssue, READY_FOR_AGENT } from "./gitea.mjs"
+import { listPulls, viewPr, mergePr, closeIssue, createPr, commentIssue, viewIssue, createIssue, editIssue, READY_FOR_AGENT } from "./gitea.mjs"
 import { ConsoleStore } from "./console.mjs"
 import { InboxStore, AgentWorker, ScheduleRunner } from "./core/inbox.mjs"
 import { OutboxStore, OutboxDispatcher } from "./core/outbox.mjs"
@@ -752,7 +752,7 @@ export async function pickIssue(ctx, { repo = "", number = 0 } = {}) {
 // 起服务：HTTP 单通道（CLI 的 RPC + 控制台页面同一个端口），端口写到文件里给 CLI 读。
 // book 参数只用于初始加载，poll/write 时一律 new Book 重开。
 // gitea 只在 PR 监听里用，测试可直接注入假的 { listPulls }。
-export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea = { listPulls, viewPr, mergePr, closeIssue, createPr, commentIssue }, mail = null }) {
+export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea = { listPulls, viewPr, mergePr, closeIssue, createPr, commentIssue, viewIssue, createIssue, editIssue }, mail = null }) {
   const paths = servicePaths(cfg)
   fs.mkdirSync(path.dirname(paths.pidFile), { recursive: true })
   fs.mkdirSync(path.dirname(paths.logFile), { recursive: true })
@@ -2185,8 +2185,26 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     const repoCfg = (ctx.cfg.repos ?? []).find((r) => r.repo === repoRef || r.name === repoRef)
     if (!repoCfg) return fail("bad-request", `配置里没有这个工程：${repoRef || "（空）"}`)
     const book0 = new Book(ctx.cfg.stateFile)
-    const rec = book0.issue(key)
-    if (!rec) return fail("bad-request", `没处理过这条工单：${key}（先核对 --issue 的仓库与单号）`)
+    let rec = book0.issue(key)
+    if (!rec) {
+      // 一条龙/noop 自起步：账本还没有这条单（从没 hand 过）时，回查 tracker 建档成 planned，
+      // 工作区链路就能独立于派单流程使用。回查失败（单号不存在/无权限）才报错，不凭空造单。
+      try {
+        const issue = await ctx.gitea.viewIssue(String(m[1]), Number(m[2]))
+        book0.setIssue(key, {
+          state: "planned",
+          issue: Number(m[2]),
+          title: String(issue?.title ?? ""),
+          url: String(issue?.url ?? ""),
+          repo: String(m[1]),
+          labels: Array.isArray(issue?.labels) ? issue.labels : [],
+        })
+        rec = book0.issue(key)
+        ctx.log?.(`ws add ${key}：账本没有这条单，已按 tracker 工单建档（planned）`)
+      } catch (e) {
+        return fail("gitea-error", `账本里没有这条单，回查工单也失败：${String(e?.message ?? e).slice(0, 300)}`)
+      }
+    }
     const prev = findWorkspace(rec, repoCfg.repo)
     const branch = prev?.branch || issueBranch({ number: Number(m[2]) }, rec.title ?? "")
     const base = String(req.base ?? "").trim() || repoCfg.base
@@ -2219,12 +2237,31 @@ export async function handleRequest(ctx, req) {  const id = req?.id
       backend: wt.backend,
       addedAt: nowIso(),
     })
+    // 更新工单右侧分支字段（Gitea Issue.ref）：只认工单所在仓库的那条工作区，值已对就不重写。
+    // 走 tracker 适配器 + issueRef 能力位——GitHub/Jira 类没有这字段，自动跳过不报错。
+    let branchRef = rec.branchRef ?? null
+    const refOn = repoCfg.repo === keyRepo
+      && typeof ctx.gitea?.editIssue === "function"
+      && ctx.gitea?.capabilities?.issueRef !== false
+    if (refOn) {
+      try {
+        const cur = await ctx.gitea.viewIssue(String(m[1]), Number(m[2]))
+        if (String(cur?.ref ?? "") !== branch) {
+          await ctx.gitea.editIssue(String(m[1]), Number(m[2]), { ref: branch })
+          branchRef = { branch, at: nowIso() }
+          ctx.log?.(`ws add ${key}：已指定工单右侧分支 ${branch}`)
+        }
+      } catch (e) {
+        ctx.log?.(`ws add ${key}：工单右侧分支更新失败，工作区照常：${String(e?.message ?? e).slice(0, 200)}`)
+      }
+    }
     book0.setIssue(key, {
       workspaces,
       repo: rec.repo || keyRepo,
       // 主仓库那条老字段保持原样：没有才补，别让后加的工程覆盖掉。
       ...(rec.branch ? {} : { branch: prev?.branch || workspaces[0]?.branch || branch }),
       ...(rec.worktree ? {} : { worktree: workspaces[0]?.worktree || wt.path }),
+      ...(branchRef ? { branchRef } : {}),
     })
     try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
     ctx.log?.(`ws add ${key}：${repoCfg.repo} → ${wt.path}（${branch}，${wt.reused ? "复用" : `新建·${wt.backend}`}）`)
@@ -2246,7 +2283,8 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     if (!m) return fail("bad-request", `ws list 的 --issue 要写成 <owner/name>#<工单号>，收到：${issueRef || "（空）"}`)
     const key = `${m[1]}#${Number(m[2])}`
     const rec = new Book(ctx.cfg.stateFile).issue(key)
-    if (!rec) return fail("bad-request", `没处理过这条工单：${key}`)
+    // 没建档 ≠ 出错：一条龙/noop 下工单可能还没开过工作区，回空清单。
+    if (!rec) return ok({ key, workspaces: [], prs: [] })
     return ok({
       key,
       workspaces: (rec.workspaces ?? []).map((w) => ({ repo: w.repo, branch: w.branch, worktree: w.worktree })),
@@ -2543,6 +2581,34 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     })
     ctx.log?.(`验收通过（人工）：${key} · ${by}${note ? ` · ${note}` : ""}`)
     return ok({ key, status: "approved", by })
+  }
+
+  // issue create：一条龙的起点——tracker 建单 + 账本建档（planned）。之后 ws add / pr open / pr merge
+  // 都认这个键。tracker 是适配器：换 GitHub/Jira 时实现各自 createIssue 即可，本段不感知差异。
+  if (cmd === "issue create") {
+    const repo = String(req.repo ?? "").trim()
+    const title = String(req.title ?? "").trim()
+    const body = String(req.body ?? "")
+    if (!repo || !title) return fail("bad-request", "issue create 需要 repo 与 title")
+    if (typeof ctx.gitea?.createIssue !== "function") return fail("not-supported", "当前 tracker 适配器不支持建单")
+    let issue
+    try {
+      issue = await ctx.gitea.createIssue(repo, { title, body })
+    } catch (e) {
+      return fail("gitea-error", `建单失败：${e.message}`)
+    }
+    const number = Number(issue?.number ?? 0)
+    if (!number) return fail("gitea-error", "建单返回缺少工单号")
+    const key = `${repo}#${number}`
+    new Book(ctx.cfg.stateFile).setIssue(key, {
+      state: "planned",
+      issue: number,
+      title: String(issue?.title ?? title),
+      url: String(issue?.url ?? ""),
+      repo,
+    })
+    ctx.log?.(`issue create ${key}：${issue?.url ?? ""}`)
+    return ok({ key, number, title: String(issue?.title ?? title), url: String(issue?.url ?? "") })
   }
 
   if (cmd === "issue comment") {
