@@ -12,7 +12,7 @@ CLI 源码在 `doubao-bot/foreman`，已 `npm link` 全局；改源码 → commi
 - **执行载体**（配置 `agent`，当前 **noop**）：agent 载体可插拔，桌面 AI agent 只是可选载体之一。noop 不开任何真实会话、不碰任何 agent——`issue/ws/pr/issue/outbox/clean/tasks` 照常工作；派单/投递「成功」但无人干活，inbox 只记账会堆积。
 - **tracker 适配器**（当前 Gitea）：工单/PR 读写走适配器契约；`Issue.ref`（工单右侧分支）是 Gitea 特有能力位，换 GitHub/Jira 自动跳过。
 
-## 一条龙工作流（noop/ZCode 承担全部智能工作）
+## 一条龙工作流（noop 下由人或外部 agent 承担全部智能工作）
 
 ```bash
 foreman issue create --repo R --title <标题> [--body <正文>] [--ws]
@@ -26,7 +26,7 @@ foreman ws add --repo <工程|owner/name> --issue <owner/name>#<N> [--base <基�
 foreman ws list --issue <owner/name>#<N>   # 这条单开了哪几个工程（没建档回空清单）
 ```
 
-然后**执行者（ZCode 或真 agent）进 worktree 写码、commit**；跨工程工单对每个工程各 `ws add` 一次（一工程一工作区、各一条 `fix/issue-N`、各一条 PR）。
+然后**执行者（人或任意接入的 agent）进 worktree 写码、commit**；跨工程工单对每个工程各 `ws add` 一次（一工程一工作区、各一条 `fix/issue-N`、各一条 PR）。
 
 ```bash
 foreman pr open --repo R --head fix/issue-N --title <标题> --body <改动+测试自证> --issue <N>
@@ -46,7 +46,7 @@ foreman clean <owner/name>#<N>   # 幂等清尾；foreman clean --all 清所有�
 - `hand` / `run` / `pickup` / 控制台接单：只把派单请求投进 router Inbox（账本记 handed 占槽），不再直接开任何编排/工作会话；`decide` 已删除，决策单由 router 自行调研。
 - 他人 PR 合并：扫描 pr.merge 事件与 `pr assign` 人工补派也只投 router（不再建合并助手会话）；router 核对后自己执行 `foreman pr merge`（幂等）。
 - router 是服务唯一主动维护的 agent 会话、每张单的唯一编排者：消费事件后在会话内创建编码与对抗审查内部 sub agent（编码侧 ws add / pr open），验收邮件、issue settle、clean 也归它。
-- **noop（当前生效）下**：以上请求照常入 Inbox、账本照记，但 router 会话也是假的——事件堆积、无人接单，挑单和编排实际由人/ZCode 承担。`watch *` / `pr poll` / `mail poll` / `worker run` 产出只会进 noop，无意义；定时任务当前全部 off。
+- **noop（当前生效）下**：以上请求照常入 Inbox、账本照记，但 router 会话也是假的——事件堆积、无人接单，挑单和编排实际由人或外部 agent 承担。`watch *` / `pr poll` / `mail poll` / `worker run` 产出只会进 noop，无意义；定时任务当前全部 off。
 - 已删除的旧命令：`dispatch`、`resume`、`orch start`、`sessions`、`decide`，遇到相关提示不要再引用。
 
 ## 约束与状态
