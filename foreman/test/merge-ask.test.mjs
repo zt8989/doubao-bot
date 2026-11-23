@@ -114,11 +114,11 @@ test("poll：不解析旧 RESULT 或自动记 PR；只有显式 runMergeTask 才
     const logs = []
     const out = await runMergeTask(
       { cfg, log: (s) => logs.push(String(s)), gitea, dws: mkDws([], sends) },
-      { key: "demo/demo#12", repo: "demo/demo", pr: 12, issue: 9, notifyTo: "boss", workflow: "own" }
+      { key: "demo/demo#12", repo: "demo/demo", pr: 12, issue: 9, notifyTo: "boss", workflow: "own", cleanup: true }
     )
     assert.equal(out.ok, true)
     assert.deepEqual(merged[0], { repo: "demo/demo", pr: 12, opts: { style: "merge", deleteBranch: true } })
-    assert.deepEqual(closed, [{ repo: "demo/demo", n: 9 }])
+    assert.deepEqual(closed, [{ repo: "demo/demo", n: 9 }], "cleanup:true 才走完整收尾（关单）")
     assert.equal(sends.length, 1, "合并不再额外回执；只保留此前的任务状态投递")
     // 合并结果要指明工程与 worktree（有的话）：回包与日志都带。
     assert.equal(out.repo, "demo/demo", "回包写明工程")
@@ -126,6 +126,32 @@ test("poll：不解析旧 RESULT 或自动记 PR；只有显式 runMergeTask 才
     assert.ok(logs.some((s) => /工程 demo\/demo/.test(s) && s.includes("/w/demo/fix-issue-9")), "日志写明工程与 worktree")
   } finally {
     if (server) await server.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("runMergeTask 拆分：默认只合并——不动工作区、不关单，工单停 pr-open 等 clean", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = mkCfg(dir)
+    const book = new Book(cfg.stateFile)
+    book.setIssue("demo/demo#12", { state: "pr-open", pr: 12, branch: "fix/issue-12", worktree: "/w/demo/fix-issue-12" })
+    const calls = { merge: 0, close: 0 }
+    const gitea = {
+      mergePr: async () => { calls.merge++ },
+      closeIssue: async () => { calls.close++ },
+      viewPr: async () => null,
+    }
+    const out = await runMergeTask({ cfg, log: () => {}, gitea, dws: {} }, { key: "demo/demo#12", repo: "demo/demo", pr: 12, issue: 12, notify: false })
+    assert.equal(out.ok, true)
+    assert.equal(calls.merge, 1)
+    assert.equal(calls.close, 0, "合并-only 不关单")
+    const rec = new Book(cfg.stateFile).issue("demo/demo#12")
+    assert.equal(rec.state, "pr-open", "工单停在 pr-open 等 clean")
+    const after = new Book(cfg.stateFile)
+    assert.equal(after.mergeAsk["demo/demo#12"].status, "merged", "merge 节点盖 mergeAsk")
+    assert.equal(after.prSeen["demo/demo#12"].merged, true, "pr-open 节点盖 prSeen.merged")
+  } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })

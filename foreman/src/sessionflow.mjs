@@ -7,6 +7,7 @@ import { Book } from "./book.mjs"
 import { builtinPrompt } from "./builtin-prompts.mjs"
 import { nowIso, expandHome } from "./util.mjs"
 import { originalAgentDocs, resume, withAgentDocs } from "./prompts.mjs"
+import { prMerged } from "./workflow/cleaners.mjs"
 import { git, worktreeRemove, statusPorcelain } from "./gitx.mjs"
 import * as realGitea from "./gitea.mjs"
 
@@ -426,6 +427,42 @@ export async function cleanIssue(ctx, { issueKey, archive = true, currentConv = 
   const keyRepo = String(key).split("#")[0]
   const keyNo = Number(String(key).split("#")[1] ?? 0)
   const notes = []
+
+  // 0) 关单（拆分 merge/clean 后归这里）：工单还没到终态时，要求它的 PR 已经全部合并——
+  //    没合完的单不清理、不关单（先去 `pr merge`）。已 done/cleaned 的直接走清尾。
+  if (!["done", "cleaned"].includes(String(rec.state ?? ""))) {
+    const prs = (Array.isArray(rec.prs) && rec.prs.length
+      ? rec.prs
+      : Number(rec.pr) > 0
+        ? [{ repo: rec.repo || keyRepo, pr: rec.pr }]
+        : []
+    ).filter((p) => Number(p?.pr) > 0)
+    const allMerged = prs.length > 0 && prs.every((p) => prMerged(book, p))
+    if (!allMerged) {
+      return {
+        ok: false,
+        reason: "pr-not-merged",
+        notes: [`${key} 还有未合并的 PR（或账本没有关联 PR），先合并再 clean`],
+      }
+    }
+    // 关远端单 + 摘接单标签 + 账本置 done（都幂等：已关闭不算失败）。
+    try {
+      await ctx.gitea.closeIssue(keyRepo, keyNo)
+      notes.push(`工单 #${keyNo} 已关单`)
+    } catch (e) {
+      const msg = String(e?.message ?? e ?? "")
+      if (/已经关闭|无需重复关闭/.test(msg)) notes.push(`工单 #${keyNo} 早已关闭`)
+      else notes.push(`关单 #${keyNo} 失败：${msg.slice(0, 160)}`)
+    }
+    try {
+      if (typeof ctx.gitea?.editLabels === "function") {
+        const out = await ctx.gitea.editLabels(keyRepo, keyNo, { remove: "ready-for-agent" })
+        if (out?.changed) notes.push("摘掉标签 ready-for-agent")
+      }
+    } catch {}
+    book.setIssue(key, { state: "done", mergeError: "" })
+    notes.push("工单置 done")
+  }
 
   // 1) 工作区与本地分支（一工程一工作区）
   const wsList = Array.isArray(rec.workspaces) && rec.workspaces.length

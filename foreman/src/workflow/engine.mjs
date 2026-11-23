@@ -94,7 +94,10 @@ export class WorkflowEngine {
   // 合并后的通用收尾：清工作区 → workspace.cleaned → pr.merged（豆包 adapter 据此归档执行会话）。
   // 任何适配器组合都走这条：清理失败只记 notes，不影响 merged 的事实。
   // workflow：这条 PR 是哪条流程来的（own 自己的单 / review 别人的 PR）；共用阶段靠它落痕。
-  async afterMerge({ watcher, merge, book, workflow = "" } = {}) {
+  // stages：只跑指定的收尾节点（如 ["merge","pr-open"]），缺省全跑——merge/clean 拆分后，
+  // `pr merge` 默认只做合并落账（merge + pr-open），close/cleanup/archive 归 `foreman clean`。
+  async afterMerge({ watcher, merge, book, workflow = "", stages = null } = {}) {
+    const want = Array.isArray(stages) && stages.length ? (s) => stages.includes(s) : () => true
     const repo = String(merge?.repo ?? "")
     const pr = Number(merge?.pr ?? 0)
     const key = String(merge?.key ?? `${repo}#${pr}`)
@@ -146,13 +149,15 @@ export class WorkflowEngine {
 
     // close 节点：关单 + 摘标签 + 工单 done（没有关联工单时自己会写一句跳过原因）。
     // 放在回收工作区之前：先确认这张单真的收了，再去拆它留下的工作区。
-    await run("close")
-    await this.emit(EVENTS.close, { issueKey, key, pr, issue: issueNo, target: watcher?.target, workflow: wf })
+    if (want("close")) {
+      await run("close")
+      await this.emit(EVENTS.close, { issueKey, key, pr, issue: issueNo, target: watcher?.target, workflow: wf })
+    }
 
     // 合并后按账本自清：pr-open（PR 记成 merged）→ dispatch（摘监听）→ workspace（删工作区）。
     // 清理器都幂等，不能按旧流程实例的 reached 阶段过滤：服务重启后实例常只恢复到 pr-open，
     // 若因此跳过 workspace，就会留下 herdr workspace 与 git worktree。
-    const pre = wf === "review" ? [] : ["workspace", "dispatch", "pr-open"]
+    const pre = (wf === "review" ? [] : ["workspace", "dispatch", "pr-open"]).filter(want)
     for (const stage of [...pre].reverse()) {
       const op = stage === "workspace"
         ? startOperation(this, "cleanup", `清理工作区 ${issueKey || key}`, {
@@ -164,14 +169,18 @@ export class WorkflowEngine {
     }
 
     // cleanup 节点：兜底清扫（空壳目录、git 元数据、队列残留）。
-    const op = startOperation(this, "cleanup", `兜底清扫 ${issueKey || key}`, { key: issueKey || key, detail: "空目录 / worktree 元数据 / 合并队列残留" })
-    await run("cleanup", op)
-    await this.emit(EVENTS.cleanup, { issueKey, key, workflow: wf, cleanup: { notes } })
+    if (want("cleanup")) {
+      const op = startOperation(this, "cleanup", `兜底清扫 ${issueKey || key}`, { key: issueKey || key, detail: "空目录 / worktree 元数据 / 合并队列残留" })
+      await run("cleanup", op)
+      await this.emit(EVENTS.cleanup, { issueKey, key, workflow: wf, cleanup: { notes } })
+    }
 
     // archive 节点：执行会话由它自己归档（不再挂在 pr.merged 上顺手做）。
-    const aop = startOperation(this, "archive", "归档执行会话", { key: issueKey || key, detail: String(watcher?.target ?? "") })
-    await run("archive", aop)
-    await this.emit(EVENTS.archive, { issueKey, key, workflow: wf, target: watcher?.target })
+    if (want("archive")) {
+      const aop = startOperation(this, "archive", "归档执行会话", { key: issueKey || key, detail: String(watcher?.target ?? "") })
+      await run("archive", aop)
+      await this.emit(EVENTS.archive, { issueKey, key, workflow: wf, target: watcher?.target })
+    }
 
     return { notes, nodes: ran, issueKey, issueNo }
   }

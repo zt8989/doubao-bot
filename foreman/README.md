@@ -42,7 +42,7 @@ router agent 决定接单时，每张工单仍有自己的一条主智能体会�
 - **dws 的边界**：dws 可以承载主智能体及既有外部会话，不用于创建、续问或中转编码与对抗审查 sub agent。
 - **旧路径已删**：`foreman dispatch/resume/orch start/sessions/decide` 命令已移除；`task.update` 与外部工作会话监听仅兼容读取。
 - **全部由 router agent 路由**：`hand`/`run`/`pickup`/控制台接单只把派单请求投进 router Inbox（账本记 handed 占槽）；他人 PR 合并请求（pr.merge 扫描事件、`pr assign` 人工补派）也只投 router，不再建合并助手会话。router 是服务唯一主动维护的 agent 会话、每张单的唯一编排者——消费事件后在会话内用内部编码/审查 sub agent 开工，自己执行 `pr merge`/`ui-assign`/`issue settle`/`clean`。不依赖 agent 的命令（issue/ws/pr/outbox/clean/tasks）不经 router。
-- **一条龙（无 agent 也能走完）**：`issue create [--ws]` → `ws add`（账本没建档会回查 tracker 自举成 planned，并把分支写进工单右侧 ref——走 tracker 能力位，GitHub 类 tracker 没有 ref 字段时自动跳过）→ 写码 → `pr open` → 验收 → `pr merge`（全工程合完才关单+清 worktree/分支）。执行载体选 `agent: "dws"|"noop"`（豆包只是可选 agent 之一）；noop 下派单/合并请求照常入 Inbox，但 router 会话也是假的——事件堆积、无人接单。
+- **一条龙（无 agent 也能走完）**：`issue create [--ws]` → `ws add`（账本没建档会回查 tracker 自举成 planned，并把分支写进工单右侧 ref——走 tracker 能力位，GitHub 类 tracker 没有 ref 字段时自动跳过）→ 写码 → `pr open` → 验收 → `pr merge`（只合并，不动工作区；全工程 PR 合完后用 `clean` 关单+清尾）。执行载体选 `agent: "dws"|"noop"`（豆包只是可选 agent 之一）；noop 下派单/合并请求照常入 Inbox，但 router 会话也是假的——事件堆积、无人接单。
 - **收尾**：最终验收与合并由人类/独立验收系统完成；保护分支要求人工批准和 CI 通过。确认全部 PR 合并后，`foreman clean <键>` 清理工作区与监听。
 
 配置（默认已开，不用写也能用）：

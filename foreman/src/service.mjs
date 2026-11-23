@@ -1327,7 +1327,7 @@ export async function prAssignOnce(ctx, { repo = "", number = 0 } = {}) {
     // 人工补派也只投 router：由它核对后执行 foreman pr merge。
     await routeToRouter(ctx, {
       type: "pr.merge",
-      text: `【Foreman · 他人 PR 待合并（人工补派）】\n${prNotifyText([pr])}\n请核对后执行 foreman pr merge ${prNumber} --repo ${repoName}（幂等，合不了会回理由）。`,
+      text: `【Foreman · 他人 PR 待合并（人工补派）】\n${prNotifyText([pr])}\n请核对后执行 foreman pr merge ${prNumber} --repo ${repoName}（幂等，合不了会回理由），合完再 foreman clean 关单清尾。`,
       json: { prs: [pr] },
     })
     const assignedAt = nowIso()
@@ -1358,7 +1358,7 @@ export async function deliverMergeCandidate(ctx, event) {
   const text = String(payload.text ?? "").trim() || prNotifyText(todo)
   await routeToRouter(ctx, {
     type: "pr.merge",
-    text: `【Foreman · 他人 PR 待合并】\n${text}\n请核对后逐条执行 foreman pr merge <N> --repo <仓库>（幂等，合不了会回理由）；不要自己改代码。`,
+    text: `【Foreman · 他人 PR 待合并】\n${text}\n请核对后逐条执行 foreman pr merge <N> --repo <仓库>（幂等，合不了会回理由），合完的工单再 foreman clean 关单清尾；不要自己改代码。`,
     json: { prs: todo },
   })
   const assignedAt = nowIso()
@@ -1642,6 +1642,9 @@ function workflowForIssue({ book, repo, issueNo = 0, declared = "" } = {}) {
 
 export async function runMergeTask(ctx, task = {}) {
   const { cfg, log = () => {} } = ctx
+  // 拆分 merge/clean：默认只做合并与落账（merge + pr-open 节点），关单、摘监听、删工作区、
+  // 归档一律归 `foreman clean`（PR 全合完才动手）。task.cleanup === true 才跑完整收尾链（兼容保留）。
+  const doCleanup = task.cleanup === true
   const key = String(task.key ?? `${task.repo}#${task.pr}`)
   const repo = String(task.repo ?? "").trim()
   const pr = Number(task.pr ?? 0)
@@ -1753,6 +1756,7 @@ export async function runMergeTask(ctx, task = {}) {
       merge: { key, repo, pr, prUrl: String(task.url ?? ""), issueNumber: resolvedNo },
       book: book1,
       workflow: finalWorkflow,
+      stages: doCleanup ? null : ["merge", "pr-open"],
     })
     done = { issueKey: resolvedKey, notes: result.notes ?? [] }
     cleanup = { notes: [], nodes: result.nodes ?? [] }
@@ -1769,16 +1773,18 @@ export async function runMergeTask(ctx, task = {}) {
       url: String(task.url ?? ""),
       alreadyMerged,
       cleanup: async () => ({ notes: [] }),
+      stages: doCleanup ? null : ["merge", "pr-open"],
     })
   }
 
-  // 通知会话收尾：它报的 PR 现在都合完了，自动归档，别把「PR待合并」会话留在侧边栏。
-  // 合完当场扫一遍（不等下一轮 PR 扫描）；归档失败只记 notes，不推翻合并事实。
+  // 通知会话收尾：只在完整收尾（cleanup）时归档；合并-only 模式归 clean 负责。
   let archivedNotes = []
-  try {
-    archivedNotes = await archiveMergedNotices({ dws: ctx.dws, stateFile: cfg.stateFile, log })
-  } catch (e) {
-    log(`归档通知会话失败：${e.message}`)
+  if (doCleanup) {
+    try {
+      archivedNotes = await archiveMergedNotices({ dws: ctx.dws, stateFile: cfg.stateFile, log })
+    } catch (e) {
+      log(`归档通知会话失败：${e.message}`)
+    }
   }
   const notes = [...(done.notes ?? []), ...(cleanup?.notes ?? []), ...archivedNotes]
   const book = new Book(cfg.stateFile)
@@ -1907,7 +1913,9 @@ export async function finishMergedPr({
   url = "",
   alreadyMerged = false,
   cleanup = cleanupPrArtifacts,
+  stages = null,
 } = {}) {
+  // 拆分 merge/clean：stages 缺省全跑；合并-only 传 ["merge","pr-open"]（不关单、不清工作区）。
   const key = `${repo}#${number}`
   const book = new Book(stateFile)
   // 一工程一工作区：跨工程时 PR 的仓库不是工单的仓库，工单键必须由调用方给（或按 prs[] 反查）。
@@ -1930,12 +1938,13 @@ export async function finishMergedPr({
     log,
   }
   const notes = []
-  for (const stage of ["merge", "close", "pr-open", "dispatch"]) {
+  const want = Array.isArray(stages) && stages.length ? (s) => stages.includes(s) : () => true
+  for (const stage of ["merge", "close", "pr-open", "dispatch"].filter(want)) {
     notes.push(...(await runNodeCleanup(stage, ctx)).notes)
   }
   // workspace 节点处置账本里的 worktree/分支；没有关联工单时它只回一句跳过说明。
-  if (issueKeyResolved) notes.push(...(await runNodeCleanup("workspace", ctx)).notes)
-  notes.push(...(await runNodeCleanup("cleanup", ctx)).notes)
+  if (issueKeyResolved && want("workspace")) notes.push(...(await runNodeCleanup("workspace", ctx)).notes)
+  if (want("cleanup")) notes.push(...(await runNodeCleanup("cleanup", ctx)).notes)
   return { key, issueKey: issueKeyResolved, notes, alreadyMerged }
 }
 
@@ -2449,9 +2458,8 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     }
     // 合并成功后把账本里的待合并条目收掉，避免再合一遍。
     try { new Book(ctx.cfg.stateFile).dropMerge(key) } catch {}
-    // 通知会话收尾：它报的 PR 现在都合完了，自动归档，别把会话留在侧边栏。
+    // 合并-only：不再当场归档通知会话（收尾归 clean）。
     const notes = [...(result.notes ?? [])]
-    try { notes.push(...(await archiveMergedNotices({ dws: ctx.dws, stateFile: ctx.cfg.stateFile, log: ctx.log }))) } catch {}
     // 同步回包：调用方（编排会话）拿到的这一条就是合并结论，不用等任何后续消息。
     // 关单事实按账本判定（close 节点会把工单置 done；多工程还有 PR 没合时先不关）。
     const bookM = new Book(ctx.cfg.stateFile)
@@ -2461,15 +2469,17 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     const worktree = String(result?.worktree ?? "")
     const where = `工程 ${repo} · worktree ${worktree || "无"}`
     const elapsedMs = Date.now() - startedAt
+    const awaitingClean = issueKeyOut ? !closed : false
     const summary =
       `${result.alreadyMerged ? "原本已合并" : "已合并"} ${repo}#${number}` +
-      (issueKeyOut ? `，工单 ${issueKeyOut} ${closed ? "已关单" : "未关单"}` : "，无关联工单") +
-      (notes.length ? `；收尾：${notes.join("；")}` : "；无需收尾")
+      (issueKeyOut ? `，工单 ${issueKeyOut} ${closed ? "已关单" : "待 clean 关单收尾"}` : "，无关联工单") +
+      (notes.length ? `；收尾：${notes.join("；")}` : "")
     ctx.log?.(`已合并 ${repo}#${number}${issueNo ? `，关单 #${issueNo}` : ""}（走 foreman · ${where}）${notes.length ? `；收尾：${notes.join("；")}` : ""}`)
     return ok({
       repo, number,
       merged: true,
       alreadyMerged: !!result.alreadyMerged,
+      awaitingClean,
       style,
       issue: issueNo || null,
       issueKey: issueKeyOut || null,

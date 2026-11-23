@@ -140,22 +140,26 @@ test("pr merge：合并成功、可选关单，账本记 merged", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-merge-"))
   const { ctx, created, consoleStore } = ctxOf(dir)
   try {
+    // pr-open 节点只记 prSeen，不建档：先按真实链路预置工单记录（pr open 时建的）。
+    new Book(cfgOf(dir)).setIssue("demo/demo#9", { state: "pr-open", repo: "demo/demo", prs: [{ repo: "demo/demo", pr: 12, branch: "fix/issue-9" }] })
     const r = await handleRequest(ctx, { id: "cli", cmd: "pr merge", repo: "demo/demo", number: 12, issue: 9 })
     assert.equal(r.ok, true)
     assert.equal(r.merged, true)
     assert.equal(r.issue, 9)
-    // 同步回包要能直接当结论用：关没关单、收尾做了什么、一行 summary、耗时。
+    // 同步回包要能直接当结论用：合并-only（关单清尾归 clean）、一行 summary、耗时。
     assert.equal(r.issueKey, "demo/demo#9")
-    assert.equal(r.closed, true)
+    assert.equal(r.closed, false)
+    assert.equal(r.awaitingClean, true)
     assert.equal(r.style, "merge")
     assert.match(r.where, /工程 demo\/demo/)
     assert.match(r.summary, /已合并 demo\/demo#12/)
-    assert.match(r.summary, /demo\/demo#9 已关单/)
+    assert.match(r.summary, /demo\/demo#9 待 clean 关单收尾/)
     assert.equal(typeof r.elapsedMs, "number")
     assert.equal(created.find((c) => c.kind === "merge").opts.style, "merge")
+    assert.equal(created.some((c) => c.kind === "close"), false, "merge 不再关单")
     assert.equal(new Book(cfgOf(dir)).mergeAsk["demo/demo#12"].status, "merged")
-    assert.equal(new Book(cfgOf(dir)).issue("demo/demo#9").state, "done")
-    assert.ok(consoleStore.snapshot().tasks.some((t) => t.key === "demo/demo#9" && t.state === "done"))
+    assert.equal(new Book(cfgOf(dir)).issue("demo/demo#9").state, "pr-open")
+    assert.ok(consoleStore.snapshot().tasks.some((t) => t && t.key === "demo/demo#9" && t.state === "pr-open"))
   } finally {
     consoleStore.close()
     fs.rmSync(dir, { recursive: true, force: true })

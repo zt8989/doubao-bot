@@ -39,7 +39,7 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman pr ui-assign <N> --repo R        本人 UI PR 轮询指派测试验收人
   foreman pr assign <N> --repo R           路由智能体分配一条他人 PR 给合并助手
   foreman pr open --repo R --base <基线> --head <分支> --title <标题> [--body <正文>] [--issue <单号>] [--issue-repo <工单所在仓库>] [--ui]
-  foreman pr merge <N> --repo R [--issue <单号>] [--style merge|rebase|squash] [--approved-by <人>] [--ui]
+  foreman pr merge <N> --repo R [--issue <单号>] [--style merge|rebase|squash] [--approved-by <人>] [--ui]   # 只合并不动工作区
   foreman send --type mail --to <邮箱>[,...] --subject <主题> [--body <正文>] [--session-id <会话ID>]
   foreman send --type lark (--chat-id <oc_...>|--user-id <ou_...>) (--text <正文>|--markdown <正文>)
   foreman outbox list [--limit <N>] [--status <状态>] [--channel mail|lark]

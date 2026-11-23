@@ -36,7 +36,7 @@ foreman pr merge <N> --repo R    # 验收后由人类/独立验收系统执行�
 # → 该单所有工程的 PR 都合完才收口：工单 done → 关远端单 → 删 worktree/本地分支（noop archive 假成功）
 # → 保护分支必须人工批准 + CI 通过；UI PR 仍须两名测试同学验收，不得绕过
 
-foreman clean <owner/name>#<N>   # 幂等清尾；foreman clean --all 清所有终端态工单残留
+foreman clean <owner/name>#<N>   # 关单+清尾：要求该单 PR 已全合并（先合完再 clean）；--all 清所有终端态残留
 ```
 
 辅助：`foreman issue comment|close|settle`（评论/关单/只修本地 done）、`foreman retry <仓库> <N>`（放回队列，纯本地）、`foreman tasks --json`（会话树只读）、`foreman status` / `inbox list`（只读）、`foreman send --type mail|lark`（外发，与 agent 无关）、`foreman doctor`（体检；`--start` 在 noop 下不碰任何 agent）。

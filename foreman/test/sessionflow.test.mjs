@@ -339,6 +339,67 @@ test("steerOrchestrator：账本留痕；没有编排会话直接回 no-orchestr
   }
 })
 
+test("clean 拆分：pr-open 且 PR 全合并 → clean 关单（closeIssue + 摘标签 + done）再清尾", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-clean-close-"))
+  try {
+    const cfg = mkCfg(dir)
+    cfg.repos = [mkRepo(dir, "demo")]
+    const book = new Book(cfg.stateFile)
+    book.setIssue("yyzl/demo#8", {
+      state: "pr-open",
+      repo: "yyzl/demo",
+      prs: [{ repo: "yyzl/demo", pr: 8, branch: "fix/issue-8" }],
+      workspaces: [{ repo: "yyzl/demo", branch: "fix/issue-8", worktree: path.join(dir, "wt-8") }],
+    })
+    // pr-open 节点盖 merged（prSeen.merged）+ mergeAsk
+    book.markPrSeen("yyzl/demo#8", { repo: "yyzl/demo", pr: 8, merged: true })
+    book.markMergeAsked("yyzl/demo#8", { pr: 8, status: "merged" })
+
+    const remoteClosed = []
+    const labels = []
+    const ctx = {
+      cfg,
+      dws: mkDws(),
+      log: () => {},
+      gitea: {
+        closeIssue: async (repo, n) => { remoteClosed.push(`${repo}#${n}`) },
+        editLabels: async (repo, n, opts) => { labels.push({ repo, n, opts }); return { changed: true } },
+      },
+    }
+    const out = await cleanIssue(ctx, { issueKey: "yyzl/demo#8" })
+    assert.equal(out.ok, true)
+    assert.ok(out.notes.some((n) => /已关单/.test(n)))
+    assert.deepEqual(remoteClosed, ["yyzl/demo#8"])
+    assert.deepEqual(labels.map((l) => l.opts), [{ remove: "ready-for-agent" }])
+    const after = new Book(cfg.stateFile).issue("yyzl/demo#8")
+    assert.equal(after.state, "done")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("clean 拆分：PR 没合完 → 拒绝清理（先去 pr merge）", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-clean-open-"))
+  try {
+    const cfg = mkCfg(dir)
+    cfg.repos = [mkRepo(dir, "demo")]
+    const book = new Book(cfg.stateFile)
+    book.setIssue("yyzl/demo#9", {
+      state: "pr-open",
+      repo: "yyzl/demo",
+      prs: [{ repo: "yyzl/demo", pr: 9, branch: "fix/issue-9" }],
+    })
+    const ctx = { cfg, dws: mkDws(), log: () => {}, gitea: { closeIssue: async () => { throw new Error("不应关单") } } }
+    const out = await cleanIssue(ctx, { issueKey: "yyzl/demo#9" })
+    assert.equal(out.ok, false)
+    assert.equal(out.reason, "pr-not-merged")
+    assert.match(out.notes[0], /先合并再 clean/)
+    assert.equal(new Book(cfg.stateFile).issue("yyzl/demo#9").state, "pr-open", "账本不动")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("clean：合并关单后归档工作会话、摘监听、清账本会话字段（幂等）", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-clean-"))
   try {
@@ -346,7 +407,7 @@ test("clean：合并关单后归档工作会话、摘监听、清账本会话字
     cfg.repos = [mkRepo(dir, "demo")]
     const book = new Book(cfg.stateFile)
     book.setIssue("yyzl/demo#7", {
-      state: "pr-open",
+      state: "done",
       repo: "yyzl/demo",
       agent: "foreman-demo-7",
       agentConvId: "conv-worker-1",
