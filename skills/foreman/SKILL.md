@@ -1,6 +1,6 @@
 ---
 name: foreman
-description: 接单编排 CLI（项目 foreman，命令 foreman）：默认以工单绑定的主智能体为中心，持久 Schedule 筛选我的 ready-for-agent 工单，router agent 核对容量后用 `foreman hand` 交付。主智能体在当前 Agent 内部直接创建编码与对抗审查 sub agent，主提示词包含两者的完整提示词；不得用 `foreman dispatch/resume` 或 dws 为这两个角色创建、续问会话。编码 sub agent 只用 `foreman ws add` 准备工作区、用 `foreman pr open` push 非保护分支并创建 PR；主智能体原样汇总结构化审查结论、发验收邮件并维护状态。人类/独立验收系统最终验收与合并，保护分支须人工批准和 CI 通过。旧 `dispatch/resume`、外部工作会话和 task.update 仅作兼容。PR 扫描与他人 PR 合并助手保持独立，本人 UI PR 仍由两名测试同学验收。用户提到自动接单、接工单、派给豆包、工单进度、卡住重试或 foreman 报 app_busy / locked / pr-open 时使用。
+description: 接单编排 CLI（命令 foreman，doubao-bot 子包）：持久 Schedule 筛选我的 ready-for-agent 工单，router agent 核对容量后 `foreman hand` 交给本单主智能体；主智能体在当前 Agent 内直接创建编码与对抗审查两个 sub agent，编码侧用 `foreman ws add` 备工作区、`foreman pr open` push 非保护分支并出 PR，验收合并归人类/独立验收系统，保护分支须人工批准加 CI 通过；旧 dispatch/resume 仅作兼容。用户提到自动接单、接工单、派给豆包、工单进度、卡住重试，或 foreman 报 app_busy / locked / pr-open 时使用。
 ---
 
 # foreman：接单编排

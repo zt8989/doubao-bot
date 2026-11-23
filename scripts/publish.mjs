@@ -5,7 +5,7 @@
 //
 //   bin（npm link 装到全局）：gitea、foreman、dws
 //   adapter（挂到 ~/.opencli/clis/gitea）：adapters/gitea/*.js（REST 版）
-//   skill（链接到 ~/Doubao/skills）：skills/ 下的每个技能目录
+//   skill（链接到 ~/Doubao/skills 和 ~/.zcode/skills）：skills/ 下的每个技能目录
 //
 // 口径：改源码 → commit → 本脚本 → 线上才变。工作区脏的单元默认不发布（防止半成品上线）。
 // 用法：node scripts/publish.mjs [--allow-dirty] [gitea|adapters|foreman|dws|skills ...]（不给单元就是全部）
@@ -18,7 +18,14 @@ import { linkAdapters } from "./link-adapter.mjs"
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const DIST = path.join(REPO, "dist")
-const SKILLS_LINK = process.env.DOUBAO_SKILLS_DIR || path.join(os.homedir(), "Doubao", "skills")
+// 技能发布目标：豆包技能目录（DOUBAO_SKILLS_DIR 可覆盖）+ ZCode 用户技能目录 ~/.zcode/skills。
+// ZCode 只认 description ≤1024 的技能，超限整条丢弃——发新技能前先看一眼描述长度。
+const SKILLS_LINKS = [
+  ...new Set([
+    process.env.DOUBAO_SKILLS_DIR || path.join(os.homedir(), "Doubao", "skills"),
+    path.join(os.homedir(), ".zcode", "skills"),
+  ]),
+]
 const WIN = process.platform === "win32"
 const UNITS = ["gitea", "adapters", "foreman", "dws", "skills"]
 
@@ -153,7 +160,7 @@ function publishBin(name, extras = []) {
 function publishSkills() {
   if (!skipIfDirty("skills")) return false
   fs.mkdirSync(path.join(DIST, "skills"), { recursive: true })
-  fs.mkdirSync(SKILLS_LINK, { recursive: true })
+  for (const dir of SKILLS_LINKS) fs.mkdirSync(dir, { recursive: true })
   for (const entry of fs.readdirSync(path.join(REPO, "skills"), { withFileTypes: true })) {
     if (!entry.isDirectory()) continue
     const name = entry.name
@@ -163,8 +170,8 @@ function publishSkills() {
     cpR(src, dst)
     chmodBins(dst)
     writePublished(dst, src)
-    linkDir(dst, path.join(SKILLS_LINK, name))
-    console.log(`已发布 skill：${name} → ${dst}（链接 ${path.join(SKILLS_LINK, name)}）`)
+    for (const dir of SKILLS_LINKS) linkDir(dst, path.join(dir, name))
+    console.log(`已发布 skill：${name} → ${dst}（链接 ${SKILLS_LINKS.map((d) => path.join(d, name)).join("、")}）`)
   }
 
   // 源码里已经删掉的技能：连 dist 和链接一起收掉，别让线上还挂着旧技能
@@ -176,10 +183,11 @@ function publishSkills() {
       console.log(`已收掉旧 skill：${name}`)
     }
   }
-  if (fs.existsSync(SKILLS_LINK)) {
-    for (const entry of fs.readdirSync(SKILLS_LINK, { withFileTypes: true })) {
+  for (const dir of SKILLS_LINKS) {
+    if (!fs.existsSync(dir)) continue
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       if (!entry.isSymbolicLink()) continue
-      const link = path.join(SKILLS_LINK, entry.name)
+      const link = path.join(dir, entry.name)
       let target = ""
       try {
         target = normalizeLinkTarget(fs.readlinkSync(link))
