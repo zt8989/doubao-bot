@@ -68,13 +68,20 @@ export function createChatWorkflow(ctx) {
       if (typeof ctx.dws?.info !== "function") throw new Error("dws 缺少 info，无法读取 Router Agent 会话")
       const info = await ctx.dws.info(router.convId)
       const raw = Array.isArray(info?.messages) ? info.messages : []
+      // zcode 账本留痕的 user 消息带显式 role 且无 finished/id，这里统一补齐；
+      // running 判定优先用适配器状态（zcode 的账本 status），避免「回复已回但尾部没对齐」误判。
       const messages = raw.map((message, index) => ({
         id: String(message.id || `${index}`),
-        role: chatRole(message),
-        text: chatText(message),
+        role: message.role === "user" ? "user" : chatRole(message),
+        text: message.role === "user"
+          ? String(message.text ?? "").replace(/^【Chat UI 用户消息】\s*/, "")
+          : chatText(message),
         finished: message.finished !== false,
         ...(message.error ? { error: String(message.error) } : {}),
       }))
+      const running =
+        String(info?.status ?? "") === "running" ||
+        (raw.length > 0 && raw[raw.length - 1]?.role === "user" && raw[raw.length - 1]?.finished === false)
       const last = messages[messages.length - 1]
       return {
         ok: true,
@@ -83,7 +90,7 @@ export function createChatWorkflow(ctx) {
         messages,
         pending,
         pendingMessages,
-        running: Boolean(last && (last.role !== "assistant" || last.finished === false)),
+        running: Boolean(running || (last && last.role !== "assistant")),
       }
     },
   }

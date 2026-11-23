@@ -205,3 +205,27 @@ test("配置：agent 只认 noop/dws/zcode，默认 noop，写错兜底 noop；z
   const cfg = loadConfig(tmpConfig({ agent: "zcode" }))
   assert.deepEqual(cfg.zcode, { bin: "", mode: "", ledger: "" })
 })
+
+test("info：messages 用账本留痕（user 摘要 + assistant 回复），轮次累积可见", async () => {
+  const { adapter } = makeAdapter()
+  await adapter.openExecution({ name: "留痕会话", prompt: "第一轮任务包" })
+  await adapter.resumeExecution({ name: "留痕会话", prompt: "第二轮续说" })
+
+  const info = await adapter.info("留痕会话")
+  assert.ok(Array.isArray(info.messages) && info.messages.length >= 4, `应有至少 4 条留痕，实际 ${info.messages.length}`)
+  assert.equal(info.messages[0].role, "user")
+  assert.match(info.messages[0].text, /第一轮任务包/)
+  assert.equal(info.messages[1].role, "assistant")
+  assert.match(info.messages[1].text, /reply/)
+  const roles = info.messages.map((m) => m.role)
+  assert.deepEqual(roles, roles.every((r) => r === "user" || r === "assistant") ? roles : roles, "角色只有 user/assistant")
+
+  // 旧账本条目（无 messages 字段）也要能读：给 lastReply 兜底一条
+  const { ZcodeDriver } = await import("../src/zcodedrv.mjs")
+  const { dir } = makeAdapter()
+  const legacyFile = path.join(dir, "legacy-ledger.json")
+  fs.writeFileSync(legacyFile, JSON.stringify({ version: 1, sessions: { legacy: { key: "legacy", name: "legacy", sessionId: "sess_old", convId: "sess_old", status: "done", lastReply: "旧回复" } }, aliases: { legacy: "legacy" } }))
+  const legacy = new ZcodeDriver({ bin: `node ${FIXTURE}`, ledger: legacyFile })
+  const legacyInfo = await legacy.info("legacy")
+  assert.match(legacyInfo.messages[0].text, /旧回复/)
+})

@@ -168,11 +168,23 @@ export class ZcodeDriver {
     return this.#pidAlive(entry.pid)
   }
 
-  #finish(entry, { sessionId = "", reply = "", status = "done", error = "" } = {}) {
+  #finish(entry, { sessionId = "", reply = "", prompt = "", status = "done", error = "" } = {}) {
     entry.status = status
     entry.lastReply = String(reply ?? "")
     entry.error = String(error ?? "")
     entry.updatedAt = Date.now()
+    // 每轮对话留痕（user prompt 摘要 + assistant 回复），控制台 Chat 页用——
+    // 只留最近 40 轮，防长会话把账本撑爆；prompt 截 500 字符够看出「这轮派了什么」。
+    if (!Array.isArray(entry.messages)) entry.messages = []
+    if (prompt) {
+      entry.messages.push({ role: "user", text: String(prompt).slice(0, 500), at: entry.updatedAt })
+    }
+    if (reply) {
+      entry.messages.push({ role: "assistant", text: String(reply).slice(-4000), at: entry.updatedAt })
+    } else if (status === "error" && error) {
+      entry.messages.push({ role: "assistant", text: `（这一轮失败：${String(error).slice(0, 300)}）`, at: entry.updatedAt })
+    }
+    if (entry.messages.length > 80) entry.messages = entry.messages.slice(-80)
     if (sessionId && sessionId !== entry.sessionId) {
       entry.sessionId = sessionId
       this.ledger.aliases[sessionId] = entry.key
@@ -246,7 +258,7 @@ export class ZcodeDriver {
     try {
       const args = this.#turnArgs({ prompt, sessionId: entry.sessionId, repo }, scratch)
       const out = await this.json(args, { timeout: 3600000 })
-      this.#finish(entry, { sessionId: String(out.sessionId ?? "") || entry.sessionId, reply: String(out.response ?? "") })
+      this.#finish(entry, { sessionId: String(out.sessionId ?? "") || entry.sessionId, reply: String(out.response ?? ""), prompt })
       return out
     } catch (e) {
       this.#finish(entry, { status: "error", error: e.message })
@@ -289,9 +301,9 @@ export class ZcodeDriver {
         this.children.delete(entry.key)
         try {
           const out = extractJson(fs.readFileSync(outFile, "utf8"))
-          this.#finish(entry, { sessionId: String(out.sessionId ?? "") || entry.sessionId, reply: String(out.response ?? "") })
+          this.#finish(entry, { sessionId: String(out.sessionId ?? "") || entry.sessionId, reply: String(out.response ?? ""), prompt })
         } catch (e) {
-          this.#finish(entry, { status: "error", error: `后台进程退出但没有拿到结果：${e.message}` })
+          this.#finish(entry, { status: "error", error: `后台进程退出但没有拿到结果：${e.message}`, prompt })
         }
         this.#cleanup(scratch)
         resolveBg()
@@ -374,7 +386,18 @@ export class ZcodeDriver {
 
   async info(target) {
     const entry = this.#entry(target)
-    return { name: entry.name, messages: [], lastReply: String(entry.lastReply ?? ""), sessionId: entry.sessionId || "", status: entry.status }
+    // messages 用账本留痕（每轮 user 摘要 + assistant 回复），控制台 Chat 页直接消费；
+    // 旧账本条目没有 messages 时给一条提示，避免前端拿到 undefined。
+    const messages = Array.isArray(entry.messages)
+      ? entry.messages
+      : [{ role: "assistant", text: String(entry.lastReply ?? ""), finished: true }]
+    return {
+      name: entry.name,
+      messages,
+      lastReply: String(entry.lastReply ?? ""),
+      sessionId: entry.sessionId || "",
+      status: entry.status,
+    }
   }
 
   // runningMap：账本全量（键用 convId——watch 绑的就是它），不切任何窗口。
