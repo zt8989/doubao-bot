@@ -39,7 +39,7 @@ export class NoopSessionAdapter {
   }
 
   info(target) {
-    return { name: String(target ?? ""), messages: [], lastReply: "" }
+    return { name: String(target ?? ""), messages: [], running: false, lastReply: "" }
   }
 
   notify() {

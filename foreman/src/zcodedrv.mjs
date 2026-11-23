@@ -386,14 +386,15 @@ export class ZcodeDriver {
 
   async info(target) {
     const entry = this.#entry(target)
-    // messages 用账本留痕（每轮 user 摘要 + assistant 回复），控制台 Chat 页直接消费；
-    // 旧账本条目没有 messages 时给一条提示，避免前端拿到 undefined。
+    // messages 用账本留痕（每轮 user 摘要 + assistant 回复），经契约层 normalizeSessionMessages
+    // 归一成 Chat UI 三角色；running 显式给（契约优先消费它，不再靠尾部猜）。
     const messages = Array.isArray(entry.messages)
       ? entry.messages
       : [{ role: "assistant", text: String(entry.lastReply ?? ""), finished: true }]
     return {
       name: entry.name,
       messages,
+      running: this.#isRunning(entry),
       lastReply: String(entry.lastReply ?? ""),
       sessionId: entry.sessionId || "",
       status: entry.status,

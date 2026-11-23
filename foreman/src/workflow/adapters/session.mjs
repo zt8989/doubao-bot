@@ -35,3 +35,37 @@ export function assertSessionAdapter(adapter, name = "session") {
   if (missing.length) throw new Error(`${name} 适配器缺少方法：${missing.join("、")}`)
   return adapter
 }
+
+// 通用 message 归一化：各载体的 info().messages 形态不同（dws=原生对话含首轮提示词、
+// zcode=账本轮次留痕、noop=空），这里统一成 Chat UI 的三角色格式：
+//   { role: "user" | "assistant" | "event", text, finished, error? }
+// 口径（载体无关）：
+// - 文本含【Chat UI 用户消息】标记 → user 气泡（只显示标记后的正文）；
+// - 其余 role=assistant 的 → assistant 气泡；其余（派活 prompt、Foreman 事件等）→ event 折叠项；
+// - finished/error 原样保留（缺省 finished=true）。
+export function normalizeSessionMessages(messages = []) {
+  const MARKER = "【Chat UI 用户消息】"
+  return (Array.isArray(messages) ? messages : []).map((message, index) => {
+    const text = String(message?.text ?? "")
+    const marked = text.includes(MARKER)
+    const role = marked ? "user" : String(message?.role ?? "") === "assistant" ? "assistant" : "event"
+    return {
+      id: String(message?.id ?? index),
+      role,
+      text: marked ? text.slice(text.indexOf(MARKER) + MARKER.length).trim() : text,
+      finished: message?.finished !== false,
+      ...(message?.error ? { error: String(message.error) } : {}),
+    }
+  })
+}
+
+// running 归一化：适配器显式给 info().running（zcode 用账本 status 算）就用之；
+// 没给就看尾部——尾部不是已完成的 assistant 回复，都算还在等回复。
+export function normalizeRunning(info = {}) {
+  if (typeof info?.running === "boolean") return info.running
+  const raw = Array.isArray(info?.messages) ? info.messages : []
+  const tail = raw[raw.length - 1]
+  if (!tail) return false
+  const normalized = normalizeSessionMessages([tail])[0]
+  return normalized.role !== "assistant" || normalized.finished === false
+}

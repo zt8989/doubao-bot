@@ -45,8 +45,11 @@ export class DoubaoSessionAdapter {
     return this.driver.status(target)
   }
 
-  info(target) {
-    return this.driver.info(target)
+  async info(target) {
+    const info = await this.driver.info(target)
+    // 契约通用 message：running 由 status 补（豆包无账本，读一次状态换算），Chat 页免猜。
+    const status = await this.driver.status(target).catch(() => null)
+    return { ...info, running: status?.streaming === true }
   }
 
   notify(target, text) {
