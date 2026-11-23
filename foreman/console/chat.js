@@ -159,10 +159,6 @@ class FmChat extends LitElement {
     const watching = Boolean(this.conv)
     const title = watching ? (this.conversation?.name || this.conv) : "Router Agent"
     return html`<section class="panel chat-panel">
-      ${watching ? html`<div class="chat-notice">
-        正在观察会话「${title}」（只读，发送只进 Router Agent）
-        <button class="ghost" type="button" @click=${() => emit(this, "chat-target", { conv: "", back: true })}>‹ 会话列表</button>
-      </div>` : ""}
       <div class="chat-messages" aria-live="polite">
         ${messages.length ? messages.map((message) => this.renderMessage(message, title)) : html`
           <div class="chat-empty">
