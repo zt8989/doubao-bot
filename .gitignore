@@ -4,3 +4,4 @@ node_modules/
 *.log
 foreman/console/dist/
 dist/
+.zcode/
