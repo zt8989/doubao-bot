@@ -1,6 +1,6 @@
 ---
 name: foreman
-description: 交付一条龙 CLI（doubao-bot/foreman，命令 foreman）：建单 `issue create [--ws]`、开工作区+分支+回写工单右侧分支 `ws add`、建 PR `pr open`、幂等合并+关单+清尾 `pr merge`；派单/合并请求一律经 router agent 路由（hand/run/pickup 只投 router Inbox，服务不再直接开任何 agent 会话）。执行载体 agent=dws|noop，noop（当前生效）下机械动作照常、不碰豆包。用户提到建工单、开工单分支、worktree、建 PR、合并 PR 关单、接单派单、foreman/工单/worktree 报错时使用。
+description: 交付一条龙 CLI（doubao-bot/foreman，命令 foreman）：建单 `issue create [--ws]`、开工作区+分支+回写工单右侧分支 `ws add`、建 PR `pr open`、幂等合并+关单+清尾 `pr merge`；派单/合并请求一律经 router agent 路由（hand/run/pickup 只投 router Inbox，服务不直接开任何 agent 会话，router 是唯一编排者）。执行载体 agent 可插拔，noop 载体下不开任何真实会话、机械动作照常工作。用户提到建工单、开工单分支、worktree、建 PR、合并 PR 关单、接单派单、foreman/工单/worktree 报错时使用。
 ---
 
 # foreman：交付一条龙
@@ -9,7 +9,7 @@ CLI 源码在 `doubao-bot/foreman`，已 `npm link` 全局；改源码 → commi
 
 ## 两个可插拔的载体
 
-- **执行载体**（`agent: "dws" | "noop"`，当前 **noop**）：豆包只是可选 agent 之一。noop 不开任何真实会话、不碰豆包——`issue/ws/pr/issue/outbox/clean/tasks` 照常工作；派单/投递「成功」但无人干活，inbox 只记账会堆积。
+- **执行载体**（配置 `agent`，当前 **noop**）：agent 载体可插拔，桌面 AI agent 只是可选载体之一。noop 不开任何真实会话、不碰任何 agent——`issue/ws/pr/issue/outbox/clean/tasks` 照常工作；派单/投递「成功」但无人干活，inbox 只记账会堆积。
 - **tracker 适配器**（当前 Gitea）：工单/PR 读写走适配器契约；`Issue.ref`（工单右侧分支）是 Gitea 特有能力位，换 GitHub/Jira 自动跳过。
 
 ## 一条龙工作流（noop/ZCode 承担全部智能工作）
@@ -39,7 +39,7 @@ foreman pr merge <N> --repo R    # 验收后由人类/独立验收系统执行�
 foreman clean <owner/name>#<N>   # 幂等清尾；foreman clean --all 清所有终端态工单残留
 ```
 
-辅助：`foreman issue comment|close|settle`（评论/关单/只修本地 done）、`foreman retry <仓库> <N>`（放回队列，纯本地）、`foreman tasks --json`（会话树只读）、`foreman status` / `inbox list`（只读）、`foreman send --type mail|lark`（外发，与 agent 无关）、`foreman doctor`（体检；`--start` 在 noop 下不碰豆包）。
+辅助：`foreman issue comment|close|settle`（评论/关单/只修本地 done）、`foreman retry <仓库> <N>`（放回队列，纯本地）、`foreman tasks --json`（会话树只读）、`foreman status` / `inbox list`（只读）、`foreman send --type mail|lark`（外发，与 agent 无关）、`foreman doctor`（体检；`--start` 在 noop 下不碰任何 agent）。
 
 ## 全部由 router agent 路由
 
