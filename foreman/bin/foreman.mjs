@@ -57,7 +57,8 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman mail requests
   foreman mail approve <owner/repo>#<N> [--by <人>] [--note <说明>]
   foreman mail reject  <owner/repo>#<N> [--by <人>] [--note <原因>]
-  foreman ws add --repo <工程名|owner/name> --issue <owner/name>#<单号> [--base <基线>]
+  foreman ws add --repo <工程名|owner/name> --issue <owner/name>#<单号> [--base <基线>] [--force]
+                            # 标签门禁：无 ready-for-agent 拒绝；needs-triage/needs-info/ready-for-human/wontfix 分类报错；--force 显式绕过
   foreman ws list --issue <owner/name>#<单号>
   foreman issue create --repo R --title <标题> [--body <正文>] [--ws]
                                       一条龙起点：建单 + 账本建档；--ws 立即开工单所在仓的工作区
@@ -349,7 +350,11 @@ async function cmdWs(pos, flags) {
   const issue = strFlag(flags.issue)
   if (!issue) throw new Error("ws 子命令要 --issue <owner/name>#<工单号>（首句里给的「工单键」）")
   const req = { id: "cli", cmd: `ws ${sub}`, issue, repo: strFlag(flags.repo), base: strFlag(flags.base) }
-  if (sub === "add" && !req.repo) throw new Error("ws add 要 --repo <工程名|owner/name>")
+  if (sub === "add") {
+    if (!req.repo) throw new Error("ws add 要 --repo <工程名|owner/name>")
+    // 标签门禁绕过开关：只有决策者本人该用（见 ws add 的分类报错文案）。
+    req.force = flags.force === true
+  }
   const r = await callRaw(resolveTarget(cfg), req, 300000)
   if (!r.ok) throw new Error(`${r.error}：${r.message ?? ""}`)
   return out({ ok: true, ...r })

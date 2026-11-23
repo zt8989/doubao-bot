@@ -8,6 +8,7 @@ import path from "node:path"
 import { handleRequest } from "../src/service.mjs"
 import { GiteaTrackerAdapter } from "../src/workflow/adapters/gitea.mjs"
 import { makeSessionAdapter } from "../src/workflow/adapters/session.mjs"
+import { Book } from "../src/book.mjs"
 
 const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), "foreman-onestop-"))
 
@@ -49,11 +50,12 @@ function gitFixture(dir) {
 
 function fakeTracker(log = []) {
   const impl = {
-    // 可覆写 viewIssue 的 ref 值
+    // 可覆写 viewIssue 的 ref 值与标签
     issueRef: "",
+    issueLabels: ["ready-for-agent"],
     async viewIssue(repo, n) {
       log.push(["viewIssue", repo, n])
-      return { number: n, title: "示例工单", url: `https://gitea.example/${repo}/issues/${n}`, labels: ["ready-for-agent"], ref: this.issueRef }
+      return { number: n, title: "示例工单", url: `https://gitea.example/${repo}/issues/${n}`, labels: this.issueLabels, ref: this.issueRef }
     },
     async createIssue(repo, { title, body }) {
       log.push(["createIssue", repo, title])
@@ -150,7 +152,7 @@ test("能力位守卫：tracker 没有 editIssue/issueRef 时 ws add 照常，�
   try {
     const repoDir = gitFixture(dir)
     const cfg = mkCfg(dir, repoDir)
-    const bare = { viewIssue: async (repo, n) => ({ number: n, title: "t", url: "", ref: "" }) }
+    const bare = { viewIssue: async (repo, n) => ({ number: n, title: "t", url: "", ref: "", labels: ["ready-for-agent"] }) }
     const tracker = new GiteaTrackerAdapter({ impl: bare })
     delete tracker.impl.editIssue
     tracker.capabilities = {}
@@ -158,6 +160,90 @@ test("能力位守卫：tracker 没有 editIssue/issueRef 时 ws add 照常，�
     assert.equal(out.ok, true)
     const book = JSON.parse(fs.readFileSync(cfg.stateFile, "utf8")).issues["yyzl/demo#8"]
     assert.equal(book.branchRef, undefined)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+
+test("ws add 标签门禁：无 ready-for-agent 拒绝（not-ready），不建工作区不建档", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = mkCfg(dir, gitFixture(dir))
+    const tracker = fakeTracker()
+    tracker.impl.issueLabels = ["enhancement"]
+    const routed = []
+    const ctx = mkCtx(cfg, tracker)
+    ctx.notifyRouter = async (e) => { routed.push(e); return { ok: true } }
+    const out = await handleRequest(ctx, { id: "g", cmd: "ws add", issue: "yyzl/demo#11", repo: "yyzl/demo" })
+    assert.equal(out.ok, false)
+    assert.equal(out.error, "not-ready")
+    assert.match(out.message, /没有 ready-for-agent/)
+    assert.equal(routed.length, 0, "not-ready 不投 router")
+    assert.equal(fs.existsSync(path.join(cfg.worktreeDir, "demo")), false, "未建工作区")
+    assert.equal(new Book(cfg.stateFile).issue("yyzl/demo#11"), null, "被拒的单不在账本留痕")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("ws add 门禁：needs-info / ready-for-human / wontfix 分类报错", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = mkCfg(dir, gitFixture(dir))
+    for (const [label, errCode, hint] of [
+      ["needs-info", "needs-info", /向用户\/工单发起人索要/],
+      ["ready-for-human", "needs-human", /归属人工/],
+      ["wontfix", "wontfix", /不修/],
+    ]) {
+      const tracker = fakeTracker()
+      tracker.impl.issueLabels = [label]
+      const out = await handleRequest(mkCtx(cfg, tracker), { id: label, cmd: "ws add", issue: "yyzl/demo#12", repo: "yyzl/demo" })
+      assert.equal(out.ok, false, label)
+      assert.equal(out.error, errCode, label)
+      assert.match(out.message, hint, label)
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("ws add 门禁：needs-triage 自动投 issue.decision 给 router 并返回指引", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = mkCfg(dir, gitFixture(dir))
+    const tracker = fakeTracker()
+    tracker.impl.issueLabels = ["needs-triage"]
+    const routed = []
+    const ctx = mkCtx(cfg, tracker)
+    ctx.notifyRouter = async (e) => { routed.push(e); return { ok: true, eventId: "evt-triage" } }
+    const out = await handleRequest(ctx, { id: "h", cmd: "ws add", issue: "yyzl/demo#13", repo: "yyzl/demo" })
+    assert.equal(out.ok, false)
+    assert.equal(out.error, "needs-triage")
+    assert.match(out.message, /改标签（ready-for-agent=可开工 \/ ready-for-human=交人工）/)
+    assert.match(out.message, /router Inbox/)
+    assert.equal(routed.length, 1)
+    assert.equal(routed[0].type, "issue.decision")
+    assert.equal(routed[0].json.issue.number, 13)
+    assert.equal(new Book(cfg.stateFile).issue("yyzl/demo#13"), null, "triage 拒绝也不留账本痕迹")
+    assert.equal(fs.existsSync(path.join(cfg.worktreeDir, "demo")), false, "不开工作区")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("ws add 门禁：--force 绕过（照常建工作区+回写 ref）", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = mkCfg(dir, gitFixture(dir))
+    const tracker = fakeTracker()
+    tracker.impl.issueLabels = ["needs-info"]
+    const out = await handleRequest(mkCtx(cfg, tracker), { id: "i", cmd: "ws add", issue: "yyzl/demo#14", repo: "yyzl/demo", force: true })
+    assert.equal(out.ok, true)
+    assert.equal(out.branch, "fix/issue-14")
+    const after = new Book(cfg.stateFile).issue("yyzl/demo#14")
+    assert.equal(after.state, "planned")
+    assert.equal(after.workspaces.length, 1)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

@@ -2228,25 +2228,71 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     const repoCfg = (ctx.cfg.repos ?? []).find((r) => r.repo === repoRef || r.name === repoRef)
     if (!repoCfg) return fail("bad-request", `配置里没有这个工程：${repoRef || "（空）"}`)
     const book0 = new Book(ctx.cfg.stateFile)
-    let rec = book0.issue(key)
-    if (!rec) {
-      // 一条龙/noop 自起步：账本还没有这条单（从没 hand 过）时，回查 tracker 建档成 planned，
-      // 工作区链路就能独立于派单流程使用。回查失败（单号不存在/无权限）才报错，不凭空造单。
-      try {
-        const issue = await ctx.gitea.viewIssue(String(m[1]), Number(m[2]))
-        book0.setIssue(key, {
-          state: "planned",
-          issue: Number(m[2]),
-          title: String(issue?.title ?? ""),
-          url: String(issue?.url ?? ""),
-          repo: String(m[1]),
-          labels: Array.isArray(issue?.labels) ? issue.labels : [],
-        })
-        rec = book0.issue(key)
-        ctx.log?.(`ws add ${key}：账本没有这条单，已按 tracker 工单建档（planned）`)
-      } catch (e) {
-        return fail("gitea-error", `账本里没有这条单，回查工单也失败：${String(e?.message ?? e).slice(0, 300)}`)
+    const rec0 = book0.issue(key)
+    // 工单取一次：标签门禁、建档、右侧分支判断都用它。取不到且账本有档时降级继续（跳过门禁，记日志）。
+    let issue = null
+    try {
+      issue = await ctx.gitea.viewIssue(String(m[1]), Number(m[2]))
+    } catch (e) {
+      if (!rec0) return fail("gitea-error", `账本里没有这条单，回查工单也失败：${String(e?.message ?? e).slice(0, 300)}`)
+      ctx.log?.(`ws add ${key}：工单读取失败，跳过标签门禁（${String(e?.message ?? e).slice(0, 120)}）`)
+    }
+    // 标签门禁：只在「首次建分支」时把关（账本还没记过 branch）；补工作区/复用不重审（右侧分支回写照旧）。
+    // 门禁放在建档之前：被拒的单不在账本留痕。组织级准入标签 5 个：ready-for-agent=可开工；
+    // needs-triage=先分流；needs-info=先要信息；ready-for-human=归人工；wontfix=不修。
+    // 其他标签（enhancement 等）不参与门禁。
+    const firstTime = !rec0 || !String(rec0.branch ?? "").trim()
+    if (firstTime && issue) {
+      const labels = (Array.isArray(issue.labels) ? issue.labels : []).map((l) => String(l).toLowerCase())
+      const has = (name) => labels.includes(name)
+      if (!has("ready-for-agent") && req.force !== true) {
+        if (has("wontfix")) {
+          return fail("wontfix", `工单 ${key} 已标记 wontfix（不修），不建工作区。若判断应当修，先与负责人确认并摘掉 wontfix 标签再重试；或 --force 显式绕过。`)
+        }
+        if (has("ready-for-human")) {
+          return fail("needs-human", `工单 ${key} 带 ready-for-human：归属人工处理，agent 不要开工。等人工处理完并调整标签后再重试；或 --force 显式绕过。`)
+        }
+        if (has("needs-info")) {
+          return fail("needs-info", `工单 ${key} 带 needs-info：信息不足不能开工。请向用户/工单发起人索要缺失信息（foreman issue comment 留言或 send --type mail），信息齐了把标签改成 ready-for-agent 再重试 ws add；或 --force 显式绕过。`)
+        }
+        if (has("needs-triage")) {
+          // 自动转决策：把分流请求投给 router（唯一编排者调研后切 ready-for-agent / ready-for-human）。
+          // noop 载体下事件只入箱堆积——那时分流由人或外部 agent 完成。
+          let routed = ""
+          try {
+            await routeToRouter(ctx, {
+              type: "issue.decision",
+              text: [
+                `【Foreman · 待分流】工单 ${key}「${issue.title ?? ""}」带 needs-triage，有人尝试开工被门禁拦下。`,
+                issue.url ? `链接：${issue.url}` : "",
+                "请调研工单与相关代码给出可行方案，然后改标签：可编码切 ready-for-agent，交人工切 ready-for-human；拿不准就 foreman send --type mail 请用户决策。",
+              ].filter(Boolean).join("\n"),
+              json: { issue: { key, repo: String(m[1]), number: Number(m[2]), title: issue.title ?? "", url: issue.url ?? "", labels } },
+            })
+            routed = "已把分流请求写入 router Inbox"
+          } catch {}
+          return fail(
+            "needs-triage",
+            `工单 ${key} 带 needs-triage：先调研再分流，不直接开工。请阅读工单与相关代码给出可行方案，然后改标签（ready-for-agent=可开工 / ready-for-human=交人工）再重试 ws add。${routed}；或 --force 显式绕过。`,
+          )
+        }
+        return fail("not-ready", `工单 ${key} 没有 ready-for-agent，未经确认不开工。人工确认后加该标签再重试；若你就是决策者，可 --force 显式绕过。`)
       }
+    }
+    let rec = rec0
+    if (!rec && issue) {
+      // 一条龙/noop 自起步：账本还没有这条单（从没 hand 过）时，按 tracker 工单建档成 planned，
+      // 工作区链路就能独立于派单流程使用。不凭空造单。
+      book0.setIssue(key, {
+        state: "planned",
+        issue: Number(m[2]),
+        title: String(issue?.title ?? ""),
+        url: String(issue?.url ?? ""),
+        repo: String(m[1]),
+        labels: Array.isArray(issue?.labels) ? issue.labels : [],
+      })
+      rec = book0.issue(key)
+      ctx.log?.(`ws add ${key}：账本没有这条单，已按 tracker 工单建档（planned）`)
     }
     const prev = findWorkspace(rec, repoCfg.repo)
     const branch = prev?.branch || issueBranch({ number: Number(m[2]) }, rec.title ?? "")
@@ -2286,10 +2332,9 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     const refOn = repoCfg.repo === keyRepo
       && typeof ctx.gitea?.editIssue === "function"
       && ctx.gitea?.capabilities?.issueRef !== false
-    if (refOn) {
+    if (refOn && issue) {
       try {
-        const cur = await ctx.gitea.viewIssue(String(m[1]), Number(m[2]))
-        if (String(cur?.ref ?? "") !== branch) {
+        if (String(issue.ref ?? "") !== branch) {
           await ctx.gitea.editIssue(String(m[1]), Number(m[2]), { ref: branch })
           branchRef = { branch, at: nowIso() }
           ctx.log?.(`ws add ${key}：已指定工单右侧分支 ${branch}`)
