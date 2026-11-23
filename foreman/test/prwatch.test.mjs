@@ -316,13 +316,11 @@ test("PR 扫描把他人候选直投合并会话，自己的和作者不明的�
   }
 })
 
-test("服务 PR 扫描把他人 PR 直投合并会话，不再绕路由", async () => {
+test("服务 PR 扫描把他人 PR 写 pr.merge Inbox，不建任何会话", async () => {
   const dir = tmpDir()
   try {
     const cfg = baseCfg(dir)
-    cfg.deliver = { mode: "new" }
-    const inspected = []
-    const delivered = []
+    const enqueued = []
     const ctx = {
       cfg,
       state: { pr: { polling: false, pollCount: 0, notifiedCount: 0, pending: 0 } },
@@ -332,15 +330,16 @@ test("服务 PR 扫描把他人 PR 直投合并会话，不再绕路由", async 
         viewPr: async () => ({ mergeNote: "可以合并", state: "open" }),
       },
       dws: {},
-      notifyInspector: async (text) => { inspected.push(text); return { ok: true, convId: "inspector-1" } },
-      deliver: async (args) => { delivered.push(args); return { session: "foreman-合并-73", convId: "merge-73" } },
+      inbox: { enqueue: async (event) => { enqueued.push(event); return { ok: true, id: 1 } } },
+      notifyRouter: async () => { throw new Error("扫描不直接投 router，只写 Inbox") },
+      deliver: async () => { throw new Error("扫描不允许建合并会话") },
     }
     const out = await prPollOnce(ctx)
     assert.equal(out.notified, 1)
-    assert.equal(out.via, "merge-direct")
-    assert.equal(inspected.length, 0, "他人 PR 不再经路由中转")
-    assert.equal(delivered.length, 1)
-    assert.equal(delivered[0].lane, "merge")
+    assert.equal(out.via, "inbox")
+    assert.equal(enqueued.length, 1)
+    assert.equal(enqueued[0].kind, "pr.merge")
+    assert.equal(enqueued[0].payload.prs.length, 1)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -417,11 +416,11 @@ test("pr ui-assign：本人 UI PR 在周晓亮和张振豪间轮询指派，重�
   }
 })
 
-test("pr assign：只给他人 PR 分配合并助手，自己的和作者不明的拒绝，重复分配幂等", async () => {
+test("pr assign：他人 PR 投 router 合并，自己的和作者不明的拒绝，重复分配幂等", async () => {
   const dir = tmpDir()
   try {
     const cfg = baseCfg(dir)
-    const delivered = []
+    const routed = []
     const prs = {
       80: { repo: "demo/demo", number: 80, title: "自己的", author: "233151", state: "open" },
       81: { repo: "demo/demo", number: 81, title: "作者不明", author: "", state: "open" },
@@ -431,9 +430,9 @@ test("pr assign：只给他人 PR 分配合并助手，自己的和作者不明�
       cfg,
       state: {},
       gitea: { viewPr: async (_repo, number) => prs[number] },
-      deliver: async (args) => {
-        delivered.push(args)
-        return { session: "foreman-合并-82", convId: "merge-82" }
+      notifyRouter: async (envelope) => {
+        routed.push(envelope)
+        return { ok: true, action: "inbox", eventId: "evt-82" }
       },
     }
     const own = await handleRequest(ctx, { id: "own", cmd: "pr assign", repo: "demo/demo", number: 80 })
@@ -441,19 +440,20 @@ test("pr assign：只给他人 PR 分配合并助手，自己的和作者不明�
     assert.match(own.message, /233151|他人/)
     const unknown = await handleRequest(ctx, { id: "unknown", cmd: "pr assign", repo: "demo/demo", number: 81 })
     assert.equal(unknown.ok, false)
-    assert.equal(delivered.length, 0)
+    assert.equal(routed.length, 0)
 
     const first = await handleRequest(ctx, { id: "first", cmd: "pr assign", repo: "demo/demo", number: 82 })
     assert.equal(first.ok, true)
-    assert.equal(first.convId, "merge-82")
+    assert.equal(first.action, "routed")
+    assert.equal(first.router, true)
     const second = await handleRequest(ctx, { id: "second", cmd: "pr assign", repo: "demo/demo", number: 82 })
     assert.equal(second.ok, true)
     assert.equal(second.skipped, "already-assigned")
-    assert.equal(delivered.length, 1)
-    assert.match(delivered[0].text, /foreman pr merge 82 --repo demo\/demo/)
+    assert.equal(routed.length, 1, "重复分配不再投递")
+    assert.match(routed[0].text, /foreman pr merge 82 --repo demo\/demo/)
     const seen = new Book(cfg.stateFile).prSeen["demo/demo#82"]
-    assert.equal(seen.assignedTo, "foreman-合并-82")
-    assert.equal(seen.assignedConvId, "merge-82")
+    assert.equal(seen.assignedTo, "router")
+    assert.equal(seen.notifiedTo, "router")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -655,15 +655,18 @@ test("PR 扫描只写 pr.merge Inbox，不建会话、不提前记已通知", as
   }
 })
 
-test("pr.merge Worker：建合并助手并记账，重复事件幂等不重复建", async () => {
+test("pr.merge Worker：投 router 并记账，重复事件幂等不重复投", async () => {
   const dir = tmpDir()
   try {
     const cfg = baseCfg(dir)
-    const delivered = []
+    const routed = []
     const ctx = {
       cfg,
       log: () => {},
-      deliver: async (args) => { delivered.push(args); return { session: "foreman-合并-95", convId: "merge-95" } },
+      notifyRouter: async (envelope) => {
+        routed.push(envelope)
+        return { ok: true, action: "inbox", eventId: "evt-95" }
+      },
     }
     const event = {
       kind: "pr.merge",
@@ -673,37 +676,36 @@ test("pr.merge Worker：建合并助手并记账，重复事件幂等不重复�
       },
     }
     const first = await deliverMergeCandidate(ctx, event)
-    assert.equal(first.action, "assigned")
-    assert.equal(first.session, "foreman-合并-95")
-    assert.equal(delivered.length, 1)
-    assert.equal(delivered[0].lane, "merge")
+    assert.equal(first.action, "routed")
+    assert.equal(first.router, true)
+    assert.equal(routed.length, 1)
+    assert.equal(routed[0].type, "pr.merge")
+    assert.match(routed[0].text, /foreman pr merge/)
     const seen = new Book(cfg.stateFile).prSeen["demo/demo#95"]
-    assert.equal(seen.assignedTo, "foreman-合并-95")
+    assert.equal(seen.assignedTo, "router")
     assert.ok(seen.notifiedAt)
-    assert.deepEqual(new Book(cfg.stateFile).notices["foreman-合并-95"].prs, ["demo/demo#95"])
 
     const second = await deliverMergeCandidate(ctx, event)
     assert.equal(second.skipped, "already-assigned")
-    assert.equal(delivered.length, 1, "重复事件不再建会话")
+    assert.equal(routed.length, 1, "重复事件不再投递")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test("pr.merge 投递失败由 Inbox 重试，恢复后只建一条合并会话", async () => {
+test("pr.merge 转投 router 后，router 会话投递失败由 Inbox 重试", async () => {
   const dir = tmpDir()
   let server
   try {
     const cfg = baseCfg(dir)
     cfg.prWatch.intervalSeconds = 3600
     const book = new Book(cfg.stateFile)
-    book.record("caller-1", { convId: "conv-first" })
     let calls = 0
     const dws = {
       openNew: async () => {
         calls++
         if (calls === 1) throw new Error("dws 暂时不可用")
-        return { convId: "merge-retry" }
+        return { convId: "router-retry" }
       },
       queue: async () => {},
     }
@@ -713,20 +715,19 @@ test("pr.merge 投递失败由 Inbox 重试，恢复后只建一条合并会话"
     const scanned = await server.prPoll()
     assert.equal(scanned.via, "inbox")
     await server.worker.idle()
-    assert.equal(calls, 1, "第一次建会话失败")
-    const pending = server.inbox.list({ status: "pending" }).filter((e) => e.kind === "pr.merge")
-    assert.equal(pending.length, 1, "失败事件留在 Inbox，不丢")
-    assert.match(pending[0].lastError ?? "", /dws 暂时不可用/)
-    assert.equal(new Book(cfg.stateFile).prSeen["demo/demo#96"]?.assignedTo ?? "", "", "未投递成功不记账")
+    // pr.merge 事件被 Worker 消费：转投 router（记账 assignedTo=router），不再建合并会话
+    const seen = new Book(cfg.stateFile).prSeen["demo/demo#96"]
+    assert.equal(seen.assignedTo, "router")
+    assert.equal(server.inbox.list({ status: "pending" }).filter((e) => e.kind === "pr.merge").length, 0)
+    // router.notice 首次投递（新建 router 会话）失败，留在 Inbox 等重试
+    const pendingRouter = server.inbox.list({ status: "pending" }).filter((e) => e.kind === "router.notice")
+    assert.equal(pendingRouter.length, 1, "router 投递失败的事件留在 Inbox")
+    assert.match(pendingRouter[0].lastError ?? "", /dws 暂时不可用/)
 
-    // retryMs 默认 30s：把时钟推到重试时间之后，模拟 Worker 下一轮。
     const retried = await server.worker.runOnce(new Date(Date.now() + 60000))
     assert.equal(retried.ok, true)
-    assert.equal(calls, 2, "重试时才第二次建会话")
-    const seen = new Book(cfg.stateFile).prSeen["demo/demo#96"]
-    assert.match(seen.assignedTo, /^foreman-合并-/)
-    assert.ok(seen.notifiedAt)
-    assert.equal(server.inbox.list({ status: "pending" }).filter((e) => e.kind === "pr.merge").length, 0)
+    assert.equal(calls, 2, "重试时才第二次建 router 会话")
+    assert.equal(server.inbox.list({ status: "pending" }).filter((e) => e.kind === "router.notice").length, 0)
 
     // 再扫一轮：已通知的 PR 不会再次入箱。
     const again = await server.prPoll()
@@ -737,3 +738,4 @@ test("pr.merge 投递失败由 Inbox 重试，恢复后只建一条合并会话"
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+

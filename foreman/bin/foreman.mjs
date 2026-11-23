@@ -63,12 +63,9 @@ const HELP = `foreman — 接单编排 + 常驻服务
                                       一条龙起点：建单 + 账本建档；--ws 立即开工单所在仓的工作区
   foreman issue comment <N> --repo R --body <正文>
   foreman issue close <N> --repo R
-  foreman run   [--once] [--dry-run] [--direct] [--repo <名字|owner/name>] [--notify <会话id|标题>] [--no-notify] [-c <配置>]
+  foreman run   [--once] [--dry-run] [--repo <名字|owner/name>] [-c <配置>]    # 扫描可接工单，逐条投 router
   foreman orch show                    看每条编排会话绑了哪些工作会话、最近 steer 了什么
-  foreman hand <owner/name>#<单号> [--orchestrator <id>]      把工单交给本单主智能体（接单入口）
-  foreman decide <owner/name>#<单号> [--orchestrator <id>]
-                                      router agent 消费 issue.decision 时调用：用决策提示词开一条新会话
-                                      不绑编排、不监听、不进 PR 链；agent 先调研再决定要不要切 ready-for-agent
+  foreman hand <owner/name>#<单号>           把工单投给 router agent（唯一编排者，接单入口）
   foreman clean <owner/name>#<单号>     合并关单后清 worktree、本地分支、工作会话与这张单的编排会话（幂等）
   foreman clean --all                  清所有终端态工单残留的工作区与会话
   foreman pickup [-c <配置>]        手动催一轮自动巡检（服务按 pickup 配置捞一轮单）
@@ -427,57 +424,25 @@ async function cmdPickup(pos, flags) {
 }
 
 async function cmdRun(pos, flags) {
-  if (flags.every !== undefined) throw new Error("run --every 已移除：代码不再自动接单；请由路由智能体决策后调用 run --once")
+  if (flags.every !== undefined) throw new Error("run --every 已移除：派单一律投 router agent，由它决策接单")
+  if (truthy(flags.direct)) throw new Error("run --direct 已移除：foreman 不再直接派 agent，派单请求一律投 router")
   const cfg = loadConfig(flags.config)
   if (!cfg.repos.length) throw new Error("配置里没有 repos，先写一条：{\"repo\":\"owner/name\",\"dir\":\"~/Documents/workspace/<repo>\"}")
-  // --notify <目标> / --no-notify 只管本轮派出去的会话要不要登记监听。
-  const notifyTo = flags.notify && flags.notify !== true ? String(flags.notify) : ""
-  const noNotify = truthy(flags["no-notify"])
-  const lockFile = path.join(path.dirname(cfg.stateFile), "run.lock")
-
   const dryRun = truthy(flags["dry-run"])
-  const ctx = makeCtx(cfg, {
-    dryRun,
-    once: truthy(flags.once, true),
+  // runRound 需要 ctx.routeIssue（写 router Inbox），所以 run 必须在服务里跑。
+  const r = await callRaw(resolveTarget(cfg), {
+    id: "cli", cmd: "run",
     only: flags.repo && flags.repo !== true ? String(flags.repo) : "",
-    notifyTo,
-    noNotify,
-    // --direct：这一轮自己派（老行为），不交给编排会话。
-    ...(truthy(flags.direct) ? { hand: false } : {}),
+    dryRun,
+  }, 900000)
+  if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
+  const handled = Array.isArray(r.handled) ? r.handled : []
+  out({
+    ok: true,
+    dryRun,
+    handled: handled.map((h) => ({ repo: h.repo, number: h.number, state: h.state, routed: h.routed ?? null, message: h.message ?? null })),
+    summary: summarize(handled),
   })
-
-  if (!dryRun) {
-    const lock = acquireLock(lockFile)
-    if (!lock) {
-      out({ ok: true, skipped: "locked", note: `另一轮还在跑（${lockFile}），这轮跳过` })
-      return
-    }
-  }
-
-  try {
-    const handled = []
-    const round = await runRound(ctx)
-    handled.push(...round)
-
-    out({
-      ok: true,
-      dryRun,
-      handled: handled.map((h) => ({
-        repo: h.repo,
-        number: h.number,
-        state: h.state,
-        branch: h.branch ?? null,
-        workspaces: Array.isArray(h.workspaces) ? h.workspaces.length : null,
-        convId: h.convId ?? null,
-      })),
-      summary: summarize(handled),
-    })
-  } catch (e) {
-    out({ ok: false, error: e.code ?? "error", message: e.message })
-    process.exitCode = 1
-  } finally {
-    if (!dryRun) releaseLock(lockFile)
-  }
 }
 
 function summarize(handled) {
@@ -680,20 +645,13 @@ function callerOrchestrator(flags = {}) {
   return String(process.env.MCP_VM_CONVERSATION_ID ?? "").trim()
 }
 
-// 调用方会话并不总是要绑：传了才写进请求（空字符串等于「交给全局编排会话」）。
-function orchestratorArg(flags = {}) {
-  const who = callerOrchestrator(flags)
-  if (who) process.stderr.write(`  编排：${who}（调用方会话，更新会 steer 到这里）\n`)
-  else process.stderr.write("  编排：这张单自己的主智能体（hand 自动按单建）\n")
-  return who ? { orchestrator: who } : {}
-}
 
 async function cmdHand(pos, flags) {
   const ref = String(pos[0] ?? flags.issue ?? "").trim()
   if (!ref) throw new Error("用法：foreman hand <owner/name>#<单号>")
   const cfg = loadConfig(flags.config)
   const port = await resolvePort(cfg)
-  const r = await callRaw(port, { id: "cli", cmd: "hand", issue: ref, fresh: flags.fresh === true, ...orchestratorArg(flags) }, 600000)
+  const r = await callRaw(port, { id: "cli", cmd: "hand", issue: ref }, 600000)
   if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
   return out({ ok: true, ...r })
 }
@@ -753,15 +711,6 @@ async function cmdWorker(pos, flags) {
 }
 
 
-async function cmdDecide(pos, flags) {
-  const ref = String(pos[0] ?? flags.issue ?? "").trim()
-  if (!ref) throw new Error("用法：foreman decide <owner/name>#<单号>（router agent 消费 issue.decision 时调用）")
-  const cfg = loadConfig(flags.config)
-  const port = await resolvePort(cfg)
-  const r = await callRaw(port, { id: "cli", cmd: "decide", issue: ref, ...orchestratorArg(flags) }, 900000)
-  if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
-  return out({ ok: true, ...r })
-}
 
 
 async function cmdClean(pos, flags) {
@@ -841,8 +790,6 @@ async function main() {
       return cmdWorker(pos, flags)
     case "memory":
       return cmdMemory(pos, flags)
-    case "decide":
-      return cmdDecide(pos, flags)
     case "clean":
       return cmdClean(pos, flags)
     case "pickup":

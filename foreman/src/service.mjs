@@ -8,11 +8,10 @@ import { nowIso, sleep, inWorkHours } from "./util.mjs"
 import { Book } from "./book.mjs"
 import { deliverPrompt, noticeSessionName, issueBranch } from "./prompts.mjs"
 import { builtinPrompt } from "./builtin-prompts.mjs"
-import { notifyTarget, shouldNotify, notifyText, runRound, acquireLock, releaseLock, handleIssue, bucketOf, CLOSED_STATES } from "./orchestrator.mjs"
+import { notifyTarget, shouldNotify, notifyText, runRound, acquireLock, releaseLock, bucketOf, CLOSED_STATES } from "./orchestrator.mjs"
 import {
   cleanIssue,
   cleanableIssues,
-  handToOrchestrator,
   orchestratorInfo,
   orchestratorTarget,
   ownedIssueOrchestrator,
@@ -485,6 +484,7 @@ export async function pickupOnce(ctx, { run = runRound, force = false } = {}) {
       log,
       consoleStore: ctx.consoleStore,
       maxTotal,
+      routeIssue: ctx.routeIssue,
     })
     const dispatched = handled.filter((h) => h.state === "dispatched")
     // 会话中心：捞到的单先交给编排会话（handed），工作会话等编排调 dispatch 才开。
@@ -618,6 +618,53 @@ export async function candidatesOnce(ctx, { refresh = false } = {}) {
   return { ...payload, cached: false }
 }
 
+// 一切需要 agent 的请求统一投 router 会话：router 是服务唯一主动维护的 agent 会话，
+// 服务进程自己不再直接开任何别的 agent 会话（noop 载体下 router 会话也是假的，事件只入箱堆积）。
+async function routeToRouter(ctx, { type, text, json }) {
+  const notify = ctx.notifyRouter
+  if (typeof notify !== "function") throw new Error("ctx.notifyRouter 未初始化，无法投递 router（命令需要在服务里跑）")
+  const out = await notify({ type, text, json })
+  if (out?.ok === false) throw new Error(String(out?.error || "router 投递失败"))
+  return out
+}
+
+// 派单请求：账本记 handed（占槽，容量纪律照旧），事件投 router，由它作为唯一编排者接手。
+// 不建任何编排/工作会话——router 消费事件后在会话内用内部 sub agent 完成编码与审查。
+async function routeIssueToRouter(ctx, { repoCfg, issue, via = "hand" }) {
+  const { log = () => {} } = ctx
+  const key = `${repoCfg.repo}#${issue.number}`
+  const book = new Book(ctx.cfg.stateFile)
+  const prev = book.issue(key)
+  if (prev) {
+    if (CLOSED_STATES.has(prev.state)) return { ok: false, error: "already-handled", message: `${key} 已经处理过（${prev.state}），不重复派` }
+    if (prev.state === "handed") return { ok: false, error: "already-handed", message: `${key} 已投给 router，等它接手` }
+    if (prev.state === "working" && !prev.lastFailure) return { ok: false, error: "running", message: `${key} 正在跑，先看它的会话` }
+  }
+  const text = [
+    `【Foreman · 接单】工单 ${key}「${issue.title ?? ""}」`,
+    issue.url ? `链接：${issue.url}` : "",
+    "你是这张单的唯一编排者：核对容量与工单内容后自行开工——在会话内创建编码与对抗审查内部 sub agent，",
+    "编码侧用 foreman ws add / foreman pr open；需要决策时自行调研或邮件请人，不要把工单再派给别的会话。",
+  ].filter(Boolean).join("\n")
+  await routeToRouter(ctx, {
+    type: "issue.hand",
+    text,
+    json: { issue: { key, repo: repoCfg.repo, number: issue.number, title: issue.title ?? "", url: issue.url ?? "", labels: issue.labels ?? [] } },
+  })
+  book.setIssue(key, {
+    state: "handed",
+    issue: issue.number,
+    title: issue.title ?? "",
+    url: issue.url ?? "",
+    repo: repoCfg.repo,
+    handedAt: nowIso(),
+    handedVia: via,
+  })
+  await ctx.engine?.emit("issue.picked", { issueKey: key, workflow: "own" })
+  log(`接单 ${key}：已投 router（${via}）`)
+  return { ok: true, state: "handed", routed: "router", key }
+}
+
 // 控制台手动接单：只派点中的这一条，不看自动接单开关与工作时间；
 // 查重、run.lock、节点暂停照旧守着，避免和 CLI / 自动巡检把同一张单派两遍。
 export async function pickIssue(ctx, { repo = "", number = 0 } = {}) {
@@ -662,14 +709,12 @@ export async function pickIssue(ctx, { repo = "", number = 0 } = {}) {
     issue.number = n
 
     // 带「需要人参与 / 信息不足」类标签的单：不按「改完 commit」派，换决策提示词让 agent 自己判断，
-    // 不交给编排会话、不登记监听（decision → handleIssue 里 noNotify + 不绑 orchestrator）。
     const labels = (issue.labels ?? []).map((l) => String(l).toLowerCase())
     const exclude = new Set((cfg.pickup?.excludeLabels ?? []).map((l) => String(l).toLowerCase()))
     const decision = labels.some((l) => exclude.has(l))
 
     // 决策单走 Inbox：写 router.notice（type=issue.decision），由 Worker 串行 steer router agent，
-    // router 消费后调 foreman decide 开决策会话。不再在 pickIssue 里直接 handleIssue，
-    // 否则这条链路绕过了 Inbox 持久化 + Worker 串行投递，重启后会丢。
+    // router 消费后自行调研决策。派单请求一律走 Inbox 持久化 + Worker 串行投递，重启不丢。
     if (decision) {
       const notify = ctx.notifyRouter ?? ctx.notifyInspector
       if (typeof notify !== "function") {
@@ -681,8 +726,7 @@ export async function pickIssue(ctx, { repo = "", number = 0 } = {}) {
         "【Foreman · router agent · 决策单待处理】",
         `工单 ${key}「${issue.title ?? ""}」带 ${decisionLabels} 标签，需先调研 + 决策，不直接编码。`,
         issue.url ? `链接：${issue.url}` : "",
-        `请执行：foreman decide ${key}`,
-        "decide 会用决策提示词开一条新会话（不绑编排、不监听、不进 PR 链）；agent 自己判断要不要切 ready-for-agent，不确定就发邮件请用户决策。",
+        "请自行调研并给出结论：该切 ready-for-agent 就改标签，该交人就改 ready-for-human 或 foreman send --type mail 请用户决策；不要派编码，也不要把决策单当成可编码工单。",
       ].filter(Boolean).join("\n")
       let enqueueOut
       try {
@@ -719,29 +763,23 @@ export async function pickIssue(ctx, { repo = "", number = 0 } = {}) {
       return { ok: true, decision: true, state: "inbox", eventId: enqueueOut?.eventId ?? "", convId: "" }
     }
 
-    const hand = sessionFlowEnabled(cfg) && cfg.pickup?.handToOrchestrator === true
     let out
     try {
-      out = hand
-        ? await handToOrchestrator({ ...ctx, book }, { repoCfg, issue })
-        : await handleIssue({ ...ctx, book, decision: false, noNotify: ctx.noNotify }, repoCfg, issue)
+      out = await routeIssueToRouter(ctx, { repoCfg, issue, via: "pickup" })
     } catch (e) {
       finishOperation(ctx, op, "failed", e.message)
-      const code = e.code === "app_unavailable" ? "app_unavailable" : "dispatch-failed"
-      return { ok: false, error: code, message: e.message }
+      return { ok: false, error: "route-failed", message: e.message }
     }
-
-    // 和工作流引擎对齐：捞到单推 issue.picked，真开出工作会话再推 session.dispatched。
-    await ctx.engine?.emit("issue.picked", { issueKey: key, workflow: "own" })
-    if (out.state === "dispatched") {
-      await ctx.engine?.emit("session.dispatched", { issueKey: key, target: out.convId ?? out.agent ?? "", workflow: "own" })
+    if (out.ok === false) {
+      finishOperation(ctx, op, "failed", out.message || out.error)
+      return out
     }
-    finishOperation(ctx, op, "success", `${out.convId ? `已派出 · ${out.convId}` : out.reason || out.state}`)
+    finishOperation(ctx, op, "success", "已投 router")
     try {
       ctx.consoleStore?.sync(new Book(cfg.stateFile))
       forgetCandidates()
     } catch {}
-    log(`手动接单 ${key}：${out.state}${out.convId ? ` · ${out.convId}` : ""}`)
+    log(`手动接单 ${key}：已投 router`)
     return { ok: true, decision: false, ...out }
   } finally {
     releaseLock(lockFile)
@@ -966,6 +1004,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   // 控制台「待分配任务」：列候选（只读，带 45s 缓存）与手动接单（只派点中的那一条）。
   ctx.candidates = (opts) => candidatesOnce(ctx, opts)
   ctx.pickIssue = (args) => pickIssue(ctx, args)
+  ctx.routeIssue = (args) => routeIssueToRouter(ctx, args)
   // 页面上的「立即执行」：不看开关和 cron 现在是什么状态，立刻跑一轮这类任务。
   // 只 bypass「没开 / 不在工作时间」；容量、busy、锁、节点暂停这些保护仍然生效。
   ctx.runSchedule = async (id) => {
@@ -1007,7 +1046,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
       router: ({ scheduled, notices }) => routerOnce(ctx, { force: true, scheduled, notices }),
       "chat.message": (batch) => ctx.chat.deliver(batch),
       "mail.reply": (event) => deliverMailReply(ctx, event),
-      // 他人 PR 合并：扫描只写 pr.merge 事件，这里才建合并助手会话；不经 router agent。
+      // 他人 PR 合并：扫描只写 pr.merge 事件，这里只把请求转投 router（不再建合并助手会话）。
       "pr.merge": async (batch) => {
         const delivered = []
         for (const event of batch) delivered.push(await deliverMergeCandidate(ctx, event))
@@ -1285,16 +1324,16 @@ export async function prAssignOnce(ctx, { repo = "", number = 0 } = {}) {
         message: `只允许分配明确由他人创建的 PR；${repoName}#${prNumber} 的作者为 ${pr.author || "未知"}，不分配、不合并`,
       }
     }
-    if (typeof ctx.deliver !== "function") throw new Error("服务缺少 deliver，无法创建合并助手")
-    const out = await ctx.deliver({ text: prNotifyText([pr]), kind: "PR待合并", repo: repoName, lane: "merge" })
-    const session = String(out?.session ?? "").trim()
-    const convId = String(out?.convId ?? "").trim()
-    if (!session) throw new Error("合并助手创建成功返回但没有会话名")
+    // 人工补派也只投 router：由它核对后执行 foreman pr merge。
+    await routeToRouter(ctx, {
+      type: "pr.merge",
+      text: `【Foreman · 他人 PR 待合并（人工补派）】\n${prNotifyText([pr])}\n请核对后执行 foreman pr merge ${prNumber} --repo ${repoName}（幂等，合不了会回理由）。`,
+      json: { prs: [pr] },
+    })
     const assignedAt = nowIso()
     const saved = new Book(ctx.cfg.stateFile)
-    saved.markPrSeen(key, { ...pr, notifiedTo: session, via: "merge-assistant", assignedTo: session, assignedConvId: convId, assignedAt })
-    saved.markNotice(session, { name: session, convId, kind: "PR待合并", prs: [key] })
-    return { ok: true, action: "assigned", repo: repoName, number: prNumber, session, convId, assignedAt }
+    saved.markPrSeen(key, { ...pr, notifiedTo: "router", via: "router", assignedTo: "router", assignedAt })
+    return { ok: true, action: "routed", router: true, repo: repoName, number: prNumber, assignedAt }
   } catch (e) {
     return { ok: false, error: "pr-assign-failed", message: e.message }
   }
@@ -1303,11 +1342,12 @@ export async function prAssignOnce(ctx, { repo = "", number = 0 } = {}) {
 // Worker 的 pr.merge handler：Inbox 里的一条候选事件 → 一条合并助手会话。
 // 扫描只写意图，真正的建会话、投递、记账都在这里；失败抛错由 Inbox 统一重试，重启由 SQLite 恢复。
 // 重复事件（同一 PR 被两轮扫描各入箱一次）靠账本 assignedTo / notifiedAt 过滤，不会重复建会话。
+// Worker 的 pr.merge handler：不再开合并助手会话——合并请求投 router agent，
+// 由它核对后直接执行 foreman pr merge（幂等）。账本 notifiedTo 记 router，去重逻辑不变。
 export async function deliverMergeCandidate(ctx, event) {
   const payload = event?.payload ?? {}
   const list = Array.isArray(payload.prs) ? payload.prs : []
   if (!list.length) return { ok: true, skipped: "empty" }
-  if (typeof ctx.deliver !== "function") throw new Error("服务缺少 deliver，无法创建合并助手")
   const book = new Book(ctx.cfg.stateFile)
   const todo = list.filter((pr) => {
     const seen = book.prSeen[pr.key] ?? {}
@@ -1316,24 +1356,18 @@ export async function deliverMergeCandidate(ctx, event) {
   if (!todo.length) return { ok: true, skipped: "already-assigned", prs: list.map((pr) => pr.key) }
 
   const text = String(payload.text ?? "").trim() || prNotifyText(todo)
-  const repo = todo.every((pr) => pr.repo === todo[0].repo) ? String(todo[0].repo ?? "") : ""
-  const out = await ctx.deliver({ text, kind: "PR待合并", repo, lane: "merge" })
-  const session = String(out?.session ?? "").trim()
-  const convId = String(out?.convId ?? "").trim()
-  if (!session) throw new Error("合并会话创建成功返回但没有会话名")
-
+  await routeToRouter(ctx, {
+    type: "pr.merge",
+    text: `【Foreman · 他人 PR 待合并】\n${text}\n请核对后逐条执行 foreman pr merge <N> --repo <仓库>（幂等，合不了会回理由）；不要自己改代码。`,
+    json: { prs: todo },
+  })
   const assignedAt = nowIso()
   const saved = new Book(ctx.cfg.stateFile)
   for (const pr of todo) {
-    saved.markPrSeen(pr.key, {
-      ...pr, notifiedTo: session, via: "merge-assistant",
-      assignedTo: session, assignedConvId: convId, assignedAt,
-    })
+    saved.markPrSeen(pr.key, { ...pr, notifiedTo: "router", via: "router", assignedTo: "router", assignedAt })
   }
-  // 登记进 notices：它报过的 PR 全合完之后由服务自动归档，别在侧边栏越积越多。
-  saved.markNotice(session, { name: session, convId, kind: "PR待合并", prs: todo.map((pr) => pr.key) })
-  ctx.log?.(`pr.merge 已派合并助手 ${session}（${todo.map((pr) => pr.key).join("、")}）`)
-  return { ok: true, action: "assigned", session, convId, prs: todo.map((pr) => pr.key), assignedAt }
+  ctx.log?.(`pr.merge 已投 router（${todo.map((pr) => pr.key).join("、")}）`)
+  return { ok: true, action: "routed", router: true, prs: todo.map((pr) => pr.key), assignedAt }
 }
 
 // 我的工单扫描一轮：只把「指派给我 + ready-for-agent」候选写入 router agent Inbox。
@@ -1381,7 +1415,7 @@ export async function prPollOnce(ctx, { force = false } = {}) {
       // 他人 PR 只写 pr.merge Inbox，扫描不建会话；Worker 的 pr.merge handler 才派合并助手。
       // 本人 UI 候选与评论更新仍交 router agent。没有 Inbox 时退回直投（旧部署/测试）。
       const enqueueMerge = ctx.inbox ? (event) => ctx.inbox.enqueue(event) : null
-      out = await prWatchOnce({ cfg, gitea, dws, log, target, inspect: notifyRouter, deliver: ctx.deliver, enqueue: enqueueMerge })
+      out = await prWatchOnce({ cfg, gitea, dws, log, target, inspect: notifyRouter, enqueue: enqueueMerge })
     } catch (e) {
       log(`PR 扫描失败：${e.message}`)
       return { ok: false, error: e.message }
@@ -2320,8 +2354,8 @@ export async function handleRequest(ctx, req) {  const id = req?.id
   }
 
   // hand：把一张工单交给编排会话（首句含编排职责与工单，账本记 handed）。不建工作区、不开工作会话。
+  // hand：把工单投给 router agent（唯一编排者），不再直接开编排会话。
   if (cmd === "hand") {
-    if (!sessionFlowEnabled(ctx.cfg)) return fail("disabled", "sessionFlow.enabled=false，不走编排会话；用 foreman run --direct")
     const ref = String(req.issue ?? "").trim()
     const m = ref.match(/([^#\s]+)#([0-9]+)$/)
     if (!m) return fail("bad-request", `hand 的 --issue 要写成 <owner/name>#<工单号>，收到：${ref || "（空）"}`)
@@ -2335,42 +2369,9 @@ export async function handleRequest(ctx, req) {  const id = req?.id
       return fail("gitea-error", `读不到工单 ${repoCfg.repo}#${number}：${e.message}`)
     }
     try {
-      // 用户自主发起的会话调 hand：它自己就是这条单的编排，不再另起全局编排会话。
-      return ok(await handToOrchestrator(ctx, {
-        repoCfg,
-        issue,
-        orchestrator: String(req.orchestrator ?? "").trim(),
-        fresh: req.fresh === true,
-      }))
+      return ok(await routeIssueToRouter(ctx, { repoCfg, issue, via: "hand" }))
     } catch (e) {
-      return fail(e.code === "app_unavailable" ? "app_unavailable" : "hand-failed", e.message)
-    }
-  }
-
-  // decide：router agent 消费 issue.decision Inbox 事件后调它，开一条决策会话。
-  // 决策单不绑编排会话、不监听、不进「跑完→验收→出 PR」链；提示词由代码内置（decisionKickoff）。
-  // 不校验 ready-for-agent：决策单的意义就是先调研再决定要不要切 ready-for-agent。
-  if (cmd === "decide") {
-    if (!sessionFlowEnabled(ctx.cfg)) return fail("disabled", "sessionFlow.enabled=false，不走编排会话；决策单也需要 sessionFlow")
-    const ref = String(req.issue ?? "").trim()
-    const m = ref.match(/([^#\s]+)#([0-9]+)$/)
-    if (!m) return fail("bad-request", `decide 的 --issue 要写成 <owner/name>#<工单号>，收到：${ref || "（空）"}`)
-    const repoCfg = findRepoCfg(ctx.cfg, m[1])
-    if (!repoCfg) return fail("bad-request", `配置里没有这个工程：${m[1]}`)
-    const number = Number(m[2])
-    let issue
-    try {
-      issue = { ...(await ctx.gitea.viewIssue(repoCfg.repo, number)), number }
-    } catch (e) {
-      return fail("gitea-error", `读不到工单 ${repoCfg.repo}#${number}：${e.message}`)
-    }
-    try {
-      const out = await handleIssue({ ...ctx, book: new Book(ctx.cfg.stateFile), decision: true, noNotify: true }, repoCfg, issue)
-      // 决策单不推 session.dispatched（与 pickIssue 旧路径对齐）。
-      await ctx.engine?.emit("issue.picked", { issueKey: `${repoCfg.repo}#${number}`, workflow: "own" })
-      return ok({ ...out, decision: true })
-    } catch (e) {
-      return fail(e.code === "app_unavailable" ? "app_unavailable" : "decide-failed", e.message)
+      return fail("hand-failed", e.message)
     }
   }
 
@@ -2754,7 +2755,6 @@ export async function handleRequest(ctx, req) {  const id = req?.id
         intervalSeconds: ctx.cfg.pickup?.intervalSeconds,
         maxPerRound: ctx.cfg.pickup?.maxPerRound,
         maxRunning: ctx.cfg.pickup?.maxRunning,
-        handToOrchestrator: ctx.cfg.pickup?.handToOrchestrator !== false,
         // 收口自动补单已移除；旧配置仅保留兼容读取，不产生影响。
         kickAfterDone: false,
         kickPending: false,
@@ -2938,6 +2938,32 @@ export async function handleRequest(ctx, req) {  const id = req?.id
   if (cmd === "pickup") {
     const r = await ctx.pickup({ force: true })
     return ok(r)
+  }
+
+  // run：扫描一轮可接工单，逐条投 router（不再直接派会话）。--dry-run 只打印计划。
+  if (cmd === "run") {
+    const lockFile = path.join(path.dirname(ctx.cfg.stateFile), "run.lock")
+    const lock = acquireLock(lockFile)
+    if (!lock) return ok({ ok: true, skipped: "locked" })
+    try {
+      const handled = await runRound({
+        cfg: ctx.cfg,
+        book: new Book(ctx.cfg.stateFile),
+        dws: ctx.dws,
+        log: ctx.log,
+        consoleStore: ctx.consoleStore,
+        engine: ctx.engine,
+        only: String(req.only ?? "").trim(),
+        dryRun: req.dryRun === true,
+        routeIssue: (args) => routeIssueToRouter(ctx, args),
+      })
+      try { ctx.consoleStore?.sync(new Book(ctx.cfg.stateFile)) } catch {}
+      return ok({ ok: true, handled })
+    } catch (e) {
+      return fail(e.code === "app_unavailable" ? "app_unavailable" : "run-failed", e.message)
+    } finally {
+      releaseLock(lockFile)
+    }
   }
 
   if (cmd === "pr list") {

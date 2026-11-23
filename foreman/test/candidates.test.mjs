@@ -239,25 +239,38 @@ test("手动接单：带 needs-info 标签走决策单 → 写 router Inbox（is
   assert.equal(r.eventId, "evt-decision-31")
   assert.equal(sent.length, 1, "决策单必须写一条 router Inbox")
   assert.equal(sent[0].type, "issue.decision")
-  assert.match(sent[0].text, /foreman decide yyzl\/win-ai-harness#31/)
+  assert.doesNotMatch(sent[0].text, /foreman decide/)
+  assert.match(sent[0].text, /自行调研/)
   assert.match(sent[0].text, /needs-info/)
   assert.equal(sent[0].json.issue.number, 31)
   const rec = new Book(stateFile).issue(`${repoCfg.repo}#31`)
-  assert.equal(rec.state, "planned", "决策单先记 planned，等 router 派 decide 才转 working")
+  assert.equal(rec.state, "planned", "决策单先记 planned，等 router 调研决策后再推进")
   assert.equal(rec.decision, true)
 })
 
-test("手动接单：普通工单仍走标准派单提示词", async () => {
+test("手动接单：普通工单投 router（issue.hand），账本记 handed", async () => {
   const stateFile = tmpState()
+  const sent = []
   const ctx = {
     cfg: cfg({ stateFile }),
     dryRun: true,
     log: () => {},
     gitea: { viewIssue: async () => ({ ...issue(32), title: "普通单", labels: [], body: "正文" }) },
+    notifyRouter: async (envelope) => {
+      sent.push(envelope)
+      return { ok: true, action: "inbox", eventId: "evt-hand-32" }
+    },
   }
   const r = await pickIssue(ctx, { repo: repoCfg.repo, number: 32 })
   assert.equal(r.ok, true)
   assert.equal(r.decision, false)
-  assert.match(r.prompt, /工作会话 · yyzl\/win-ai-harness#32/)
-  assert.doesNotMatch(r.prompt, /决策会话/)
+  assert.equal(r.state, "handed")
+  assert.equal(r.routed, "router")
+  assert.equal(sent.length, 1, "普通工单必须写一条 router Inbox")
+  assert.equal(sent[0].type, "issue.hand")
+  assert.match(sent[0].text, /唯一编排者/)
+  assert.doesNotMatch(sent[0].text, /决策会话/)
+  assert.equal(sent[0].json.issue.number, 32)
+  const rec = new Book(stateFile).issue(`${repoCfg.repo}#32`)
+  assert.equal(rec.state, "handed")
 })

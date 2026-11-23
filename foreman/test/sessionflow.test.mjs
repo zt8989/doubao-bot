@@ -192,129 +192,6 @@ test("fresh hand：router agent显式要求时才重开独立编排，普通 han
   }
 })
 
-test("dispatch：工作会话 id 绑到编排会话（账本 + 会话记录都要对得上）", async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-dispatch-"))
-  try {
-    const cfg = mkCfg(dir)
-    const repo = mkRepo(dir, "demo")
-    cfg.repos = [repo]
-    fs.writeFileSync(path.join(repo.dir, "AGENTS.md"), "# 原工程约定\n统一使用 npm test 验证。\n")
-    // 预置 worktree，让 createWorktree 走 reused，不碰真实 git。
-    const wt = path.join(cfg.worktreeDir, repo.name, "fix-issue-7")
-    fs.mkdirSync(wt, { recursive: true })
-    fs.writeFileSync(path.join(wt, ".git"), "gitdir: .\n")
-    fs.writeFileSync(path.join(wt, "AGENTS.md"), "# 不应读取 worktree 里的替代约定\n")
-
-    const issue = { number: 7, title: "镜像页", body: "", labels: [], assignees: [], url: "" }
-    const dws = mkDws()
-    const issuePatches = []
-    const ctx = {
-      cfg,
-      book: new Book(cfg.stateFile),
-      dws,
-      log: () => {},
-      once: true,
-      dryRun: false,
-      dispatchPrompt: "本单只需改 demo 的镜像页；不要改接口，完成后跑页面单测。",
-      gitea: {
-        listIssues: async () => [issue],
-        viewIssue: async (r, n) => ({ ...issue, number: n }),
-        editIssue: async (repo, number, patch) => {
-          issuePatches.push({ repo, number, patch })
-          issue.ref = patch.ref
-          return { ...issue, number }
-        },
-        editLabels: async () => ({}),
-      },
-    }
-
-    const out = await runRound(ctx)
-    assert.equal(out.length, 1)
-    assert.equal(out[0].state, "dispatched")
-    const key = "yyzl/demo#7"
-    const book = new Book(cfg.stateFile)
-    const rec = book.issue(key)
-    assert.equal(rec.agentConvId, out[0].convId)
-    assert.equal(rec.orchestrator, out[0].orchestrator)
-    assert.ok(rec.orchestrator, "编排会话 id 要写进账本")
-    assert.equal(book.session(out[0].agent).parent, rec.orchestrator)
-    assert.equal(book.session(out[0].agent).kind, "worker", "工作会话要标成 worker，不能算编排会话")
-    assert.equal(dws.calls.openNew.length, 2, "1 条工单编排 + 1 条工作会话")
-    assert.match(dws.calls.openNew[0].name, /demo-7-编排/)
-    assert.ok(!dws.calls.openNew[0].prompt.includes("【foreman · 编排会话 · 收到工单】"), "直接 dispatch 不能再让编排重复派单")
-    assert.match(dws.calls.openNew[1].prompt, /编排智能体补充指令/)
-    assert.match(dws.calls.openNew[1].prompt, /本单只需改 demo 的镜像页；不要改接口，完成后跑页面单测。/)
-    assert.match(dws.calls.openNew[1].prompt, /原工程 AGENTS\.md[\s\S]*# 原工程约定\n统一使用 npm test 验证。/)
-    assert.doesNotMatch(dws.calls.openNew[1].prompt, /不应读取 worktree 里的替代约定/)
-    assert.doesNotMatch(dws.calls.openNew[1].prompt, /先读各仓库里的 AGENTS|再读工作区里更深层的 AGENTS/, "由分配流程直接读原文，不提醒 agent 再读")
-    assert.equal(dws.calls.steer.length, 0, "首次派单的编排指令要随首句进入，不能再补 steer")
-    assert.equal(orchestratorTarget(book), "", "直接派单也不该创建全局编排")
-    assert.deepEqual(workerOf(book, key).convId, out[0].convId)
-    assert.equal(issuePatches.length, 1, "创建分支后必须指定工单右侧的分支字段")
-    assert.deepEqual(issuePatches[0], {
-      repo: "yyzl/demo",
-      number: 7,
-      patch: { ref: "fix/issue-7" },
-    })
-    assert.equal(rec.branchRef.branch, "fix/issue-7")
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test("再派一次同一张单：steer 同一条工作会话，不新开第二条", async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-redispatch-"))
-  try {
-    const cfg = mkCfg(dir)
-    const repo = mkRepo(dir, "demo")
-    cfg.repos = [repo]
-    fs.writeFileSync(path.join(repo.dir, "AGENTS.md"), "# 重派也要携带的原工程约定\n")
-    const wt = path.join(cfg.worktreeDir, repo.name, "fix-issue-7")
-    fs.mkdirSync(wt, { recursive: true })
-    fs.writeFileSync(path.join(wt, ".git"), "gitdir: .\n")
-
-    const issue = { number: 7, title: "镜像页", body: "", labels: [], assignees: [], url: "" }
-    const dws = mkDws()
-    const issuePatches = []
-    const ctx = {
-      cfg,
-      book: new Book(cfg.stateFile),
-      dws,
-      log: () => {},
-      once: true,
-      dryRun: false,
-      gitea: {
-        listIssues: async () => [issue],
-        viewIssue: async (r, n) => ({ ...issue, number: n }),
-        editIssue: async (repo, number, patch) => {
-          issuePatches.push({ repo, number, patch })
-          issue.ref = patch.ref
-          return { ...issue, number }
-        },
-        editLabels: async () => ({}),
-      },
-    }
-
-    const first = await runRound(ctx)
-    const openedAfterFirst = dws.calls.openNew.length
-    // 第二轮：同一张单（账本把 state 放回 reset，模拟失败后重派）
-    new Book(cfg.stateFile).setIssue("yyzl/demo#7", { state: "reset", lastFailure: "单测没过" })
-    cfg.pickup.excludeLabels = []
-    const second = await runRound({ ...ctx, book: new Book(cfg.stateFile), dispatchPrompt: "只修复失败单测暴露的问题，不要扩大改动范围。" })
-    assert.equal(dws.calls.openNew.length, openedAfterFirst, "重派不该新开工作会话")
-    assert.equal(dws.calls.steer.length, 1, "要用 steer 接着跑")
-    assert.equal(dws.calls.steer[0].target, first[0].convId)
-    assert.match(dws.calls.steer[0].text, /单测没过/)
-    assert.match(dws.calls.steer[0].text, /编排智能体补充指令/)
-    assert.match(dws.calls.steer[0].text, /只修复失败单测暴露的问题，不要扩大改动范围。/)
-    assert.match(dws.calls.steer[0].text, /原工程 AGENTS\.md[\s\S]*# 重派也要携带的原工程约定/)
-    assert.equal(second[0].resumed, true)
-    assert.equal(issuePatches.length, 1, "右侧分支没变时重复派单不能重复 PATCH")
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true })
-  }
-})
-
 test("resume：只按工作会话 id 定位并 steer 续跑，绝不新开", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-resume-"))
   try {
@@ -569,13 +446,12 @@ test("clean：currentConv 就是编排会话本身时不归档（dws 不允许�
   }
 })
 
-test("dry-run + hand：只打印会交给谁，不 ensure、不 steer", async () => {
+test("dry-run + run：只打印会投 router，不开会话、不写账本", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-dry-"))
   try {
     const cfg = mkCfg(dir)
     const repo = mkRepo(dir, "demo")
     cfg.repos = [repo]
-    cfg.pickup.handToOrchestrator = true
     const issue = { number: 7, title: "镜像页", body: "", labels: [], assignees: [], url: "" }
     const dws = mkDws()
     const ctx = {
@@ -586,10 +462,11 @@ test("dry-run + hand：只打印会交给谁，不 ensure、不 steer", async ()
       dryRun: true,
       once: true,
       gitea: { listIssues: async () => [issue] },
+      routeIssue: async () => { throw new Error("dry-run 不许 routeIssue") },
     }
     const out = await runRound(ctx)
     assert.equal(out[0].state, "planned")
-    assert.equal(out[0].hand, true)
+    assert.equal(out[0].routed, "router")
     assert.equal(dws.calls.openNew.length, 0, "dry-run 不许开会话")
     assert.equal(dws.calls.steer.length, 0, "dry-run 不许 steer")
     assert.equal(new Book(cfg.stateFile).issue("yyzl/demo#7"), null, "dry-run 不许写账本")
@@ -598,48 +475,6 @@ test("dry-run + hand：只打印会交给谁，不 ensure、不 steer", async ()
   }
 })
 
-test("用户自主发起：dispatch 绑调用方会话，不再起全局编排会话", async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-caller-"))
-  try {
-    const cfg = mkCfg(dir)
-    const repo = mkRepo(dir, "demo")
-    cfg.repos = [repo]
-    const wt = path.join(cfg.worktreeDir, repo.name, "fix-issue-7")
-    fs.mkdirSync(wt, { recursive: true })
-    fs.writeFileSync(path.join(wt, ".git"), "gitdir: .\n")
-
-    const issue = { number: 7, title: "镜像页", body: "", labels: [], assignees: [], url: "" }
-    const dws = mkDws()
-    const ctx = {
-      cfg,
-      book: new Book(cfg.stateFile),
-      dws,
-      log: () => {},
-      once: true,
-      dryRun: false,
-      // 发起方会话就是这个对话（CLI 从 MCP_VM_CONVERSATION_ID 取到）。
-      orchestrator: "conv-user",
-      gitea: {
-        listIssues: async () => [issue],
-        viewIssue: async (r, n) => ({ ...issue, number: n }),
-        commentIssue: async () => ({}),
-        editLabels: async () => ({}),
-      },
-    }
-
-    const out = await runRound(ctx)
-    assert.equal(out[0].state, "dispatched")
-    const key = "yyzl/demo#7"
-    const book = new Book(cfg.stateFile)
-    const rec = book.issue(key)
-    assert.equal(rec.orchestrator, "conv-user", "单上绑的是发起方会话")
-    assert.equal(book.session(rec.agent).parent, "conv-user")
-    assert.equal(dws.calls.openNew.length, 1, "只开工作会话，不再另起全局编排")
-    assert.equal(orchestratorTarget(book), "", "全局编排会话不该被创建")
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true })
-  }
-})
 
 test("用户自主发起 hand：直接交给调用方会话（不开全局编排）", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-hand-caller-"))

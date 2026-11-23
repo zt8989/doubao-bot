@@ -68,32 +68,20 @@ function fakeGitea() {
 
 // ---- 同步路径不存在 ----
 
-test("runRound：派活但不 notify、不 waitFinished；book.watch 有登记；sessions 记了 convId", async () => {
+test("runRound：派单改投 router（routeIssue），不开会话、不登记 watch", async () => {
   const dir = tmpDir()
   try {
     const cfg = mkCfg(dir)
-    preseedWorktree(cfg)
     const book = new Book(cfg.stateFile)
-
-    const calls = { notify: 0, waitFinished: 0, open: 0, send: 0 }
+    const routed = []
     const dws = {
-      open: async ({ name }) => {
-        calls.open++
-        return { convId: "conv-dispatch-1" }
-      },
-      send: async () => {
-        calls.send++
-      },
-      notify: async () => {
-        calls.notify++
-      },
-      waitFinished: async () => {
-        calls.waitFinished++
-      },
+      open: async () => { throw new Error("不应直接开会话") },
+      send: async () => { throw new Error("不应直接开会话") },
+      notify: async () => { throw new Error("不应直接开会话") },
+      waitFinished: async () => { throw new Error("不应 waitFinished") },
       status: async () => ({}),
       info: async () => ({ lastReply: "" }),
     }
-
     const ctx = {
       cfg,
       book,
@@ -102,60 +90,41 @@ test("runRound：派活但不 notify、不 waitFinished；book.watch 有登记�
       gitea: fakeGitea(),
       once: true,
       dryRun: false,
+      routeIssue: async ({ repoCfg, issue }) => {
+        routed.push({ repo: repoCfg.repo, number: issue.number })
+        return { ok: true, state: "handed", routed: "router", key: `${repoCfg.repo}#${issue.number}` }
+      },
     }
     const out = await runRound(ctx)
     assert.equal(out.length, 1)
-    assert.equal(out[0].state, "dispatched")
-    assert.equal(out[0].convId, "conv-dispatch-1")
-
-    // 同步路径不存在：notify 0 次、waitFinished 0 次。
-    assert.equal(calls.notify, 0, "run 不应同步发通知")
-    assert.equal(calls.waitFinished, 0, "run 不应 waitFinished")
-
-    // watch 里有一条登记，target=convId
-    assert.equal(book.watch.length, 1)
-    assert.equal(book.watch[0].target, "conv-dispatch-1")
-    assert.equal(book.watch[0].issueKey, "demo/demo#1")
-
-    // sessions 记了 convId
-    const sess = book.session("foreman-demo-1")
-    assert.ok(sess)
-    assert.equal(sess.convId, "conv-dispatch-1")
-    assert.equal(sess.notify, true)
+    assert.equal(out[0].state, "handed")
+    assert.equal(out[0].routed, "router")
+    assert.deepEqual(routed, [{ repo: "demo/demo", number: 1 }])
+    assert.equal(book.watch.length, 0, "派单不再登记外部工作会话监听")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test("--no-notify：不登记 watch，sessions 里 notify=false（不被自动纳入）", async () => {
+test("runRound：routeIssue 抛错记为 failed，不炸整轮", async () => {
   const dir = tmpDir()
   try {
     const cfg = mkCfg(dir)
-    preseedWorktree(cfg)
     const book = new Book(cfg.stateFile)
-    const dws = {
-      open: async () => ({ convId: "conv-no-notify" }),
-      send: async () => {},
-      notify: async () => { throw new Error("不应调用 notify") },
-      waitFinished: async () => { throw new Error("不应调用 waitFinished") },
-      status: async () => ({}),
-      info: async () => ({ lastReply: "" }),
-    }
     const ctx = {
       cfg,
       book,
-      dws,
+      dws: {},
       log: () => {},
       gitea: fakeGitea(),
       once: true,
       dryRun: false,
-      noNotify: true,
+      routeIssue: async () => { throw new Error("inbox 暂不可用") },
     }
     const out = await runRound(ctx)
-    assert.equal(out[0].state, "dispatched")
-    assert.equal(book.watch.length, 0, "--no-notify 时不登记监听")
-    const sess = book.session("foreman-demo-1")
-    assert.equal(sess.notify, false)
+    assert.equal(out.length, 1)
+    assert.equal(out[0].state, "failed")
+    assert.match(out[0].reason, /inbox 暂不可用/)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

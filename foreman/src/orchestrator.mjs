@@ -127,14 +127,16 @@ export function sortIssues(issues, order = "oldest", { me = "", priority = ["min
 // 一轮：每个仓库各自捞、各自做，做完一条接一条。只派活，不等结果。
 // 会话中心模式（默认，sessionFlow.enabled）下每张工单交给各自的主智能体，
 // 由它在 Agent 内部创建编码与对抗审查 sub agent；ctx.hand=false 或 pickup.handToOrchestrator=false 才走旧外部工作会话。
+// 一轮扫描：列出可接工单，逐条投 router agent（唯一编排者）。服务进程不再直接开 agent 会话，
+// ctx.routeIssue 必须由调用方注入（服务里 = routeIssueToRouter，经 Inbox 持久化 + Worker 串行投递）。
 export async function runRound(ctx) {
   const { cfg, book, log } = ctx
   const gitea = ctx.gitea ?? realGitea
-  const hand = ctx.hand ?? (sessionFlowEnabled(cfg) && cfg.pickup?.handToOrchestrator === true)
+  if (typeof ctx.routeIssue !== "function") throw new Error("runRound 需要 ctx.routeIssue（派单一律投 router）")
   const handled = []
   for (const repoCfg of cfg.repos) {
     if (ctx.only && ![repoCfg.name, repoCfg.repo].includes(ctx.only)) continue
-    if (ctx.dryRun) log(`[dry-run] 看 ${repoCfg.repo} 的待接工单（不会建工作区、不会动会话）`)
+    if (ctx.dryRun) log(`[dry-run] 看 ${repoCfg.repo} 的待接工单（不会建工作区、不会动会话、不写 Inbox）`)
 
     const labelQuery = (repoCfg.labelIds ?? cfg.pickup.labelIds ?? []).join(",")
     let list = []
@@ -150,41 +152,29 @@ export async function runRound(ctx) {
     let count = 0
     for (const it of pool) {
       if (count >= cfg.perRepoPerRound) break
-      // 服务端自动巡检时限制整轮总数（豆包单实例，一轮只派一条），CLI 不传就没有这个上限。
+      // 服务端自动巡检时限制整轮总数，CLI 不传就没有这个上限。
       if (ctx.maxTotal && handled.length >= ctx.maxTotal) break
       count++
       let out
       const key = issueKey(repoCfg.repo, it.number)
-      const op = ctx.dryRun ? 0 : startOperation(ctx, "dispatch", `${hand ? "交给编排" : "派单"} ${key}`, {
+      const op = ctx.dryRun ? 0 : startOperation(ctx, "dispatch", `投 router ${key}`, {
         key,
-        detail: hand ? "把工单交给主智能体，由它创建内部编码 sub agent" : it.title || "读工单、准备工作区并启动旧外部执行会话",
+        detail: "把工单请求投给 router agent，由它作为唯一编排者接手",
       })
       try {
-        if (hand && ctx.dryRun) {
-          // dry-run 不许有副作用：只打印这张单会绑定哪条独立编排，不 ensure、不 steer。
-          const target = String(book?.issue?.(key)?.orchestrator ?? "").trim()
-          log(`[dry-run] ${key}：会交给这张单的独立主智能体 ${target || "（还没起，首句会带上完整内部 sub agent 提示词与工单）"}，由它创建内部编码 sub agent`)
-          out = { repo: repoCfg.repo, number: it.number, state: "planned", hand: true, orchestrator: target }
+        if (ctx.dryRun) {
+          // dry-run 不许有副作用：只打印这张单会被投给 router。
+          log(`[dry-run] ${key}：会写入 router Inbox（issue.hand），由 router 作为唯一编排者接手`)
+          out = { repo: repoCfg.repo, number: it.number, state: "planned", routed: "router" }
         } else {
-          out = hand
-            ? await handToOrchestrator({ ...ctx, gitea }, { repoCfg, issue: it })
-            : await handleIssue(ctx, repoCfg, it)
+          out = await ctx.routeIssue({ repoCfg, issue: it, via: "run" })
         }
-        const success = out.state === "dispatched" || out.state === "planned" || out.state === "handed"
-        finishOperation(
-          ctx,
-          op,
-          success ? "success" : "failed",
-          out.state === "handed"
-            ? `已交给编排会话${out.convId ? ` · ${out.convId}` : ""}`
-            : out.convId
-              ? `已派出到执行会话 · 分支 ${out.branch || "-"}`
-              : out.reason || out.state
-        )
+        const success = out.state === "handed" || out.state === "planned"
+        finishOperation(ctx, op, success ? "success" : "failed", out.message || (success ? "已投 router" : out.reason || out.state))
       } catch (e) {
         finishOperation(ctx, op, "failed", e.message)
         if (e.code === "app_unavailable") throw e
-        log(`${repoCfg.repo} #${it.number} 派活失败：${e.message}`)
+        log(`${repoCfg.repo} #${it.number} 投 router 失败：${e.message}`)
         out = { repo: repoCfg.repo, number: it.number, state: "failed", reason: e.message }
       }
       handled.push(out)

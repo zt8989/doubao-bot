@@ -1,6 +1,6 @@
 ---
 name: foreman
-description: 交付一条龙 CLI（doubao-bot/foreman，命令 foreman）：建单 `issue create [--ws]`、开工作区+分支+回写工单右侧分支 `ws add`、建 PR `pr open`、幂等合并+关单+清尾 `pr merge`。执行载体配置 agent=dws|noop，noop（当前生效）下纯机械动作照常工作、不碰豆包，豆包过期也能用。用户提到建工单、开工单分支、worktree、建 PR、合并 PR 关单、foreman/工单/worktree 报错，或跨工程工单要开多个工作区时使用。
+description: 交付一条龙 CLI（doubao-bot/foreman，命令 foreman）：建单 `issue create [--ws]`、开工作区+分支+回写工单右侧分支 `ws add`、建 PR `pr open`、幂等合并+关单+清尾 `pr merge`；派单/合并请求一律经 router agent 路由（hand/run/pickup 只投 router Inbox，服务不再直接开任何 agent 会话）。执行载体 agent=dws|noop，noop（当前生效）下机械动作照常、不碰豆包。用户提到建工单、开工单分支、worktree、建 PR、合并 PR 关单、接单派单、foreman/工单/worktree 报错时使用。
 ---
 
 # foreman：交付一条龙
@@ -41,11 +41,13 @@ foreman clean <owner/name>#<N>   # 幂等清尾；foreman clean --all 清所有�
 
 辅助：`foreman issue comment|close|settle`（评论/关单/只修本地 done）、`foreman retry <仓库> <N>`（放回队列，纯本地）、`foreman tasks --json`（会话树只读）、`foreman status` / `inbox list`（只读）、`foreman send --type mail|lark`（外发，与 agent 无关）、`foreman doctor`（体检；`--start` 在 noop 下不碰豆包）。
 
-## noop 下禁用 / 无意义
+## 全部由 router agent 路由
 
-- **禁用**（要真 agent，noop 下假成功不干活）：`hand`、`run`、`pickup`、`route`、`decide`、`worker run`。
-- **无意义**（产出只会投进 noop）：`watch *`、`pr poll`、`mail poll`。定时任务（pickup/prWatch/mail/router/dreaming/自定义）当前全部 off——没有自动扫描，挑单由人/ZCode 决定。
-- 已删除的旧命令：`dispatch`、`resume`、`orch start`、`sessions`，遇到相关提示不要再引用。
+- `hand` / `run` / `pickup` / 控制台接单：只把派单请求投进 router Inbox（账本记 handed 占槽），不再直接开任何编排/工作会话；`decide` 已删除，决策单由 router 自行调研。
+- 他人 PR 合并：扫描 pr.merge 事件与 `pr assign` 人工补派也只投 router（不再建合并助手会话）；router 核对后自己执行 `foreman pr merge`（幂等）。
+- router 是服务唯一主动维护的 agent 会话、每张单的唯一编排者：消费事件后在会话内创建编码与对抗审查内部 sub agent（编码侧 ws add / pr open），验收邮件、issue settle、clean 也归它。
+- **noop（当前生效）下**：以上请求照常入 Inbox、账本照记，但 router 会话也是假的——事件堆积、无人接单，挑单和编排实际由人/ZCode 承担。`watch *` / `pr poll` / `mail poll` / `worker run` 产出只会进 noop，无意义；定时任务当前全部 off。
+- 已删除的旧命令：`dispatch`、`resume`、`orch start`、`sessions`、`decide`，遇到相关提示不要再引用。
 
 ## 约束与状态
 
