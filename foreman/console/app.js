@@ -221,7 +221,9 @@ class FmHead extends LitElement {
     today: { type: String },
     view: { type: String },
     chatState: { attribute: false },
-    // Chat 视图手机端：非空 = 正在看具体会话，顶栏出「‹ 会话」返回按钮。
+    // 手机端 Chat 两级：chatInto=true 已进入二级聊天页（顶栏出「‹ 会话列表」返回）；
+    // chatConv 非空 = 正在看具体会话（eyebrow 标只读观察）。
+    chatInto: { type: Boolean },
     chatConv: { type: String },
   }
   createRenderRoot() {
@@ -247,15 +249,15 @@ class FmHead extends LitElement {
         </button>
         ${this.view === "chat"
           ? html`<div class="topbar-title">
-              <div class="eyebrow">${this.chatConv ? "会话观察（只读）" : "Router Agent"}</div>
+              <div class="eyebrow">${this.chatConv ? "会话观察（只读）" : this.chatInto ? "Router Agent" : ""}</div>
               <h2>Chat</h2>
             </div>`
           : html`<div class="topbar-title">
               <h2>${({ inbox: "Inbox", outbox: "Outbox", tasks: "Tasks", sessions: "智能体会话", schedules: "Schedule", operations: "操作日志" })[this.view] || "Foreman"}</h2>
             </div>`}
         <div class="meta">
-          ${this.view === "chat" && this.chatConv ? html`
-            <button class="ghost chat-back" type="button" @click=${() => emit(this, "chat-target", { conv: "" })}>‹ 会话列表</button>` : ""}
+          ${this.view === "chat" && this.chatInto ? html`
+            <button class="ghost chat-back" type="button" @click=${() => emit(this, "chat-target", { conv: "", back: true })}>‹ 会话列表</button>` : ""}
           ${this.view === "chat" ? html`
             <span class=${"chat-status " + chatStatusClass}>${chatStatusText}</span>
             <button class="ghost" type="button" ?disabled=${cs.loading} @click=${() => this.refreshChat()}>
@@ -1335,6 +1337,9 @@ class FmConsole extends LitElement {
     agentSessions: { attribute: false },
     agentCarrier: { type: String },
     chatConv: { type: String },
+    // 手机端 Chat 两级：是否已进入聊天页（true=二级聊天，false=一级菜单）。
+    // 单靠 chatConv 区分不了「菜单」和「看 Router」——两者 conv 都是 ""。
+    chatInto: { type: Boolean },
     navOpen: { type: Boolean },
     schedBusy: { type: String },
     schedError: { type: String },
@@ -1432,7 +1437,10 @@ class FmConsole extends LitElement {
     }
     // 侧边栏点选会话：切 Chat 的观察目标（空 = router 当前会话）。手机端顺带开聊天二级页。
     this._onChatTarget = (e) => {
+      // detail.back=true = 从聊天页返回一级菜单。点 Router（当前）时 conv 不变（""→""），
+      // 靠 chatInto 驱动 pane 切换——单靠 chatConv 区分不了「菜单」和「看 Router」。
       this.chatConv = String(e.detail.conv ?? "")
+      this.chatInto = !e.detail.back
       this.navOpen = false
     }
     this.addEventListener("chat-target", this._onChatTarget)
@@ -1820,7 +1828,6 @@ class FmConsole extends LitElement {
   }
 
   render() {
-    const watching = Boolean(this.chatConv)
     return html`
       ${this.navOpen ? html`<div class="nav-backdrop" @click=${() => (this.navOpen = false)}></div>` : ""}
       <fm-sidebar
@@ -1840,9 +1847,10 @@ class FmConsole extends LitElement {
           .today=${this.data?.today || ""}
           .view=${this.view}
           .chatState=${this.chatState || {}}
+          .chatInto=${this.chatInto === true}
           .chatConv=${this.chatConv || ""}
         ></fm-head>
-        <main class=${this.view === "chat" ? "is-chat" : ""} data-pane=${watching ? "chat" : "menu"}>
+        <main class=${this.view === "chat" ? "is-chat" : ""} data-pane=${this.chatInto ? "chat" : "menu"}>
         ${this.view === "chat"
           ? html`
               <fm-session-menu .sessions=${this.agentSessions || []} .carrier=${this.agentCarrier || ""}></fm-session-menu>

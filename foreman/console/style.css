@@ -850,6 +850,8 @@ main > fm-session-menu { display: none; }
 /* 汉堡按钮与滑出层：桌面隐藏 */
 .nav-burger { display: none; }
 .nav-backdrop { display: none; }
+/* 顶栏「‹ 会话列表」：只有手机端两级导航用，桌面隐藏 */
+.chat-back { display: none; }
 
 .side-link,
 .side-collapse {
@@ -1229,6 +1231,7 @@ fm-chat { display: flex; flex: 1; width: 100%; min-height: 0; }
     border: 1px solid var(--line); border-radius: 8px; background: var(--panel, transparent);
   }
   .nav-burger svg { width: 20px; height: 20px; }
+  .chat-back { display: inline-flex; align-items: center; }
 
   main { padding: 0; gap: 0; max-width: none; }
 
