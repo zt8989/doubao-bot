@@ -228,7 +228,7 @@ foreman doctor [--start]              # --start 才真的连豆包窗口读状�
 - **工作时间窗**：`workHours`（`enabled`、`days` 1=周一…7=周日、`start`/`end` 如 `08:30`–`18:30`、`offUntil` 临时闭嘴）。我的工单扫描与他人 PR 扫描只在窗口内跑；执行会话代码轮询与验收邮件不受它限制。手动 `foreman watch poll` / `foreman pr poll` / `route` / `pickup` 与 pickup「立即扫描」不受限。
 - **PR 监听**：`prWatch.enabled`（默认 `true`）、`intervalSeconds`（默认 300）、`ignoreAuthors`（自己的 Gitea 用户名，由 `pickup.me` 补齐；当前 `233151`）。他人候选写 `pr.merge` Inbox 由 Worker 建合并助手会话，本人 UI 候选写router agent Inbox；`pr assign` 只作人工补派，`notifyTarget` 与 `deliver.mode=existing` 不再参与这条生产链路。要停就 `enabled: false`。
 - **`service.enabled: false`** 等价于一直带 `--no-service`：子命令不握手、不自动拉起；`pidFile` / `logFile` / `service.http.portFile` 可改路径（测试用临时目录）。
-- `verify` 是逐条 `bash -lc` 跑在 worktree 里的命令；`[]` 表示只查"干净 + 有提交"。
+- `verify` 是逐条跑在 worktree 里的 shell 命令文本（Windows 用 cmd.exe，POSIX 用 `bash -lc`）；`[]` 表示只查"干净 + 有提交"。
 - `herdr.enabled: false` 或 herdr 报错时退回 `git worktree add`，日志里有原因。
 
 ## 排障

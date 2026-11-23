@@ -38,9 +38,10 @@ export function mentionsRepo(text, repoCfg = {}) {
 }
 
 // 一个工程的工作区：<worktreeDir>/<工程名>/<分支里的 / 换成 ->。
+// 分隔符统一成正斜杠：这条路径会进账本、进提示词，Windows 上也不能混出反斜杠。
 export function workspacePath(worktreeDir, repoCfg = {}, branch = "") {
   const name = String(repoCfg?.name || repoCfg?.repo?.split("/").pop() || "repo")
-  return path.join(String(worktreeDir), name, String(branch).replace(/\//g, "-"))
+  return path.join(String(worktreeDir), name, String(branch).replace(/\//g, "-")).replaceAll("\\", "/")
 }
 
 // 账本里这条工单对某个工程的工作区记录。

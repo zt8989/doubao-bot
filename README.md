@@ -29,9 +29,9 @@ doubao-bot/
 线上命令，要上线就 commit 后跑一次发布。工作区有未提交改动的单元默认跳过。
 
 ```bash
-scripts/publish.sh                 # 全部：bin（gitea/foreman/dws）+ opencli 适配器 + skill
-scripts/publish.sh dws             # 只发某个单元：gitea / adapters / foreman / dws / skills
-scripts/publish.sh --allow-dirty   # 有未提交改动也照发（默认跳过脏单元）
+node scripts/publish.mjs                 # 全部：bin（gitea/foreman/dws）+ opencli 适配器 + skill
+node scripts/publish.mjs dws             # 只发某个单元：gitea / adapters / foreman / dws / skills
+node scripts/publish.mjs --allow-dirty   # 有未提交改动也照发（默认跳过脏单元）
 ```
 
 - **命令**：`dws`、`foreman` 由 `npm link` 装到全局，指向 `dist/dws`、`dist/foreman`。

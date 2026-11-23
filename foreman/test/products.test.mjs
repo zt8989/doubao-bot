@@ -96,7 +96,8 @@ test("deliverNewSession：用产品自己的提示词与项目目录，首句带
   assert.equal(calls.length, 1)
   assert.match(calls[0].prompt, /产品A提示词/)
   assert.match(calls[0].prompt, /产品：win-ai-stack/)
-  assert.match(calls[0].prompt, /监控项目：\/.*work\/stack/)
+  // Windows 上项目目录是 `C:\...` 原生路径，POSIX 是 `/...`，两种都算对
+  assert.match(calls[0].prompt, /监控项目：(?:\w:)?[\\/].*work[\\/]stack/)
   assert.ok(!calls[0].prompt.includes("全局提示词"))
 
   const book = new Book(path.join(path.dirname(file), "state.json"))

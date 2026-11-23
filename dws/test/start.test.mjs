@@ -12,7 +12,8 @@ import { App } from "../src/cdp.mjs"
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const CLI = path.join(ROOT, "bin", "dws.mjs")
 
-const BIN = "/Applications/Doubao.app/Contents/MacOS/Doubao"
+// 占位 binary 只需真实存在（App.up 会 existsSync），按平台取当前 node 自身
+const BIN = process.execPath
 const CHAT = [{ type: "page", url: "doubao://doubao-chat/chat/123" }]
 
 function mkApp({ procs = [], probe = async () => null } = {}) {

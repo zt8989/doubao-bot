@@ -5,7 +5,7 @@
   "description": "一个工程三个命令：dws（豆包会话）、foreman（接单编排）、gitea（REST CLI）",
   "scripts": {
     "test": "npm --prefix gitea test && npm --prefix dws test && npm --prefix foreman test",
-    "link:adapter": "bash scripts/link-adapter.sh"
+    "link:adapter": "node scripts/link-adapter.mjs"
   },
   "dependencies": {
     "croner": "^11.0.0"

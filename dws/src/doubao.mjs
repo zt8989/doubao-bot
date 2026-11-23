@@ -12,8 +12,19 @@ import { sleep, isFreshTask, pickNewTask, freshTaskCandidates } from "./util.mjs
 const promptHead = (s) => String(s ?? "").replace(/[\s\u200b-\u200f\ufeff]/g, "").slice(0, 40)
 
 export const APPS = [
-  { name: "豆包工作", mac: "DoubaoWork.app/Contents/MacOS/DoubaoWork", sub: "doubaowork" },
-  { name: "豆包", mac: "Doubao.app/Contents/MacOS/Doubao", sub: "" },
+  {
+    name: "豆包工作",
+    mac: "DoubaoWork.app/Contents/MacOS/DoubaoWork",
+    // Windows 版装在 %LOCALAPPDATA% 下；候选按常见布局排，逐个 existsSync 探测
+    win: ["DoubaoWork/Application/DoubaoWork.exe", "Programs/DoubaoWork/DoubaoWork.exe"],
+    sub: "doubaowork",
+  },
+  {
+    name: "豆包",
+    mac: "Doubao.app/Contents/MacOS/Doubao",
+    win: ["Doubao/Application/Doubao.exe", "Programs/Doubao/Doubao.exe"],
+    sub: "",
+  },
 ]
 
 export function dataDir(platform = process.platform, home = os.homedir()) {
@@ -35,6 +46,17 @@ export function choose(platform = process.platform, home = os.homedir(), exists 
   if (process.env.DOUBAO_WORK_APP) {
     const bin = process.env.DOUBAO_WORK_APP
     return { app: /doubaowork/i.test(bin) ? APPS[0] : APPS[1], binary: bin, dataDir: base }
+  }
+  if (platform === "win32") {
+    const localAppData = process.env.LOCALAPPDATA || path.win32.join(home, "AppData", "Local")
+    for (const app of APPS) {
+      for (const rel of app.win) {
+        const bin = path.win32.join(localAppData, rel)
+        if (exists(bin)) return { app, binary: bin, dataDir: app.sub ? path.win32.join(base, app.sub) : base }
+      }
+    }
+    // 没探测到就回豆包的默认安装位，让上层报 app_missing 时能带上确切路径
+    return { app: APPS[1], binary: path.win32.join(localAppData, APPS[1].win[0]), dataDir: base }
   }
   for (const app of APPS) {
     const bin = P.join("/Applications", app.mac)

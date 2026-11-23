@@ -48,7 +48,8 @@ export async function createWorktree({
   if (!fs.existsSync(path.join(repoDir, ".git"))) {
     throw new GitError(`不是 git 仓库：${repoDir}`)
   }
-  const wt = path.join(worktreeDir, branch.replace(/\//g, "-"))
+  // 分隔符统一成正斜杠：这个路径会进账本、进提示词，Windows 上不能混出反斜杠
+  const wt = path.join(worktreeDir, branch.replace(/\//g, "-")).replaceAll("\\", "/")
   if (fs.existsSync(path.join(wt, ".git"))) {
     return { path: wt, reused: true, branch, backend: "existing" }
   }
