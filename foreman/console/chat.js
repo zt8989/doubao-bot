@@ -184,7 +184,7 @@ class FmChat extends LitElement {
       </div>` : ""}
       <form class="chat-composer" @submit=${(event) => { event.preventDefault(); this.send() }}>
         <textarea
-          rows="3"
+          rows="2"
           placeholder="给 Router Agent 发消息…"
           .value=${this.draft}
           ?disabled=${this.busy}
