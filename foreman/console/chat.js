@@ -11,6 +11,8 @@ class FmChat extends LitElement {
     loading: { type: Boolean },
     error: { type: String },
     notice: { type: String },
+    // 要看的会话目标（convId/伪 id/名字，来自侧边栏点选）；空 = router 当前会话。
+    conv: { type: String },
   }
 
   constructor() {
@@ -21,6 +23,7 @@ class FmChat extends LitElement {
     this.loading = false
     this.error = ""
     this.notice = ""
+    this.conv = ""
     this._timer = null
     this._loading = false
     this._follow = false
@@ -56,16 +59,26 @@ class FmChat extends LitElement {
     })
   }
 
+  // 侧边栏点选切换会话（conv 属性变化）时立刻重读；输入框草稿保留。
+  willUpdate(changed) {
+    if (changed.has("conv") && changed.get("conv") !== undefined) this.load()
+  }
+
   async load() {
     if (this._loading) return
     this._loading = true
     this.loading = true
     try {
-      const res = await fetch("/api/chat", { cache: "no-store" })
+      // 侧边栏点选了具体会话（conv 非空）就按会话读；空 = router 当前会话。
+      const res = await fetch(this.conv ? `/api/chat?conv=${encodeURIComponent(this.conv)}` : "/api/chat", { cache: "no-store" })
       const body = await res.json()
       if (!res.ok || body.ok === false) throw new Error(body.message || `HTTP ${res.status}`)
       this.conversation = body
-      if (body.pending > 0 || body.running) {
+      if (this.conv) {
+        // 非 router 会话是只读观察（发送只进 router），不追轮询。
+        this._follow = false
+        this._sawActivity = false
+      } else if (body.pending > 0 || body.running) {
         this._follow = true
         this._sawActivity = true
       } else if (this._follow && this._sawActivity) {
@@ -75,7 +88,7 @@ class FmChat extends LitElement {
       }
       this.error = ""
     } catch (error) {
-      this.error = `拿不到 Router Agent 会话：${error.message}`
+      this.error = this.conv ? `拿不到会话 ${this.conv}：${error.message}` : `拿不到 Router Agent 会话：${error.message}`
     } finally {
       this._loading = false
       this.loading = false
@@ -85,6 +98,10 @@ class FmChat extends LitElement {
   async send() {
     const text = this.draft.trim()
     if (!text || this.busy) return
+    if (this.conv) {
+      this.error = "只读观察：发送只进 Router Agent。切回「Router（当前）」再发消息。"
+      return
+    }
     this.busy = true
     this.error = ""
     this.notice = ""
@@ -110,7 +127,7 @@ class FmChat extends LitElement {
     }
   }
 
-  renderMessage(message) {
+  renderMessage(message, agentTitle = "Router Agent") {
     if (message.role === "event") {
       return html`<details class="chat-event">
         <summary>Foreman 事件</summary>
@@ -121,7 +138,7 @@ class FmChat extends LitElement {
     return html`<div class=${`chat-message ${own ? "is-own" : "is-agent"}`}>
       <span class="chat-avatar">${own ? "你" : "R"}</span>
       <div class="chat-content">
-        <div class="chat-meta">${own ? "你" : "Router Agent"}</div>
+        <div class="chat-meta">${own ? "你" : agentTitle}</div>
         <div class="chat-bubble">${message.text}</div>
         ${message.finished === false ? html`<div class="chat-meta">正在回复…</div>` : ""}
         ${message.error ? html`<div class="chat-error">${message.error}</div>` : ""}
@@ -139,17 +156,24 @@ class FmChat extends LitElement {
       messages.push({ id: "awaiting-router-reply", role: "assistant", text: "", finished: false })
     }
     const pendingMessages = this.conversation?.pendingMessages || []
+    const watching = Boolean(this.conv)
+    const title = watching ? (this.conversation?.name || this.conv) : "Router Agent"
     return html`<section class="panel chat-panel">
+      ${watching ? html`<div class="chat-notice">
+        正在观察会话「${title}」（只读，发送只进 Router Agent）
+        <button class="ghost" type="button" @click=${() => emit(this, "chat-target", { conv: "" })}>回到 Router（当前）</button>
+      </div>` : ""}
       <div class="chat-messages" aria-live="polite">
-        ${messages.length ? messages.map((message) => this.renderMessage(message)) : html`
+        ${messages.length ? messages.map((message) => this.renderMessage(message, title)) : html`
           <div class="chat-empty">
-            <strong>给 Router Agent 发一条消息</strong>
-            <span>消息先写入 Inbox，再由 Worker 投递；服务重启后仍可恢复。</span>
+            ${watching
+              ? html`<strong>这条会话还没有留痕对话</strong><span>首轮运行结束后这里会显示每轮的派活与回复。</span>`
+              : html`<strong>给 Router Agent 发一条消息</strong><span>消息先写入 Inbox，再由 Worker 投递；服务重启后仍可恢复。</span>`}
           </div>`}
       </div>
       ${this.notice ? html`<div class="chat-notice">${this.notice}</div>` : ""}
       ${this.error ? html`<div class="chat-error chat-load-error">${this.error}</div>` : ""}
-      ${pendingMessages.length ? html`<div class="chat-pending-queue" aria-label="等待投送的消息" aria-live="polite">
+      ${!watching && pendingMessages.length ? html`<div class="chat-pending-queue" aria-label="等待投送的消息" aria-live="polite">
         ${pendingMessages.map((message) => html`<div class="chat-pending-message">
           <svg class="chat-pending-icon" viewBox="0 0 20 20" aria-hidden="true">
             <path d="M4 5.5h12M4 10h8M4 14.5h5M13 13l2 2 3-4" />

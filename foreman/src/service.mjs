@@ -2980,6 +2980,12 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     return ok(await ctx.chat.messages())
   }
 
+  if (cmd === "chat messagesFor") {
+    if (!ctx.chat) return fail("chat-unavailable", "Chat 不在当前服务里")
+    if (typeof ctx.chat.messagesFor !== "function") return fail("chat-unavailable", "当前 chat 不支持按会话读取")
+    return ok(await ctx.chat.messagesFor(req.target))
+  }
+
   if (cmd === "inbox list") {
     const status = String(req.status ?? "")
     return ok({

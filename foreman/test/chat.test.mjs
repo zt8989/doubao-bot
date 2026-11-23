@@ -162,3 +162,34 @@ test("zcode 账本留痕经 messages() 归一化：派活 prompt 是事件气泡
   assert.equal(conversation.messages[2].text, "现在进展如何")
   assert.equal(conversation.running, true, "适配器 status=running 时 Chat 保持正在回复")
 })
+
+test("messagesFor：按目标会话读（契约归一化），空目标回退 router 当前会话", async (t) => {
+  const f = fixture()
+  t.after(() => fs.rmSync(f.dir, { recursive: true, force: true }))
+  const seen = []
+  f.ctx.dws.info = async (target) => {
+    seen.push(target)
+    return {
+      name: `会话-${target}`,
+      sessionId: `sess_${target}`,
+      running: false,
+      messages: [
+        { role: "user", text: "派活 prompt 原文" },
+        { role: "assistant", text: "干完了" },
+      ],
+    }
+  }
+
+  const coder = await f.chat.messagesFor("zcode-coder-1")
+  assert.deepEqual(seen, ["zcode-coder-1"])
+  assert.deepEqual(coder.messages.map((m) => m.role), ["event", "assistant"])
+  assert.equal(coder.name, "会话-zcode-coder-1")
+  assert.equal(coder.pending, 0)
+
+  // 空目标回退 router 当前会话：账本没绑定时返回空会话（不调用 info），绑定后才读。
+  const fallback = await f.chat.messagesFor("")
+  assert.deepEqual(seen, ["zcode-coder-1"], "router 未绑定时不再读 info")
+  assert.equal(fallback.convId, "")
+  assert.deepEqual(fallback.messages, [])
+  assert.equal(fallback.pending, 0)
+})

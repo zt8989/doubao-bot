@@ -131,7 +131,14 @@ function navIcon(id) {
 }
 
 class FmSidebar extends LitElement {
-  static properties = { view: { type: String }, collapsed: { type: Boolean }, alive: { type: Boolean } }
+  static properties = {
+    view: { type: String },
+    collapsed: { type: Boolean },
+    alive: { type: Boolean },
+    // zcode 会话账本（Chat 视图下的左下会话列表）；conv = 当前点选的会话目标。
+    agentSessions: { attribute: false },
+    conv: { type: String },
+  }
   createRenderRoot() {
     return this
   }
@@ -145,6 +152,9 @@ class FmSidebar extends LitElement {
       { id: "schedules", label: "Schedule" },
       { id: "operations", label: "操作日志" },
     ]
+    const sessions = this.agentSessions || []
+    const conv = this.conv || ""
+    const statusDot = (s) => (s === "running" ? "on" : s === "error" ? "off" : "done")
     return html`
       <aside class=${"sidebar" + (this.collapsed ? " is-collapsed" : "")} aria-label="控制台导航">
         <div class="brand">
@@ -164,6 +174,29 @@ class FmSidebar extends LitElement {
               <span class="side-text">${v.label}</span>
             </button>`)}
         </nav>
+        ${this.view === "chat" && !this.collapsed ? html`
+          <div class="side-sessions" aria-label="智能体会话列表">
+            <div class="side-sessions-head">会话</div>
+            <button
+              class=${"side-session" + (conv === "" ? " is-active" : "")}
+              title="Router Agent（当前）"
+              @click=${() => emit(this, "chat-target", { conv: "" })}
+            >
+              <span class=${"dot done on"}></span>
+              <span class="side-session-name">Router（当前）</span>
+            </button>
+            ${sessions.slice(0, 30).map((s) => html`
+              <button
+                class=${"side-session" + (conv === s.convId ? " is-active" : "")}
+                title=${`${s.name} · ${s.status}`}
+                @click=${() => emit(this, "chat-target", { conv: s.convId })}
+              >
+                <span class=${"dot " + statusDot(s.status)}></span>
+                <span class="side-session-name">${s.name}</span>
+              </button>`)}
+            ${sessions.length ? "" : html`<div class="side-sessions-empty">暂无会话留痕</div>`}
+          </div>`
+        : ""}
         <button
           class="side-collapse"
           title=${this.collapsed ? "展开导航" : "折叠导航"}
@@ -1253,6 +1286,7 @@ class FmConsole extends LitElement {
     opPage: { type: Number },
     agentSessions: { attribute: false },
     agentCarrier: { type: String },
+    chatConv: { type: String },
     schedBusy: { type: String },
     schedError: { type: String },
     schedNote: { type: String },
@@ -1343,7 +1377,14 @@ class FmConsole extends LitElement {
       if (this.view === "schedules") this.loadSchedules()
       if (this.view === "operations") this.loadOperations()
       if (this.view === "sessions") this.loadAgentSessions()
+      // Chat 视图侧边栏的会话列表也用同一份账本数据。
+      if (this.view === "chat") this.loadAgentSessions()
     }
+    // 侧边栏点选会话：切 Chat 的观察目标（空 = router 当前会话）。
+    this._onChatTarget = (e) => {
+      this.chatConv = String(e.detail.conv ?? "")
+    }
+    this.addEventListener("chat-target", this._onChatTarget)
     this._onSidebarToggle = () => {
       this.sidebarCollapsed = !this.sidebarCollapsed
       try {
@@ -1430,6 +1471,7 @@ class FmConsole extends LitElement {
     this.loadWorkflow()
     this.loadSchedules()
     this.loadOperations()
+    this.loadAgentSessions()
     this.loadQueue("inbox")
     this.loadQueue("outbox")
     this._loadTimer = setInterval(() => {
@@ -1438,7 +1480,7 @@ class FmConsole extends LitElement {
       if (this.view === "inbox" || this.view === "outbox") this.loadQueue(this.view)
       if (this.view === "schedules") this.loadSchedules()
       if (this.view === "operations") this.loadOperations()
-      if (this.view === "sessions") this.loadAgentSessions()
+      if (this.view === "sessions" || this.view === "chat") this.loadAgentSessions()
     }, 15000)
   }
 
@@ -1727,6 +1769,8 @@ class FmConsole extends LitElement {
         .view=${this.view}
         .collapsed=${this.sidebarCollapsed}
         .alive=${this.data?.service?.alive !== false}
+        .agentSessions=${this.agentSessions || []}
+        .conv=${this.chatConv || ""}
       ></fm-sidebar>
       <div class="main-col">
         <fm-head
@@ -1740,7 +1784,7 @@ class FmConsole extends LitElement {
         ></fm-head>
         <main class=${this.view === "chat" ? "is-chat" : ""}>
         ${this.view === "chat"
-          ? html`<fm-chat></fm-chat>`
+          ? html`<fm-chat .conv=${this.chatConv || ""}></fm-chat>`
           : this.view === "schedules"
           ? html`<fm-schedules .schedules=${this.schedules} .workHours=${this.workHours} .busy=${this.schedBusy} .error=${this.schedError} .note=${this.schedNote}></fm-schedules>`
           : this.view === "operations"

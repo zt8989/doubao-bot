@@ -58,6 +58,36 @@ export function createChatWorkflow(ctx) {
     async messages() {
       const book = new Book(ctx.cfg.stateFile)
       const router = book.data.router ?? book.data.inspector ?? {}
+      const base = await this.messagesBase()
+      return {
+        ...base,
+        convId: String(router.convId ?? base.convId),
+        name: String(router.name ?? base.name),
+        pending: base.pending,
+        pendingMessages: base.pendingMessages,
+      }
+    },
+
+    // 按目标会话读（控制台侧边栏点选任意会话用）：target 空 = router 当前会话。
+    // pending/pendingMessages 只对 router 有意义（Chat 发送只进 router），其余会话恒空。
+    async messagesFor(target = "") {
+      const t = String(target ?? "").trim()
+      if (!t) return this.messages()
+      const info = await ctx.dws.info(t)
+      return {
+        ok: true,
+        convId: String(info?.sessionId || t),
+        name: String(info?.name ?? t),
+        messages: normalizeSessionMessages(info?.messages),
+        pending: 0,
+        pendingMessages: [],
+        running: normalizeRunning(info),
+      }
+    },
+
+    async messagesBase() {
+      const book = new Book(ctx.cfg.stateFile)
+      const router = book.data.router ?? book.data.inspector ?? {}
       const pendingMessages = (ctx.inbox
         ? [...ctx.inbox.list({ limit: 1000, status: "pending" }), ...ctx.inbox.list({ limit: 1000, status: "processing" })]
         : [])
@@ -65,8 +95,6 @@ export function createChatWorkflow(ctx) {
         .sort((a, b) => a.id - b.id)
         .map((event) => ({ id: event.id, text: String(event.text ?? ""), status: event.status }))
       const pending = pendingMessages.length
-      if (!router.convId) return { ok: true, convId: "", name: "", messages: [], running: false, pending, pendingMessages }
-      if (typeof ctx.dws?.info !== "function") throw new Error("dws 缺少 info，无法读取 Router Agent 会话")
       if (!router.convId) return { ok: true, convId: "", name: "", messages: [], running: false, pending, pendingMessages }
       if (typeof ctx.dws?.info !== "function") throw new Error("dws 缺少 info，无法读取 Router Agent 会话")
       const info = await ctx.dws.info(router.convId)

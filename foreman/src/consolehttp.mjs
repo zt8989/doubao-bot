@@ -213,7 +213,12 @@ export function startConsoleHttp({ store, ctx, dir, host, port, token = "", log 
 
       if (pathname === "/api/chat") {
         if (!onRpc) return sendJson(res, 501, { ok: false, error: "rpc_not_enabled" })
-        if (req.method === "GET") return sendJson(res, 200, await onRpc({ id: "http-chat-messages", cmd: "chat messages" }))
+        if (req.method === "GET") {
+          // conv= 指定看哪条会话（侧边栏点选）；缺省读 router 当前会话。
+          const conv = (url.searchParams.get("conv") || "").trim()
+          const cmd = conv ? { id: "http-chat-messages", cmd: "chat messagesFor", target: conv } : { id: "http-chat-messages", cmd: "chat messages" }
+          return sendJson(res, 200, await onRpc(cmd))
+        }
         if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
         let body
         try {
