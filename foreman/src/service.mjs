@@ -2227,6 +2227,20 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     const repoRef = String(req.repo ?? "").trim()
     const repoCfg = (ctx.cfg.repos ?? []).find((r) => r.repo === repoRef || r.name === repoRef)
     if (!repoCfg) return fail("bad-request", `配置里没有这个工程：${repoRef || "（空）"}`)
+    // 自动化来源（--automation）：请求本身路由给 router agent 决策执行，不直接动手——
+    // 默认调用者就是 agent，门禁提示也全部给 agent 自己消化。
+    if (req.automation === true) {
+      await routeToRouter(ctx, {
+        type: "ws.add",
+        text: [
+          `【Foreman · 自动化请求】为工单 ${key} 开工作区（来源：自动化流程）。`,
+          "请决策后自行执行 foreman ws add --repo " + (repoRef || repoCfg.repo) + " --issue " + key + "（不带 --automation）；不满足准入标签时先分流或说明原因。",
+        ].join("\n"),
+        json: { op: "ws.add", key, repo: repoCfg.repo },
+      })
+      ctx.log?.(`ws add ${key}：自动化请求已投 router`)
+      return ok({ key, routed: "router", automation: true, worktree: "", branch: "" })
+    }
     const book0 = new Book(ctx.cfg.stateFile)
     const rec0 = book0.issue(key)
     // 工单取一次：标签门禁、建档、右侧分支判断都用它。取不到且账本有档时降级继续（跳过门禁，记日志）。
@@ -2256,24 +2270,9 @@ export async function handleRequest(ctx, req) {  const id = req?.id
           return fail("needs-info", `工单 ${key} 带 needs-info：信息不足不能开工。请向用户/工单发起人索要缺失信息（foreman issue comment 留言或 send --type mail），信息齐了把标签改成 ready-for-agent 再重试 ws add；或 --force 显式绕过。`)
         }
         if (has("needs-triage")) {
-          // 自动转决策：把分流请求投给 router（唯一编排者调研后切 ready-for-agent / ready-for-human）。
-          // noop 载体下事件只入箱堆积——那时分流由人或外部 agent 完成。
-          let routed = ""
-          try {
-            await routeToRouter(ctx, {
-              type: "issue.decision",
-              text: [
-                `【Foreman · 待分流】工单 ${key}「${issue.title ?? ""}」带 needs-triage，有人尝试开工被门禁拦下。`,
-                issue.url ? `链接：${issue.url}` : "",
-                "请调研工单与相关代码给出可行方案，然后改标签：可编码切 ready-for-agent，交人工切 ready-for-human；拿不准就 foreman send --type mail 请用户决策。",
-              ].filter(Boolean).join("\n"),
-              json: { issue: { key, repo: String(m[1]), number: Number(m[2]), title: issue.title ?? "", url: issue.url ?? "", labels } },
-            })
-            routed = "已把分流请求写入 router Inbox"
-          } catch {}
           return fail(
             "needs-triage",
-            `工单 ${key} 带 needs-triage：先调研再分流，不直接开工。请阅读工单与相关代码给出可行方案，然后改标签（ready-for-agent=可开工 / ready-for-human=交人工）再重试 ws add。${routed}；或 --force 显式绕过。`,
+            `工单 ${key} 带 needs-triage：先调研再分流，不直接开工。请阅读工单与相关代码给出可行方案，然后改标签（ready-for-agent=可开工 / ready-for-human=交人工）再重试 ws add；拿不准就 foreman send --type mail 请用户决策。或 --force 显式绕过；自动化流程请改用 --automation 路由给 router。`,
           )
         }
         return fail("not-ready", `工单 ${key} 没有 ready-for-agent，未经确认不开工。人工确认后加该标签再重试；若你就是决策者，可 --force 显式绕过。`)

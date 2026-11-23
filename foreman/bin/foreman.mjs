@@ -57,8 +57,9 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman mail requests
   foreman mail approve <owner/repo>#<N> [--by <人>] [--note <说明>]
   foreman mail reject  <owner/repo>#<N> [--by <人>] [--note <原因>]
-  foreman ws add --repo <工程名|owner/name> --issue <owner/name>#<单号> [--base <基线>] [--force]
-                            # 标签门禁：无 ready-for-agent 拒绝；needs-triage/needs-info/ready-for-human/wontfix 分类报错；--force 显式绕过
+  foreman ws add --repo <工程名|owner/name> --issue <owner/name>#<单号> [--base <基线>] [--force] [--automation]
+                            # 默认调用者=agent：门禁按 5 个准入标签分类报错，提示给 agent；--force 显式绕过
+                            # --automation：自动化流程专用，请求不执行、路由给 router agent 决策
   foreman ws list --issue <owner/name>#<单号>
   foreman issue create --repo R --title <标题> [--body <正文>] [--ws]
                                       一条龙起点：建单 + 账本建档；--ws 立即开工单所在仓的工作区
@@ -352,6 +353,9 @@ async function cmdWs(pos, flags) {
   const req = { id: "cli", cmd: `ws ${sub}`, issue, repo: strFlag(flags.repo), base: strFlag(flags.base) }
   if (sub === "add") {
     if (!req.repo) throw new Error("ws add 要 --repo <工程名|owner/name>")
+    // 默认调用者就是 agent：门禁提示全部给 agent 自己消化。
+    // --automation：自动化流程专用——请求不直接执行，路由给 router agent 决策。
+    req.automation = flags.automation === true
     // 标签门禁绕过开关：只有决策者本人该用（见 ws add 的分类报错文案）。
     req.force = flags.force === true
   }

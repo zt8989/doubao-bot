@@ -208,7 +208,7 @@ test("ws add 门禁：needs-info / ready-for-human / wontfix 分类报错", asyn
   }
 })
 
-test("ws add 门禁：needs-triage 自动投 issue.decision 给 router 并返回指引", async () => {
+test("ws add 门禁：needs-triage 报错给 agent（默认不投 router——默认调用者就是 agent）", async () => {
   const dir = tmpDir()
   try {
     const cfg = mkCfg(dir, gitFixture(dir))
@@ -216,21 +216,20 @@ test("ws add 门禁：needs-triage 自动投 issue.decision 给 router 并返回
     tracker.impl.issueLabels = ["needs-triage"]
     const routed = []
     const ctx = mkCtx(cfg, tracker)
-    ctx.notifyRouter = async (e) => { routed.push(e); return { ok: true, eventId: "evt-triage" } }
+    ctx.notifyRouter = async (e) => { routed.push(e); return { ok: true } }
     const out = await handleRequest(ctx, { id: "h", cmd: "ws add", issue: "yyzl/demo#13", repo: "yyzl/demo" })
     assert.equal(out.ok, false)
     assert.equal(out.error, "needs-triage")
     assert.match(out.message, /改标签（ready-for-agent=可开工 \/ ready-for-human=交人工）/)
-    assert.match(out.message, /router Inbox/)
-    assert.equal(routed.length, 1)
-    assert.equal(routed[0].type, "issue.decision")
-    assert.equal(routed[0].json.issue.number, 13)
+    assert.match(out.message, /--force/)
+    assert.equal(routed.length, 0, "默认调用者是 agent：提示给 agent，不投 router")
     assert.equal(new Book(cfg.stateFile).issue("yyzl/demo#13"), null, "triage 拒绝也不留账本痕迹")
     assert.equal(fs.existsSync(path.join(cfg.worktreeDir, "demo")), false, "不开工作区")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
 
 test("ws add 门禁：--force 绕过（照常建工作区+回写 ref）", async () => {
   const dir = tmpDir()
@@ -244,6 +243,30 @@ test("ws add 门禁：--force 绕过（照常建工作区+回写 ref）", async 
     const after = new Book(cfg.stateFile).issue("yyzl/demo#14")
     assert.equal(after.state, "planned")
     assert.equal(after.workspaces.length, 1)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+
+test("ws add --automation：自动化请求不执行，路由给 router agent", async () => {
+  const dir = tmpDir()
+  try {
+    const cfg = mkCfg(dir, gitFixture(dir))
+    const routed = []
+    const tracker = fakeTracker()
+    tracker.impl.issueLabels = ["ready-for-agent"]   // 即使标签放行，自动化也不直接执行
+    const ctx = mkCtx(cfg, tracker)
+    ctx.notifyRouter = async (e) => { routed.push(e); return { ok: true, eventId: "evt-auto" } }
+    const out = await handleRequest(ctx, { id: "j", cmd: "ws add", issue: "yyzl/demo#15", repo: "yyzl/demo", automation: true })
+    assert.equal(out.ok, true)
+    assert.equal(out.routed, "router")
+    assert.equal(out.automation, true)
+    assert.equal(routed.length, 1)
+    assert.equal(routed[0].type, "ws.add")
+    assert.match(routed[0].text, /自动化请求/)
+    assert.equal(fs.existsSync(path.join(cfg.worktreeDir, "demo")), false, "自动化不直接建工作区")
+    assert.equal(new Book(cfg.stateFile).issue("yyzl/demo#15"), null, "自动化不建档")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
