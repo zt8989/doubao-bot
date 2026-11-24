@@ -271,3 +271,48 @@ test("ws add --automation：自动化请求不执行，路由给 router agent", 
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("worktreeHook：ws add 后自动执行初始化命令，结果进返回与账本；reused 也重跑", async () => {
+  const dir = tmpDir()
+  try {
+    const repoDir = gitFixture(dir)
+    const cfg = mkCfg(dir, repoDir)
+    cfg.repos[0].worktreeHook = ["echo created > .hook-ran.txt"]
+    const out = await handleRequest(mkCtx(cfg, fakeTracker()), { id: "h1", cmd: "ws add", issue: "yyzl/demo#21", repo: "yyzl/demo" })
+    assert.equal(out.ok, true)
+    assert.equal(out.hook.ok, true)
+    assert.ok(fs.existsSync(path.join(out.worktree, ".hook-ran.txt")), "hook 在 worktree 里执行了")
+    const rec = JSON.parse(fs.readFileSync(cfg.stateFile, "utf8")).issues["yyzl/demo#21"]
+    assert.equal(rec.workspaces[0].hookOk, true)
+
+    // 二次 add（reused）也重跑 hook：改写文件内容验证是本轮跑的
+    fs.rmSync(path.join(out.worktree, ".hook-ran.txt"), { force: true })
+    const again = await handleRequest(mkCtx(cfg, fakeTracker()), { id: "h2", cmd: "ws add", issue: "yyzl/demo#21", repo: "yyzl/demo" })
+    assert.equal(again.ok, true)
+    assert.equal(again.reused, true)
+    assert.equal(again.hook.ok, true)
+    assert.ok(fs.existsSync(path.join(again.worktree, ".hook-ran.txt")), "复用路径同样跑 hook")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("worktreeHook 失败：ws add 照常交付，hook.ok=false + 账本记 hookError", async () => {
+  const dir = tmpDir()
+  try {
+    const repoDir = gitFixture(dir)
+    const cfg = mkCfg(dir, repoDir)
+    cfg.repos[0].worktreeHook = ["echo before > .hook-first.txt", "exit 3", "echo after > .hook-never.txt"]
+    const out = await handleRequest(mkCtx(cfg, fakeTracker()), { id: "h3", cmd: "ws add", issue: "yyzl/demo#22", repo: "yyzl/demo" })
+    assert.equal(out.ok, true, "hook 失败不阻塞工作区交付")
+    assert.equal(out.hook.ok, false)
+    assert.match(out.hook.error, /exit 3|退出码/)
+    assert.ok(fs.existsSync(path.join(out.worktree, ".hook-first.txt")))
+    assert.ok(!fs.existsSync(path.join(out.worktree, ".hook-never.txt")), "失败即停，后续命令不跑")
+    const rec = JSON.parse(fs.readFileSync(cfg.stateFile, "utf8")).issues["yyzl/demo#22"]
+    assert.equal(rec.workspaces[0].hookOk, false)
+    assert.ok(String(rec.workspaces[0].hookError ?? "").length > 0)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

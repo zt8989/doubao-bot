@@ -12,6 +12,7 @@ import {
   diffStat,
   pushBranch,
   recentCommits,
+  runWorktreeHooks,
   statusPorcelain,
   worktreeRemove,
 } from "./gitx.mjs"
@@ -260,6 +261,9 @@ export async function handleIssue(ctx, repoCfg, summary) {
       })
       workspaces.push({ repo: r.repo, name: r.name, branch: b, base: r.base, worktree: wt.path, backend: wt.backend, reused: !!wt.reused })
       log(`${key}：工作区 ${wt.path}（${r.repo}·${wt.reused ? "复用" : `新建·${wt.backend}`}）`)
+      // worktreeHook（装依赖等）：永远 warn-and-continue，失败只记日志留给会话自救。
+      const hook = await runWorktreeHooks(r, wt.path, log)
+      if (!hook.ok) log(`${key}：${r.repo} 的 worktreeHook 失败（${String(hook.error).slice(0, 160)}），编码会话需自行处理依赖`)
     } catch (e) {
       if (r.repo === repoCfg.repo) {
         await hold(ctx, repoCfg, issue, {

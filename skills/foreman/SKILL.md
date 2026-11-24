@@ -20,6 +20,7 @@ foreman issue create --repo R --title <标题> [--body <正文>] [--ws]
 
 foreman ws add --repo <工程|owner/name> --issue <owner/name>#<N> [--base <基线>]
 # → 从 origin/<base> 建 fix/issue-N + worktree（herdr/git 幂等，复用已有）
+# → 建/复用后自动跑 repos[].worktreeHook（装依赖等，失败不阻塞；返回 hook.ok/error，账本记 hookOk/hookError）
 # → 账本没建档时回查 tracker 自举成 planned（所以跳过第 1 步也能直接 ws add）
 # → 工单所在仓的工作区建好后，把分支写进工单右侧 ref（幂等，值已对不重写）
 

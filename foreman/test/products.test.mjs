@@ -122,3 +122,18 @@ test("deliverNewSession：查不到产品时用全局提示词（老配置行为
   assert.match(calls[0].prompt, /全局提示词/)
   assert.ok(!calls[0].prompt.includes("产品："))
 })
+
+test("worktreeHook 配置穿透：products[].repos 归一化成字符串数组，未配的仓拿到空数组", () => {
+  // 配了 products 时顶层 repos 会被摊平结果覆盖（既有行为），统一用两条 product 仓断言。
+  const { file } = tmpConfig({
+    products: [
+      { name: "p", repos: [{ repo: "a/top", dir: "/tmp/top", base: "main", worktreeHook: ["pnpm install", "  ", 42, "pnpm build"] }] },
+      { name: "q", repos: [{ repo: "b/prod", dir: "/tmp/prod", base: "main", worktreeHook: ["pnpm install --frozen-lockfile"] }] },
+    ],
+  })
+  const cfg = loadConfig(file)
+  assert.deepEqual(cfg.repos.find((r) => r.repo === "a/top").worktreeHook, ["pnpm install", "pnpm build"], "非字符串与空白项被过滤")
+  assert.deepEqual(cfg.repos.find((r) => r.repo === "b/prod").worktreeHook, ["pnpm install --frozen-lockfile"])
+  const { file: f2 } = tmpConfig({ repos: [{ repo: "a/b", dir: "/tmp", base: "main" }] })
+  assert.deepEqual(loadConfig(f2).repos[0].worktreeHook, [], "没配的仓拿到空数组（不 undefined，调用方免判）")
+})

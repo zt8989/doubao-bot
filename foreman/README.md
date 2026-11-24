@@ -460,7 +460,7 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
     "projectDir": "~/Documents/workspace/win-ai-stack",
     "repos": [
       { "name": "win-ai-harness", "repo": "yyzl/win-ai-harness", "dir": "~/Documents/workspace/win-ai-stack/win-ai-harness", "base": "sit-20261126" },
-      { "name": "yyjz-oa-cloud", "repo": "yyzl/yyjz-oa-cloud", "dir": "~/Documents/workspace/win-ai-stack/YYJZ_OA_CLOUD", "base": "sit-20261126" }
+      { "name": "yyjz-oa-frontend", "repo": "yyzl/yyjz-oa-frontend", "dir": "~/Documents/workspace/win-ai-stack/yyjz-oa-frontend", "base": "sit-20261126", "worktreeHook": ["pnpm install --frozen-lockfile"] }
     ]
   },
   {
@@ -468,10 +468,12 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
     "projectDir": "<它的项目根目录>",
     "promptFile": "<可选：这个产品自己的派单提示词，留空用内置>",
     "mergePromptFile": "<可选：这个产品自己的合并提示词，留空用内置>",
-    "repos": [ { "repo": "owner/name", "dir": "…", "base": "…" } ]
+    "repos": [ { "repo": "owner/name", "dir": "…", "base": "…", "worktreeHook": ["pnpm install"] } ]
   }
 ]
 ```
+
+`repos[].worktreeHook`（可选，字符串数组）：`ws add` 创建**或复用** worktree 后，在 worktree 目录里顺序执行的初始化命令（如装依赖），任一条失败即停。**warn-and-continue**：失败不阻塞工作区交付，结果记进账本（`workspaces[].hookOk/hookError`）与 `ws add` 返回（`hook.ok/hook.error`），编码会话按提示词先自救再写码。每条命令超时 10 分钟。
 
 - 配了 `products` 就以它为准：捞单、PR 扫描、投递都按产品走（内部把各产品仓库摊平成一张清单）；
 - `promptFile` / `mergePromptFile` / `projectDir` 留空时回落顶层 `deliver` 同名配置（老配置不用改；`mergePromptFile` 再回落到 `promptFile`）；这些路径全空就用代码内置的两份提示词，所以新配置可以完全不写提示词；

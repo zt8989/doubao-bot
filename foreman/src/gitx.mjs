@@ -3,7 +3,7 @@
 // 才退回原生 `git worktree add`，并且把原因写进日志。
 import fs from "node:fs"
 import path from "node:path"
-import { exec, expandHome } from "./util.mjs"
+import { exec, execShell, expandHome } from "./util.mjs"
 
 export class GitError extends Error {
   constructor(message, extra = {}) {
@@ -193,4 +193,25 @@ export async function cleanupMergedWorktree({
     }
   }
   return out
+}
+
+// runWorktreeHooks：worktree 创建/复用后跑 repos[].worktreeHook（如 pnpm install）。
+// 在 worktree 目录里顺序执行（bash -lc，带 nvm/homebrew PATH）；任一条失败即停。
+// 语义是 warn-and-continue：失败不阻塞工作区交付，结果由调用方记进账本/返回 payload。
+export async function runWorktreeHooks(repoCfg, wt, log = () => {}) {
+  const raw = repoCfg?.worktreeHook
+  const hooks = (Array.isArray(raw) ? raw : [raw]).filter((c) => typeof c === "string" && c.trim())
+  const results = []
+  for (const cmd of hooks) {
+    try {
+      await execShell(cmd, { cwd: wt, timeout: 600000 })
+      results.push({ cmd, ok: true })
+    } catch (e) {
+      const error = String(e.message ?? e).slice(-500)
+      log(`worktree hook 失败（${repoCfg?.name ?? "?"}）：${cmd} —— ${error.slice(-200)}`)
+      results.push({ cmd, ok: false, error })
+      break
+    }
+  }
+  return { results, ok: results.every((r) => r.ok), error: results.find((r) => !r.ok)?.error ?? "" }
 }

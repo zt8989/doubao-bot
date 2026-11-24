@@ -46,7 +46,7 @@ import { startOperation, finishOperation } from "./operations.mjs"
 import { startConsoleHttp } from "./consolehttp.mjs"
 import { fileURLToPath } from "node:url"
 import { pingOnce, readPortFile, connectHost } from "./svclient.mjs"
-import { worktreeRemove, statusPorcelain, git, createWorktree } from "./gitx.mjs"
+import { worktreeRemove, statusPorcelain, git, createWorktree, runWorktreeHooks } from "./gitx.mjs"
 
 export const MAX_FRAME_BYTES = 1 << 20
 
@@ -2310,6 +2310,9 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     } catch (e) {
       return fail("workspace-failed", String(e?.message ?? e))
     }
+    // worktree 就绪后跑 repos[].worktreeHook（装依赖等初始化）。warn-and-continue：
+    // 失败不阻塞工作区交付，结果记进账本与返回 payload，coder 看得到并自救。
+    const hook = await runWorktreeHooks(repoCfg, wt.path, ctx.log ?? (() => {}))
     // 老账本（没有 workspaces）只有主仓库那条：先用工单键里的仓库把它补进清单，再加新工程，
     // 免得把主仓库的 worktree 记录冲掉、以后收尾找不到它。
     const keyRepo = String(m[1])
@@ -2324,6 +2327,8 @@ export async function handleRequest(ctx, req) {  const id = req?.id
       worktree: wt.path,
       backend: wt.backend,
       addedAt: nowIso(),
+      hookOk: hook.ok,
+      ...(hook.ok ? {} : { hookError: hook.error }),
     })
     // 更新工单右侧分支字段（Gitea Issue.ref）：只认工单所在仓库的那条工作区，值已对就不重写。
     // 走 tracker 适配器 + issueRef 能力位——GitHub/Jira 类没有这字段，自动跳过不报错。
@@ -2359,6 +2364,7 @@ export async function handleRequest(ctx, req) {  const id = req?.id
       base,
       worktree: wt.path,
       reused: !!wt.reused,
+      hook: { ok: hook.ok, ...(hook.ok ? {} : { error: hook.error }) },
       workspaces: workspaces.map((w) => ({ repo: w.repo, branch: w.branch, worktree: w.worktree })),
     })
   }

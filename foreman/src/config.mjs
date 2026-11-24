@@ -262,6 +262,9 @@ export function normalizeRepos(cfg) {
       // 基线分支必须由配置给（repos[].base），不再默认 dev/sit。
       base: r.base || "",
       verify: r.verify ?? [],
+      // worktree 创建/复用后在 worktree 目录里顺序执行的初始化命令（如 pnpm install）；
+      // 任一条失败即停，warn-and-continue（结果记进账本与 ws add 返回，不阻塞开工）。
+      worktreeHook: (Array.isArray(r.worktreeHook) ? r.worktreeHook : [r.worktreeHook]).filter((c) => typeof c === "string" && c.trim()),
       labels: r.labels ?? null,
     }
   })
