@@ -156,6 +156,55 @@ foreman outbox run                 # 排障时手动消费一轮
 - **普通邮件回复路由**：CLI 发邮件时自动把 `--session-id`（未传则取 `MCP_VM_CONVERSATION_ID`）写成主题末尾的 `[FM-SID:<会话ID>]`。收件轮询把非验收邮件写成 `mail.reply` 持久事件；Worker 先查会话是否存在，命中后 steer 回原会话，未携带或未命中 ID 的回复交给 router agent。同一 `message_id` 只入箱一次，DWS 临时故障保留事件重试。
 - `[FM-SID:…]` 与 UI 验收的 `[FM-xxxxxxxx]` 是两种标记；验收回复仍走原有白名单、判定与合并流程，不进入普通邮件路由。旧 `inspector` 配置、账本字段与 Inbox 事件只作兼容读取，新口径统一使用 `router` / router agent。
 
+### 飞书通道：IM 消息进 Inbox，回复推回（openclaw 式）
+
+控制台侧边栏「飞书」页可直接配置：**启用开关、App ID/Secret、高优群、保存当场生效**，
+并提供**扫码/链接授权**（openclaw 同款设备授权流：二维码 + 授权链接，授权后一键把授权人
+open_id 填进私聊白名单，token 不落盘）。其余配置（低优群、botName、回复轮询间隔等）一律走
+`config.json` 默认值，界面不改；保存时这些键原样保留。对应 HTTP：`GET/POST /api/feishu`、
+`GET /api/feishu/auth`、`POST /api/feishu/auth/start`。
+
+入站走飞书开放平台的**长连接**（官方 `@larksuiteoapi/node-sdk`，不需要公网 IP / 回调地址），
+复用 Chat 页同一条链路：消息 → Inbox `chat.message`（`payload.source: "feishu"`）→ Worker → router agent。
+回复不靠控制台轮询：服务起一个泵轮询 router 会话的 assistant 增量，经 Outbox 的 `lark` 渠道推回飞书
+（出站仍走 `lark-cli`，SDK 凭据只管入站订阅）。两套凭据互不相干。
+
+前置（飞书开放平台，一次性）：
+
+1. 建一个**企业自建应用**，拿到 `App ID`（`cli_…`）与 `App Secret`；
+2. 「事件与回调」里订阅方式选**使用长连接接收事件**，订阅事件 `im.message.receive_v1`；
+3. 开通权限：`im:message`（读取/发送单聊群聊消息）等机器人消息权限；应用发布生效。
+
+配置（`feishu.enabled` 才加载 SDK；默认关闭，老配置零影响）：
+
+```json
+{
+  "feishu": {
+    "enabled": true,
+    "appId": "cli_xxxxxxxxxxxxxxxx",
+    "appSecret": "<App Secret>",
+    "domain": "feishu",
+    "allowUsers": ["ou_你的open_id"],
+    "groups": { "high": ["oc_高优群"], "low": ["oc_低优群"] },
+    "botName": "foreman-bot",
+    "replyPollSeconds": 5
+  }
+}
+```
+
+口径：
+
+- **收谁**：私聊只收 `allowUsers` 白名单（发送者 `open_id`）；`groups.high` 全收；`groups.low` 只有
+  **@机器人** 才收（按 mention 名字命中 `botName`、或 `botOpenId` 命中）；两类名单外的群不收。
+  三类入口一个都没配，`enabled` 直接报错。非文本消息（图片/文件/富文本）暂不收，原因记 `service.log`。
+- **回复发给谁**：目标跟着最近一条飞书入站消息走——私聊发回发件人、群聊发回群；Chat UI / 控制台来的消息不改目标。
+  推送断点记在状态文件（`feishu.lastPushedId`），重启不重推；首次启用或 router 会话重建时**只锚定不回放**，
+  锚定当刻已存在的最后一条回复不会被推。
+- **幂等**：入站按 `message_id` 去重（WS 重连重投也只入箱一次，Outbox 键 `feishu:push:<消息id>`）；
+  回复走 Outbox 全套幂等/重试口径（见上一节）。单条回复超 4000 字截断并注明。
+- **观察**：`foreman status` 的 `feishu` 字段报运行状态与收发计数；WS 断线由 SDK 自动重连，失败记日志不挡服务。
+  agent 是 `noop`（没有会话载体）时消息照常入箱，但没有 router 会话可推回复。
+
 ### 起与停
 
 ```bash
@@ -569,6 +618,17 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
     "uiPatterns": [],
     "allowSenders": [],
     "confirmed": true
+  },
+  "feishu": {
+    "enabled": false,
+    "appId": "cli_xxxxxxxxxxxxxxxx",
+    "appSecret": "<App Secret>",
+    "domain": "feishu",
+    "allowUsers": ["ou_你的open_id"],
+    "groups": { "high": ["oc_高优群"], "low": ["oc_低优群"] },
+    "botName": "foreman-bot",
+    "botOpenId": "",
+    "replyPollSeconds": 5
   },
   "products": [
     {

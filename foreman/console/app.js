@@ -5,6 +5,7 @@
  * 组件都用 light DOM（createRenderRoot 返回 this），样式继续吃 style.css 的全局类。
  */
 import { LitElement, html } from "lit"
+import QRCode from "qrcode"
 import "./chat.js"
 
 const STATE_LABEL = {
@@ -127,6 +128,9 @@ function navIcon(id) {
   if (id === "schedules") {
     return html`<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2M8 2l-2 2M16 2l2 2"/></svg>`
   }
+  if (id === "feishu") {
+    return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l-4 6h4l-9 12 3-9H5l1-9zM14 15h5l-3 6h-3l2-6z"/></svg>`
+  }
   return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h12M8 12h12M8 18h12"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></svg>`
 }
 
@@ -150,6 +154,7 @@ class FmSidebar extends LitElement {
       { id: "tasks", label: "Tasks" },
       { id: "sessions", label: "Sessions" },
       { id: "schedules", label: "Schedule" },
+      { id: "feishu", label: "飞书" },
       { id: "operations", label: "操作日志" },
     ]
     const sessions = this.agentSessions || []
@@ -257,7 +262,7 @@ class FmHead extends LitElement {
               <h2>Chat</h2>
             </div>`
           : html`<div class="topbar-title">
-              <h2>${({ inbox: "Inbox", outbox: "Outbox", tasks: "Tasks", sessions: "智能体会话", schedules: "Schedule", operations: "操作日志" })[this.view] || "Foreman"}</h2>
+              <h2>${({ inbox: "Inbox", outbox: "Outbox", tasks: "Tasks", sessions: "智能体会话", schedules: "Schedule", feishu: "飞书通道", operations: "操作日志" })[this.view] || "Foreman"}</h2>
             </div>`}
         <div class="meta">
           ${this.view === "chat" ? html`
@@ -1317,6 +1322,164 @@ class FmSessionMenu extends LitElement {
   }
 }
 
+/* ---------------- 飞书通道：配置 + 二维码/链接授权 + 运行状态 ---------------- */
+class FmFeishu extends LitElement {
+  static properties = {
+    feishu: { attribute: false },
+    busy: { type: String },
+    error: { type: String },
+    note: { type: String },
+    showSecret: { type: Boolean },
+    qrData: { type: String },
+  }
+  constructor() {
+    super()
+    this.showSecret = false
+    this.qrData = ""
+    this._qrFor = ""
+  }
+  createRenderRoot() {
+    return this
+  }
+  val(name) {
+    return this.querySelector(`[data-feishu-field="${name}"]`)
+  }
+  save() {
+    if (this.busy) return
+    const high = (this.val("high")?.value || "").split(/[\n,，;；]+/).map((s) => s.trim()).filter(Boolean)
+    emit(this, "feishu-save", {
+      patch: {
+        enabled: Boolean(this.val("enabled")?.checked),
+        appId: this.val("appId")?.value.trim() || "",
+        appSecret: this.val("appSecret")?.value.trim() || "",
+        groups: { high },
+      },
+    })
+  }
+  authStart() {
+    emit(this, "feishu-auth-start", {})
+  }
+  // 授权成功后把授权人的 open_id 补进私聊白名单（跟现有白名单合并去重，写回配置并当场生效）。
+  authAddUser() {
+    const openId = this.feishu?.auth?.openId || ""
+    if (!openId || this.busy) return
+    const existing = this.feishu?.config?.allowUsers || []
+    emit(this, "feishu-save", { patch: { allowUsers: [...new Set([...existing, openId])] } })
+  }
+  async updated(changed) {
+    super.updated?.(changed)
+    // 授权链接一变就重画二维码（verification_uri_complete 自带 user_code，扫一次直接授权）。
+    const link = this.feishu?.auth?.verificationUriComplete || ""
+    if (link && link !== this._qrFor) {
+      this._qrFor = link
+      try {
+        this.qrData = await QRCode.toDataURL(link, { margin: 1, width: 200 })
+      } catch {
+        this.qrData = ""
+      }
+      this.requestUpdate()
+    }
+  }
+  gatewayBadge() {
+    const gw = this.feishu?.gateway
+    if (!gw?.enabled) return html`<span class="badge self">未启用</span>`
+    return gw.running
+      ? html`<span class="badge notified">长连接已连上</span>`
+      : html`<span class="badge blocked">未运行</span>`
+  }
+  authCard() {
+    const auth = this.feishu?.auth || { status: "idle" }
+    if (auth.status === "pending") {
+      return html`
+        <div class="feishu-auth-box">
+          ${this.qrData ? html`<img class="feishu-qr" src=${this.qrData} alt="飞书授权二维码" />` : html`<div class="feishu-qr feishu-qr-empty">生成二维码中…</div>`}
+          <div class="feishu-auth-side">
+            <p class="hint">飞书扫一扫上方二维码，或<a href=${auth.verificationUri || auth.verificationUriComplete} target="_blank" rel="noopener">点此打开授权链接</a>。</p>
+            ${auth.userCode ? html`<p class="hint">授权码：<code>${auth.userCode}</code></p>` : ""}
+            <p class="hint is-ok">等待你确认授权…（页面可离开，结果稍后回填）</p>
+          </div>
+        </div>`
+    }
+    if (auth.status === "authorized") {
+      return html`
+        <div class="feishu-auth-box">
+          <div class="feishu-auth-side">
+            <p class="hint is-ok">授权成功：${auth.userName || "飞书用户"}（<code>${auth.openId}</code>）</p>
+            <p class="hint">把 TA 加进私聊白名单，机器人才能收到 TA 的私聊消息。</p>
+            <button type="button" class="ghost" ?disabled=${this.busy !== "" || (this.feishu?.config?.allowUsers || []).includes(auth.openId)} @click=${() => this.authAddUser()}>
+              ${(this.feishu?.config?.allowUsers || []).includes(auth.openId) ? "已在白名单" : "加入私聊白名单"}
+            </button>
+          </div>
+        </div>`
+    }
+    const failed = auth.status === "failed" || auth.status === "expired"
+    return html`
+      <div class="feishu-auth-box">
+        <div class="feishu-auth-side">
+          <p class="hint">用设备授权（openclaw 同款）：不用配置回调地址，扫码或点链接确认后自动拿授权人 open_id。</p>
+          ${failed ? html`<p class="hint is-error">${auth.error || "授权未完成"}</p>` : ""}
+          <button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.authStart()}>
+            ${failed ? "重新发起授权" : "发起扫码授权"}
+          </button>
+          <p class="hint">${this.busy === "auth" ? "发起中…" : "需要先保存 appId/appSecret"}</p>
+        </div>
+      </div>`
+  }
+  render() {
+    const cfg = this.feishu?.config || {}
+    const gw = this.feishu?.gateway
+    const high = (cfg.groups?.high || []).join("\n")
+    return html`
+      <section class="panel">
+        <div class="panel-head">
+          <h2>飞书通道</h2>
+          <div class="panel-side">
+            ${this.gatewayBadge()}
+            ${gw?.enabled ? html`<span class="hint">收 ${gw.accepted ?? 0} · 拒 ${gw.rejected ?? 0} · 重 ${gw.duplicates ?? 0}${gw.lastInboundAt ? ` · 最近消息 ${gw.lastInboundAt.replace("T", " ").slice(5, 16)}` : ""}</span>` : ""}
+          </div>
+        </div>
+        ${this.error ? html`<div class="sched-error">${this.error}</div>` : ""}
+        ${this.note ? html`<div class="sched-note schedule-message">${this.note}</div>` : ""}
+        ${this.feishu?.error && !this.feishu?.gateway?.running && cfg.enabled ? html`<div class="sched-error">通道启动失败：${this.feishu.error}</div>` : ""}
+        <form class="feishu-form" @submit=${(e) => e.preventDefault()}>
+          <label>
+            <span class="feishu-toggle">
+              <input type="checkbox" data-feishu-field="enabled" .checked=${cfg.enabled === true} />
+              启用飞书通道（长连接收消息，回复经 Outbox lark 推回）
+            </span>
+          </label>
+          <label>
+            App ID
+            <input data-feishu-field="appId" spellcheck="false" .value=${cfg.appId || ""} placeholder="cli_xxxxxxxxxxxxxxxx" />
+            <small>飞书开放平台企业自建应用；「事件与回调」订阅方式选<b>使用长连接接收事件</b>，订阅 im.message.receive_v1，开通机器人消息权限后发布。</small>
+          </label>
+          <label>
+            App Secret
+            <span class="feishu-secret-row">
+              <input data-feishu-field="appSecret" .type=${this.showSecret ? "text" : "password"} spellcheck="false" .value=${cfg.appSecret || ""} />
+              <button type="button" class="ghost" @click=${() => { this.showSecret = !this.showSecret }}>${this.showSecret ? "隐藏" : "显示"}</button>
+            </span>
+          </label>
+          <label>
+            高优群（每行一个 chat_id，全收）
+            <textarea data-feishu-field="high" rows="3" spellcheck="false" .value=${high} placeholder="oc_xxxxxxxx"></textarea>
+            <small>低优群（只有 @机器人 才收）、私聊白名单、botName 等其余配置一律走 config.json 默认，不在界面上改。</small>
+          </label>
+          <div class="schedule-form-actions">
+            <button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.save()}>${this.busy === "save" ? "保存中…" : "保存并当场生效"}</button>
+          </div>
+        </form>
+      </section>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>扫码授权</h2>
+          <div class="panel-side"><span class="hint">授权结果只用来拿你的 open_id（填私聊白名单），token 不落盘</span></div>
+        </div>
+        ${this.authCard()}
+      </section>`
+  }
+}
+
 /* ---------------- 根组件：取数、主题、轮询 ---------------- */
 class FmConsole extends LitElement {
   static properties = {
@@ -1365,6 +1528,10 @@ class FmConsole extends LitElement {
     schedBusy: { type: String },
     schedError: { type: String },
     schedNote: { type: String },
+    feishu: { attribute: false },
+    feishuBusy: { type: String },
+    feishuError: { type: String },
+    feishuNote: { type: String },
     error: { type: String },
     chatState: { attribute: false },
   }
@@ -1374,6 +1541,10 @@ class FmConsole extends LitElement {
     this.data = null
     this.mode = "system"
     this.chatState = {}
+    this.feishu = null
+    this.feishuBusy = ""
+    this.feishuError = ""
+    this.feishuNote = ""
     // Chat 是默认工作台；原有 Inbox / Outbox / Tasks 保留为运维视图。
     this.view = "chat"
     try {
@@ -1456,6 +1627,8 @@ class FmConsole extends LitElement {
       if (this.view === "schedules") this.loadSchedules()
       if (this.view === "operations") this.loadOperations()
       if (this.view === "sessions") this.loadAgentSessions()
+      // 飞书面板：进视图拉一次配置与通道/授权状态。
+      if (this.view === "feishu") this.loadFeishu()
       // Chat 视图侧边栏的会话列表也用同一份账本数据。
       if (this.view === "chat") this.loadAgentSessions()
     }
@@ -1484,6 +1657,10 @@ class FmConsole extends LitElement {
     }
     this._onSchedSave = (e) => this.saveSchedule(e.detail.id, e.detail.patch)
     this._onScheduleRun = (e) => this.runScheduleNow(e.detail.id)
+    this._onFeishuSave = (e) => this.saveFeishu(e.detail?.patch)
+    this.addEventListener("feishu-save", this._onFeishuSave)
+    this._onFeishuAuthStart = () => this.startFeishuAuth()
+    this.addEventListener("feishu-auth-start", this._onFeishuAuthStart)
     this._onOpFilter = (e) => {
       this.opFilter = e.detail.filter
       this.opPage = 1
@@ -1586,6 +1763,9 @@ class FmConsole extends LitElement {
     this.removeEventListener("sidebar-toggle", this._onSidebarToggle)
     this.removeEventListener("schedule-save", this._onSchedSave)
     this.removeEventListener("schedule-run", this._onScheduleRun)
+    this.removeEventListener("feishu-save", this._onFeishuSave)
+    this.removeEventListener("feishu-auth-start", this._onFeishuAuthStart)
+    this.stopFeishuAuthPoll()
     this.removeEventListener("agent-set", this._onAgentSet)
     this.removeEventListener("node-toggle", this._onNodeToggle)
     this.removeEventListener("operation-filter", this._onOpFilter)
@@ -1840,6 +2020,85 @@ class FmConsole extends LitElement {
     }
   }
 
+  // ---- 飞书通道面板 ----
+  async loadFeishu() {
+    try {
+      const res = await fetch("/api/feishu", { cache: "no-store" })
+      const body = await res.json()
+      if (!res.ok || body.ok === false) throw new Error(body.message || `HTTP ${res.status}`)
+      this.feishu = body
+      this.feishuError = ""
+      // 有进行中的授权就接着轮询（页面刷新后也能续上）。
+      if (body.auth?.status === "pending") this.pollFeishuAuth()
+      else this.stopFeishuAuthPoll()
+    } catch (e) {
+      this.feishuError = `拿不到飞书通道状态：${e.message}`
+    }
+  }
+
+  async saveFeishu(patch) {
+    if (this.feishuBusy || !patch) return
+    this.feishuBusy = "save"
+    this.feishuError = ""
+    this.feishuNote = ""
+    try {
+      const res = await fetch("/api/feishu", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ patch }),
+      })
+      const body = await res.json()
+      if (!res.ok || body.ok === false) throw new Error(body.message || `HTTP ${res.status}`)
+      this.feishu = body
+      this.feishuNote = "已保存并当场生效"
+    } catch (e) {
+      this.feishuError = `保存失败：${e.message}`
+    } finally {
+      this.feishuBusy = ""
+    }
+  }
+
+  async startFeishuAuth() {
+    if (this.feishuBusy) return
+    this.feishuBusy = "auth"
+    this.feishuError = ""
+    this.feishuNote = ""
+    try {
+      const res = await fetch("/api/feishu/auth/start", { method: "POST" })
+      const body = await res.json()
+      if (!res.ok || body.ok === false) throw new Error(body.message || `HTTP ${res.status}`)
+      if (this.feishu) this.feishu = { ...this.feishu, auth: body }
+      this.pollFeishuAuth()
+    } catch (e) {
+      this.feishuError = `发起授权失败：${e.message}`
+    } finally {
+      this.feishuBusy = ""
+    }
+  }
+
+  // 授权进行中每 3 秒查一次状态；到终态（authorized/failed/expired）停表并刷新整块。
+  pollFeishuAuth() {
+    if (this._feishuAuthTimer) return
+    this._feishuAuthTimer = setInterval(async () => {
+      try {
+        const res = await fetch("/api/feishu/auth", { cache: "no-store" })
+        const body = await res.json()
+        if (!res.ok || body.ok === false) return
+        if (this.feishu) this.feishu = { ...this.feishu, auth: body }
+        if (body.status && body.status !== "pending") {
+          this.stopFeishuAuthPoll()
+          this.loadFeishu()
+        }
+      } catch {}
+    }, 3000)
+    this._feishuAuthTimer.unref?.()
+  }
+
+  stopFeishuAuthPoll() {
+    if (this._feishuAuthTimer) clearInterval(this._feishuAuthTimer)
+    this._feishuAuthTimer = null
+  }
+
   async saveSchedule(id, patch) {
     if (this.schedBusy || !patch) return
     this.schedError = ""
@@ -1937,6 +2196,8 @@ class FmConsole extends LitElement {
               <fm-chat .conv=${this.chatConv || ""}></fm-chat>`
           : this.view === "schedules"
           ? html`<fm-schedules .schedules=${this.schedules} .workHours=${this.workHours} .busy=${this.schedBusy} .error=${this.schedError} .note=${this.schedNote}></fm-schedules>`
+          : this.view === "feishu"
+          ? html`<fm-feishu .feishu=${this.feishu} .busy=${this.feishuBusy} .error=${this.feishuError} .note=${this.feishuNote}></fm-feishu>`
           : this.view === "operations"
           ? html`<fm-operations .operations=${this.operations} .filter=${this.opFilter} .page=${this.opPage}></fm-operations>`
           : this.view === "sessions"
@@ -2009,6 +2270,7 @@ customElements.define("fm-pagination", FmPagination)
 customElements.define("fm-tasks", FmTasks)
 customElements.define("fm-queue", FmQueue)
 customElements.define("fm-schedules", FmSchedules)
+customElements.define("fm-feishu", FmFeishu)
 customElements.define("fm-operations", FmOperations)
 customElements.define("fm-agent-sessions", FmAgentSessions)
 customElements.define("fm-session-menu", FmSessionMenu)

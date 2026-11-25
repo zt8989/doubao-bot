@@ -39,7 +39,7 @@ import { OutboxStore, OutboxDispatcher } from "./core/outbox.mjs"
 import { enqueueOutbound } from "./outbound.mjs"
 import { LarkDriver } from "./lark.mjs"
 import { listSchedules, applySchedules, createAgentSchedule, firstRunAt, customAgentSchedules, hydrateSchedules, scheduleDefinitions, saveScheduleSettings } from "./core/schedules.mjs"
-import { DEFAULTS, agentScheduleCwd, persistAgent } from "./config.mjs"
+import { DEFAULTS, agentScheduleCwd, normalizeFeishuSection, persistAgent } from "./config.mjs"
 import { normalizeEventEnvelope } from "./core/schedule-events.mjs"
 import { runConfiguredScript } from "./core/executors.mjs"
 import { startOperation, finishOperation } from "./operations.mjs"
@@ -1184,6 +1184,81 @@ ${String(item.prompt ?? "").trim()}
   armSchedules()
   scheduler.start(Number(cfg.inbox?.schedulePollMs ?? 1000))
 
+  // 飞书通道（openclaw 式入站）：enabled 才动态加载 SDK；WS 长连接收消息 → Inbox chat.message，
+  // 回复由泵轮询 router 会话增量经 Outbox lark 推回。启动失败只记日志，不挡服务。
+  // 设备授权（控制台扫码/链接授权拿 open_id）独立于通道开关，常驻创建、随时可发起。
+  ctx.feishu = null
+  ctx.feishuPump = null
+  const startFeishuChannel = async () => {
+    if (!cfg.feishu?.enabled) return
+    try {
+      const { FeishuGateway, FeishuReplyPump } = await import("./feishu.mjs")
+      const feishuGateway = new FeishuGateway({ cfg, ctx, log })
+      await feishuGateway.start()
+      ctx.feishu = feishuGateway
+      const feishuPump = new FeishuReplyPump({ cfg, ctx, log })
+      feishuPump.start()
+      ctx.feishuPump = feishuPump
+    } catch (e) {
+      log(`飞书通道启动失败：${e.message}`)
+      ctx.feishu = null
+      ctx.feishuPump = null
+      ctx.feishuError = e.message
+    }
+  }
+  const stopFeishuChannel = () => {
+    try {
+      ctx.feishuPump?.stop()
+      ctx.feishu?.stop()
+    } catch {}
+    ctx.feishu = null
+    ctx.feishuPump = null
+  }
+  await startFeishuChannel()
+  // 设备授权器纯 fetch 零 SDK 依赖，常驻创建（feishu-auth.mjs 不 import feishu.mjs，enabled=false 也不加载 SDK）。
+  try {
+    const { FeishuAuth } = await import("./feishu-auth.mjs")
+    ctx.feishuAuth = new FeishuAuth({ cfg, log })
+  } catch {}
+
+  // 控制台「飞书」面板：读当前配置 + 通道/授权状态；保存 = 归一 → 写回 config.json → 通道热重启。
+  ctx.feishuView = () => ({
+    ok: true,
+    config: cfg.feishu,
+    gateway: ctx.feishu?.view?.() ?? null,
+    auth: ctx.feishuAuth?.view?.() ?? null,
+    error: ctx.feishuError ?? "",
+  })
+  ctx.feishuAuthStart = async () => {
+    if (!ctx.feishuAuth) return { ok: false, error: "feishu_not_supported", message: "服务里没有飞书授权器" }
+    try {
+      await ctx.feishuAuth.start()
+      return { ok: true, ...ctx.feishuAuth.view() }
+    } catch (e) {
+      return { ok: false, error: "feishu_auth_start_failed", message: e.message }
+    }
+  }
+  ctx.applyFeishu = async (patch = {}) => {
+    // groups 里界面只改 high：浅合并会把没传的 low 冲掉，这里先按层合并。
+    const merged = { ...cfg.feishu, ...patch }
+    if (patch.groups && typeof patch.groups === "object") merged.groups = { ...cfg.feishu.groups, ...patch.groups }
+    const next = normalizeFeishuSection(merged)
+    // 写回 config.json（保留其余键；文件不存在就落在解析出的配置路径上）。
+    let fileData = {}
+    try {
+      fileData = JSON.parse(fs.readFileSync(cfg.configFile, "utf8"))
+    } catch {}
+    fileData.feishu = next
+    fs.mkdirSync(path.dirname(cfg.configFile), { recursive: true })
+    fs.writeFileSync(cfg.configFile, JSON.stringify(fileData, null, 2) + "\n")
+    cfg.feishu = next
+    stopFeishuChannel()
+    ctx.feishuError = ""
+    await startFeishuChannel()
+    log(`飞书配置已保存并当场生效：enabled=${next.enabled} · 高优群 ${next.groups.high.length} · 白名单 ${next.allowUsers.length}`)
+    return ctx.feishuView()
+  }
+
   // 页面上启停定时任务：改内存 cfg → 写 SQLite → 立刻重排定时器，不再写 config.json。
   const schedulesView = () => listSchedules(cfg, state)
   const workHoursView = () => ({
@@ -1233,6 +1308,11 @@ ${String(item.prompt ?? "").trim()}
     await scheduler?.stop()
     await dispatcher?.stop()
     await worker?.stop()
+    try {
+      ctx.feishuPump?.stop()
+      ctx.feishu?.stop()
+      ctx.feishuAuth?.stop()
+    } catch {}
     await new Promise((r) => consoleHttp.server.close(r))
     consoleStore.close()
     // 只删自己的端口文件（端口号对得上才删）。
@@ -1252,8 +1332,8 @@ ${String(item.prompt ?? "").trim()}
   return {
     server: consoleHttp.server, close, poll: doPoll, prPoll: doPrPoll, pickup: doPickup, router: doRouter, inspector: doRouter,
     worker, inbox, outbox, dispatcher, schedules: scheduler, port, portFile: paths.portFile, http: ctx.httpUrl,
-    // 载体查看/热切换与引擎透出（控制台与测试用）。
-    getAgent: ctx.getAgent, setAgent: ctx.setAgent, engine, cfg,
+    // 载体查看/热切换与引擎透出（控制台与测试用）；ctx 给测试直通 feishu 面板等方法。
+    getAgent: ctx.getAgent, setAgent: ctx.setAgent, engine, ctx, cfg,
   }
 }
 
@@ -2851,6 +2931,13 @@ export async function handleRequest(ctx, req) {  const id = req?.id
         active: inWorkHours(ctx.cfg),
         now: nowIso(),
       },
+      feishu: ctx.feishu
+        ? { ...(ctx.feishu.view?.() ?? { enabled: true, running: true }), replyPump: ctx.feishuPump?.lastResult ?? null }
+        : {
+            enabled: ctx.cfg.feishu?.enabled === true,
+            running: false,
+            ...(ctx.feishuError ? { error: ctx.feishuError } : {}),
+          },
       deliver: {
         mode: deliveryMode(ctx.cfg),
         promptFile: ctx.cfg.deliver?.promptFile ?? "",

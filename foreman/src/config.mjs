@@ -198,6 +198,20 @@ export const DEFAULTS = {
   // 每项 { id, label, cron, enabled, prompt, detail? }；id 不能与内置定时任务重名。
   agentSchedules: [],
   lark: { bin: "lark-cli", as: "user" },
+  // 飞书通道（openclaw 式入站）：官方 SDK 长连接收 im.message.receive_v1 → Inbox chat.message；
+  // 回复由服务轮询 router 会话增量经 Outbox lark 渠道推回（出站仍走 lark-cli，凭据只管入站订阅）。
+  // 私聊按 allowUsers 白名单全收；群分两级：high 全收，low 只有 @机器人 才收（botName/botOpenId 认 @）。
+  feishu: {
+    enabled: false,
+    appId: "",
+    appSecret: "",
+    domain: "feishu",
+    allowUsers: [],
+    groups: { high: [], low: [] },
+    botName: "",
+    botOpenId: "",
+    replyPollSeconds: 5,
+  },
   // 定时检查的工作时间窗：只在工作日 8:30–18:30 跑轮询（enabled:false 或整段省略 = 全天跑）。
   // offUntil 是临时闭嘴时间点，到点自动恢复。
   workHours: { enabled: false, days: [1, 2, 3, 4, 5], start: "08:30", end: "18:30", offUntil: "" },
@@ -284,6 +298,43 @@ export function normalizeRepos(cfg) {
   })
 }
 
+// 飞书通道归一：enabled 才要求凭据与入口；名单一律字符串数组去空，数值写错直接报错。
+// loadConfig 与控制台的 applyFeishu（配置界面保存）共用这一份口径。
+export function normalizeFeishuSection(raw = {}) {
+  const feishu = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {}
+  const out = {
+    enabled: feishu.enabled === true,
+    appId: String(feishu.appId ?? "").trim(),
+    appSecret: String(feishu.appSecret ?? "").trim(),
+    domain: "feishu",
+    allowUsers: [],
+    groups: { high: [], low: [] },
+    botName: String(feishu.botName ?? "").trim(),
+    botOpenId: String(feishu.botOpenId ?? "").trim(),
+    replyPollSeconds: 5,
+  }
+  const domain = String(feishu.domain ?? "feishu").trim().toLowerCase()
+  if (!["feishu", "lark"].includes(domain)) throw new Error(`配置项 feishu.domain 只支持 feishu|lark，现在是：${feishu.domain}`)
+  out.domain = domain
+  const list = (v) => (Array.isArray(v) ? v : []).map((x) => String(x ?? "").trim()).filter(Boolean)
+  out.allowUsers = list(feishu.allowUsers)
+  out.groups.high = list(feishu.groups?.high)
+  out.groups.low = list(feishu.groups?.low)
+  const seconds = Number(feishu.replyPollSeconds ?? 5)
+  if (!Number.isFinite(seconds) || seconds <= 0) throw new Error(`配置项 feishu.replyPollSeconds 要是正数，现在是：${feishu.replyPollSeconds}`)
+  out.replyPollSeconds = Math.floor(seconds)
+  if (out.enabled) {
+    if (!out.appId || !out.appSecret) throw new Error("配置项 feishu.enabled=true 时 appId/appSecret 必填")
+    if (!out.allowUsers.length && !out.groups.high.length && !out.groups.low.length) {
+      throw new Error("配置项 feishu.enabled=true 时 allowUsers / groups.high / groups.low 至少配一个收消息入口")
+    }
+    if (out.groups.low.length && !out.botName && !out.botOpenId) {
+      throw new Error("配置项 feishu.groups.low 配了低优群就要能认 @机器人：配 botName 或 botOpenId")
+    }
+  }
+  return out
+}
+
 export function loadConfig(explicit, env = process.env) {
   const configDir = configDirFromEnv(explicit, env)
   const file = resolveConfigPath(explicit, env)
@@ -335,6 +386,7 @@ export function loadConfig(explicit, env = process.env) {
   cfg.lark.bin = String(cfg.lark.bin || "lark-cli").trim()
   cfg.lark.as = String(cfg.lark.as || "user").trim()
   if (!["user", "bot"].includes(cfg.lark.as)) throw new Error(`配置项 lark.as 只支持 user|bot，现在是：${cfg.lark.as}`)
+  cfg.feishu = normalizeFeishuSection(cfg.feishu)
   // 身份（自己的 Gitea 账号）与基线都从配置来：me 与 ignoreAuthors 互相补齐，缺了就留空。
   const me = String(cfg.pickup?.me ?? "").trim() || String((cfg.prWatch?.ignoreAuthors ?? []).map(String).find((x) => x.trim()) ?? "").trim()
   if (me) {

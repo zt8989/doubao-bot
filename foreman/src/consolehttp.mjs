@@ -333,6 +333,39 @@ export function startConsoleHttp({ store, ctx, dir, host, port, token = "", log 
         }
       }
 
+      if (pathname === "/api/feishu") {
+        // 飞书通道面板：GET 读配置+通道/授权状态；POST 保存 = 归一写回 config.json + 通道热重启。
+        if (req.method === "GET") {
+          return sendJson(res, 200, typeof ctx.feishuView === "function" ? ctx.feishuView() : { ok: true, config: ctx.cfg?.feishu ?? {}, gateway: null, auth: null })
+        }
+        if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
+        if (typeof ctx.applyFeishu !== "function") return sendJson(res, 501, { ok: false, error: "feishu_not_supported" })
+        let body
+        try {
+          body = await readBody(req)
+        } catch (e) {
+          return sendJson(res, 400, { ok: false, error: e.code || "bad_request", message: e.message })
+        }
+        try {
+          return sendJson(res, 200, await ctx.applyFeishu(body?.patch ?? {}))
+        } catch (e) {
+          return sendJson(res, 400, { ok: false, error: "feishu_config_invalid", message: e.message })
+        }
+      }
+
+      if (pathname === "/api/feishu/auth") {
+        // 授权进度查询：控制台 pending 时每几秒轮一次。
+        if (typeof ctx.feishuAuth?.view !== "function") return sendJson(res, 501, { ok: false, error: "feishu_not_supported" })
+        return sendJson(res, 200, { ok: true, ...ctx.feishuAuth.view() })
+      }
+
+      if (pathname === "/api/feishu/auth/start") {
+        if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
+        if (typeof ctx.feishuAuthStart !== "function") return sendJson(res, 501, { ok: false, error: "feishu_not_supported" })
+        const r = await ctx.feishuAuthStart()
+        return sendJson(res, r?.ok === false ? 400 : 200, r)
+      }
+
       if (pathname === "/api/history") {
         const days = Number(url.searchParams.get("days") ?? 7)
         return sendJson(res, 200, {
