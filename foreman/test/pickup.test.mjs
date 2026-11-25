@@ -91,9 +91,10 @@ test("排序：默认最老先接，newest 反过来", () => {
   assert.deepEqual(sortIssues([a, b], "newest").map((x) => x.number), [2, 1])
 })
 
-test("三档优先级：我的（作者是 233151）→ 无人认领 → 他人，同档按最老先接", () => {
+test("三档优先级：我的（指派给 233151）→ 无人认领 → 他人，同档按最老先接", () => {
   const me = "233151"
-  const mine = issue(10, { author: "233151", createdAt: "2026-11-09T00:00:00Z" })
+  // 「我的」= assignees 里有我；作者是我但没指派给我，算无人认领。
+  const mine = issue(10, { assignees: ["233151"], createdAt: "2026-11-09T00:00:00Z" })
   const free = issue(20, { author: "zhangsan", createdAt: "2026-11-01T00:00:00Z" })
   const other = issue(30, { author: "lisi", assignees: ["wangwu"], createdAt: "2026-10-01T00:00:00Z" })
   const out = sortIssues([other, free, mine], "oldest", { me, priority: ["mine", "unassigned", "others"] })
@@ -108,7 +109,7 @@ test("三档优先级：我的（作者是 233151）→ 无人认领 → 他人�
 test("onlyUnassigned: false 时，别人的单也进候选（排最后一档）", () => {
   const c = cfg({ pickup: { onlyUnassigned: false, me: "233151", priority: ["mine", "unassigned", "others"] } })
   const pool = sortIssues(eligible([
-    issue(1, { author: "233151" }),
+    issue(1, { assignees: ["233151"] }),
     issue(2, { author: "zhangsan" }),
     issue(3, { author: "lisi", assignees: ["wangwu"] }),
   ], repoCfg, c, book()), c.pickup.order, { me: c.pickup.me, priority: c.pickup.priority })

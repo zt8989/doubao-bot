@@ -1,20 +1,17 @@
-// zcode（ZCode CLI）会话适配器：所有「zcode 才有的事」都收在这里，workflow 不直接碰 zcode CLI。
+// zcode（ZCode CLI）会话适配器：所有「zcode 才有的事」都收在这里，workflow 不直接碰 zcode/herdr CLI。
 //
-// 收进来的 zcode 特殊性：
-// - headless 一轮是阻塞调用：openExecution/send 等到这轮跑完才返回（豆包是先开会话再轮询）；
-// - 通知/steer 不等跑完：排到该会话当前轮次之后，后台跑（等价 dws msg --mode queue 的排队语义）；
-// - 无单实例窗口，可并行多张单，不需要 window-busy 护栏；
-// - 名字/伪 id/sess id 的互查与会话账本都在驱动层（zcodedrv）。
-import { ZcodeDriver, defaultLedgerPath } from "../../zcodedrv.mjs"
+// 载体：zcode TUI 常驻 herdr 窗格。openExecution/send 阻塞到这轮跑完（pane run 投递 + 轮询
+// herdr 状态机）；通知/steer 投进 TUI 输入框自动排队、立即返回；无单实例窗口，可并行多张单；
+// 会话可被人在 herdr 里围观/插手/批权限。名字/伪 id/paneId 的互查与会话账本都在驱动层（zcodedrv）。
+import { ZcodeHerdrDriver, defaultLedgerPath } from "../../zcodedrv.mjs"
 
 export class ZcodeSessionAdapter {
   constructor({ cfg = {}, log = () => {} } = {}) {
     const z = cfg.zcode ?? {}
     this.cfg = cfg
     this.log = log
-    // 账本默认放 stateFile 同目录（state.json 旁边），服务重启后旧会话仍可按 id/名字解析。
     const ledger = String(z.ledger ?? "").trim() || defaultLedgerPath(cfg)
-    this.driver = new ZcodeDriver({ bin: z.bin ?? "", mode: z.mode ?? "", ledger, log })
+    this.driver = new ZcodeHerdrDriver({ herdrBin: cfg.herdr?.bin ?? "herdr", bin: z.bin ?? "", tuiBin: z.tuiBin ?? "", ledger, log })
     this.capabilities = { singleInstance: false }
   }
 
@@ -59,7 +56,7 @@ export class ZcodeSessionAdapter {
     return this.driver.archive(target)
   }
 
-  // start：解析 zcode bin 并探活（doctor --start 用）。
+  // start：doctor --start 用——查 herdr 版本/server/runtime/插件四项。
   start() {
     return this.driver.start()
   }

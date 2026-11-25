@@ -39,7 +39,7 @@ import { OutboxStore, OutboxDispatcher } from "./core/outbox.mjs"
 import { enqueueOutbound } from "./outbound.mjs"
 import { LarkDriver } from "./lark.mjs"
 import { listSchedules, applySchedules, createAgentSchedule, firstRunAt, customAgentSchedules, hydrateSchedules, scheduleDefinitions, saveScheduleSettings } from "./core/schedules.mjs"
-import { DEFAULTS, agentScheduleCwd } from "./config.mjs"
+import { DEFAULTS, agentScheduleCwd, persistAgent } from "./config.mjs"
 import { normalizeEventEnvelope } from "./core/schedule-events.mjs"
 import { runConfiguredScript } from "./core/executors.mjs"
 import { startOperation, finishOperation } from "./operations.mjs"
@@ -857,6 +857,38 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     log,
   })
   const ctx = { state, cfg, dws: engine.session, gitea: engine.tracker, engine, log, close: null, prPoll: null, httpUrl: "", consoleStore: null }
+  // 执行载体查看/热切换（控制台 UI 用）：写回配置文件 + 当场换 session 适配器，不用重启服务。
+  // 适配器有三个引用处要一起换：engine.session、lifecycle.adapters.session、ctx.dws（其余消费方
+  // 都在调用时现读 ctx.dws，不存在闭包捕获）。旧载体还有在跑的会话时默认拒绝——切走后旧会话
+  // 不再被监控（watch 会报 gone）；确认要弃就带 force。
+  ctx.getAgent = () => ({
+    agent: String(cfg.agent ?? "noop").trim().toLowerCase(),
+    allowed: ["noop", "dws", "zcode"],
+  })
+  ctx.setAgent = async (next, { force = false } = {}) => {
+    const v = String(next ?? "").trim().toLowerCase()
+    if (!["noop", "dws", "zcode"].includes(v)) {
+      throw Object.assign(new Error(`未知载体：${next}（可选 noop | dws | zcode）`), { code: "bad_agent" })
+    }
+    const current = String(cfg.agent ?? "noop").trim().toLowerCase()
+    if (v === current) return { ok: true, agent: current, changed: false }
+    let running = 0
+    try {
+      const map = await ctx.dws.runningMap()
+      running = Object.values(map ?? {}).filter((s) => s?.running === true).length
+    } catch {}
+    if (running > 0 && !force) {
+      throw Object.assign(new Error(`旧载体还有 ${running} 个在跑的会话，切走后不再被监控；确认弃单请用强切`), { code: "agent_busy", running })
+    }
+    const file = persistAgent(cfg, v)
+    cfg.agent = v
+    const session = makeSessionAdapter(cfg, { driver: dws, log })
+    engine.session = session
+    if (engine.lifecycle?.adapters) engine.lifecycle.adapters.session = session
+    ctx.dws = session
+    log(`agent 载体切换：${current} → ${v}（配置写进 ${file}${running > 0 ? `；${running} 个旧会话不再被监控` : ""}）`)
+    return { ok: true, agent: v, previous: current, changed: true, runningLeft: running }
+  }
   // 合并通道已取消：合并不再排独立的 lane/定时任务，`foreman pr merge` 直接执行，
   // 用一条进程内的串行链（ctx.mergeChain）兜住并发，账本照样写。
   // 投递通道：new 模式每次新建会话；这里只做一次绑定，调用侧不用关心实现。
@@ -1220,6 +1252,8 @@ ${String(item.prompt ?? "").trim()}
   return {
     server: consoleHttp.server, close, poll: doPoll, prPoll: doPrPoll, pickup: doPickup, router: doRouter, inspector: doRouter,
     worker, inbox, outbox, dispatcher, schedules: scheduler, port, portFile: paths.portFile, http: ctx.httpUrl,
+    // 载体查看/热切换与引擎透出（控制台与测试用）。
+    getAgent: ctx.getAgent, setAgent: ctx.setAgent, engine, cfg,
   }
 }
 

@@ -1,6 +1,6 @@
 // 续接调度：一个会话跑完、槽位空出来时，提醒编排 agent 继续接单；
 // 跑完但不是 done，就提醒它去看怎么回事。纯函数负责判断与文案，取队列在服务层做。
-import { eligible, sortIssues, issueKey } from "./orchestrator.mjs"
+import { eligible, sortIssues, issueKey, bucketOf } from "./orchestrator.mjs"
 import { earliestCaller } from "./prwatch.mjs"
 
 // pr-open 也算在跑：PR 开着还没关单，这张单仍占一条「自有工单」流程的名额，
@@ -65,9 +65,8 @@ export async function loadQueue({ cfg, book, gitea, limit = 5 }) {
 }
 
 export function queueLine(cfg, it) {
-  const me = String(cfg?.pickup?.me ?? "")
-  const mine = me && String(it.author ?? "") === me
-  const tag = mine ? "我的" : (it.assignees ?? []).length ? "他人" : "无人认领"
+  // 标签和 bucketOf 一个口径：「我的」= 指派给我，不是作者是我。
+  const tag = { mine: "我的", unassigned: "无人认领", others: "他人" }[bucketOf(it, cfg?.pickup?.me)] ?? "他人"
   return `- ${it.repo} #${it.number} 【${tag}】${it.title || ""}`
 }
 

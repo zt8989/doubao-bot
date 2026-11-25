@@ -23,12 +23,14 @@ export const DEFAULTS = {
   worktreeDir: "~/.foreman/worktrees",
   dws: { bin: "dws", mode: "local", model: "auto" },
   // 执行载体：noop = 不开会话（默认，没人真正干活但 clean/tasks 照常工作）；
-  // dws = 豆包桌面端；zcode = ZCode CLI headless（真正有人干活，不依赖豆包）。
-  // zcode 细节见 zcodedrv.mjs：bin 留空自动解析（PATH 上的 zcode → ZCode.app 内置 CLI）。
+  // dws = 豆包桌面端；zcode = ZCode CLI（真正有人干活，不依赖豆包）。
+  // zcode 细节见 zcodedrv.mjs：bin 留空自动解析（PATH 上的 zcode → npm 包内 runtime）。
   agent: "noop",
-  // ZCode CLI：bin 显式配置（可写带空格的一条命令）；mode 透传 --mode（留空用 CLI 默认）；
+  // ZCode CLI（herdr 窗格常驻 TUI，可围观/插手/批权限，服务重启会话不丢）：
+  // bin 显式配置 zcode 命令；tuiBin 显式配置 herdr pane 里跑的 runtime（留空自动推导
+  // `node <vendor>/zcode.cjs`——启动器 bin/zcode.js 在 herdr PTY 里会卡死 TUI，必须绕开）；
   // ledger 会话账本路径（留空放 stateFile 同目录的 zcode-sessions.json）。
-  zcode: { bin: "", mode: "", ledger: "" },
+  zcode: { bin: "", ledger: "", tuiBin: "" },
   herdr: { bin: "herdr", enabled: true },
   // Gitea REST：baseUrl 用于控制台拼链接；令牌实际由 gitea 包按 ~/.foreman/gitea-token 解析。
   gitea: { baseUrl: "http://106.54.199.229:3000", tokenFile: "~/.foreman/gitea-token" },
@@ -42,7 +44,7 @@ export const DEFAULTS = {
     labels: [],
     excludeLabels: [...DEFAULT_EXCLUDE],
     onlyUnassigned: false,
-    // 接单优先级三档：我的（作者是我）→ 无人认领 → 他人。改数组即可调整先后。
+    // 接单优先级三档：我的（指派给我，assignees 里有 pickup.me）→ 无人认领 → 他人。改数组即可调整先后。
     // 自己的 Gitea 用户名：从配置文件读（pickup.me），不在代码里写死；留空时用 prWatch.ignoreAuthors[0]。
     me: "",
     priority: ["mine", "unassigned", "others"],
@@ -249,6 +251,18 @@ export function resolveConfigPath(explicit, env = process.env) {
   return expandHome("~/.foreman/config.json")
 }
 
+// 把执行载体写回配置文件（UI 热切换用）：优先用加载时的真实路径，否则走默认解析。
+// 只动 agent 键，其余配置原样保留；原子替换防写半截。
+export function persistAgent(cfg = {}, agent = "") {
+  const target = cfg.configPath || cfg.configFile || resolveConfigPath()
+  const cur = fs.existsSync(target) ? JSON.parse(fs.readFileSync(target, "utf8")) : {}
+  cur.agent = String(agent).trim().toLowerCase()
+  const tmp = `${target}.tmp`
+  fs.writeFileSync(tmp, JSON.stringify(cur, null, 2))
+  fs.renameSync(tmp, target)
+  return target
+}
+
 export function normalizeRepos(cfg) {
   return (cfg.repos ?? []).map((r) => {
     if (!r || typeof r === "string") throw new Error(`repos 里每一项要是对象：{"repo":"owner/name",...}`)
@@ -300,6 +314,7 @@ export function loadConfig(explicit, env = process.env) {
     if (userHttp.tokenFile === undefined) cfg.service.http.tokenFile = path.join(configDir, "console.token")
     if (userHttp.db === undefined) cfg.service.http.db = path.join(configDir, "console.db")
   }
+  cfg.configFile = file
   cfg.configPath = fs.existsSync(file) ? file : ""
   for (const key of ["pollSeconds", "timeoutMinutes", "maxAttempts", "perRepoPerRound"]) {
     const n = Number(cfg[key])

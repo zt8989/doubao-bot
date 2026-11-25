@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { loadConfig, DEFAULT_EXCLUDE } from "../src/config.mjs"
+import { loadConfig, persistAgent, DEFAULT_EXCLUDE } from "../src/config.mjs"
 
 function tmpConfig(obj) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-cfg-"))
@@ -202,4 +202,25 @@ test("显式 -c 与配置路径优先于环境目录", (t) => {
   assert.equal(cfg.service.http.portFile, path.join(path.dirname(file), "custom/service.port"))
   assert.equal(cfg.service.http.tokenFile, path.join(path.dirname(file), "custom/console.token"))
   assert.equal(cfg.service.http.db, path.join(path.dirname(file), "custom/console.db"))
+})
+
+test("persistAgent：只改 agent 键，其余配置原样保留；configPath 缺省走 configFile", () => {
+  const { file, dir } = tmpConfig({ agent: "noop", repos: [{ repo: "a/b", dir: "/tmp", base: "sit-test" }], zcode: { ledger: "/x/ledger.json" } })
+  const cfg = loadConfig(file)
+  assert.equal(cfg.configPath, file)
+
+  const written = persistAgent(cfg, "zcode")
+  assert.equal(written, file)
+  const onDisk = JSON.parse(fs.readFileSync(file, "utf8"))
+  assert.equal(onDisk.agent, "zcode")
+  assert.deepEqual(onDisk.repos, [{ repo: "a/b", dir: "/tmp", base: "sit-test" }])
+  assert.deepEqual(onDisk.zcode, { ledger: "/x/ledger.json" })
+  assert.equal(loadConfig(file).agent, "zcode")
+
+  // 配置文件不存在时（configPath 为空）落到 configFile 解析出的默认路径
+  const cfg2 = loadConfig(path.join(dir, "missing.json"))
+  assert.equal(cfg2.configPath, "")
+  const written2 = persistAgent(cfg2, "noop")
+  assert.equal(written2, cfg2.configFile)
+  assert.equal(JSON.parse(fs.readFileSync(cfg2.configFile, "utf8")).agent, "noop")
 })

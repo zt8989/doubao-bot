@@ -112,7 +112,8 @@ run 以主智能体为中心：捞到单先交给本单主智能体，由它在 
 
 执行载体（配置 agent）：noop = 不开会话（默认）——clean/tasks/ws/pr/issue
 照常工作，派单与投递「成功」但无人干活，inbox 只记账；dws = 豆包桌面端；
-zcode = ZCode CLI headless（真正有人干活，不依赖豆包）。豆包只是可选 agent 之一，换载体不改命令。
+zcode = ZCode CLI（真正有人干活，不依赖豆包；TUI 常驻 herdr 窗格，可围观/插手/批权限）。
+豆包只是可选 agent 之一，换载体不改命令。
 
 主智能体从哪来：
   1. 路由智能体接单：hand 按工单新建/复用独立主智能体；
@@ -594,7 +595,7 @@ async function cmdSessions(_pos, flags) {
     carrier,
     ledger: ledgerFile,
     sessions,
-    note: "zcode 载体的会话跑在 headless 短进程里，ZCode 桌面列表不显示；想看完整过程用上面 resume 命令在终端打开（zcode CLI 能打开账本里任何会话）",
+    note: "zcode 载体的会话跑在 herdr 窗格里（herdr 里能看到 working/idle，可围观/插手/批权限）；sessionId 是从 zcode 会话库回查的，zcode --resume 可在终端续说（herdr 窗格没了也能救回会话）",
   })
 }
 
@@ -644,9 +645,13 @@ async function cmdDoctor(pos, flags) {
     } else if (cfg.agent === "zcode") {
       try {
         const started = await ctx.dws.start()
-        checks.push({ name: "zcode CLI", ok: true, detail: String(started?.version ?? "") || "可用" })
+        checks.push({
+          name: "zcode CLI（herdr 窗格）",
+          ok: true,
+          detail: String(started?.version ?? "") || "可用",
+        })
       } catch (e) {
-        checks.push({ name: "zcode CLI", ok: false, detail: e.message })
+        checks.push({ name: "zcode 载体", ok: false, detail: e.message })
       }
     } else {
       try {

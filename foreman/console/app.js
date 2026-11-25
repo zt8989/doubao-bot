@@ -225,6 +225,9 @@ class FmHead extends LitElement {
     chatInto: { type: Boolean },
     chatConv: { type: String },
     chatTitle: { type: String },
+    // 执行载体热切换（noop | dws | zcode）。
+    agent: { type: String },
+    agentBusy: { type: Boolean },
   }
   createRenderRoot() {
     return this
@@ -279,6 +282,17 @@ class FmHead extends LitElement {
               tabindex=${historical ? "0" : "-1"}
               @click=${() => emit(this, "day-set", { day: "" })}
             >回到今天</button>
+          </span>` : ""}
+          ${this.view !== "chat" && this.agent ? html`<span class="meta-item agent-wrap" title="执行载体：noop 不开会话，豆包/zcode 真正干活；切换写回配置并当场生效">
+            <span class="day-label">载体</span>
+            <span class="agent-switch">
+              ${[["noop", "noop"], ["dws", "豆包"], ["zcode", "zcode"]].map(([v, label]) => html`
+                <button
+                  class=${"ghost agent-opt" + (this.agent === v ? " is-active" : "")}
+                  ?disabled=${this.agentBusy || this.agent === v}
+                  @click=${() => emit(this, "agent-set", { agent: v })}
+                >${label}</button>`)}
+            </span>
           </span>` : ""}
           <fm-theme-switch .mode=${this.mode}></fm-theme-switch>
         </div>
@@ -1228,7 +1242,7 @@ class FmAgentSessions extends LitElement {
           <h2>智能体会话</h2>
           <div class="panel-side">
             <span class="hint">${this.carrier === "zcode"
-              ? "zcode 载体的 headless 会话不进 ZCode 桌面列表；这里看账本全量，每 15 秒刷新"
+              ? "zcode 载体会话跑在 herdr 窗格里（可去 herdr 围观/插手）；这里看账本全量，每 15 秒刷新"
               : `当前载体 ${this.carrier || "（未配置）"} 不产生 zcode 会话账本`}</span>
           </div>
         </div>
@@ -1341,6 +1355,8 @@ class FmConsole extends LitElement {
     opPage: { type: Number },
     agentSessions: { attribute: false },
     agentCarrier: { type: String },
+    agent: { type: String },
+    agentBusy: { type: Boolean },
     chatConv: { type: String },
     // 手机端 Chat 两级：是否已进入聊天页（true=二级聊天，false=一级菜单）。
     // 单靠 chatConv 区分不了「菜单」和「看 Router」——两者 conv 都是 ""。
@@ -1380,6 +1396,9 @@ class FmConsole extends LitElement {
     this.outboxError = ""
     this.workflow = null
     this.nodeBusy = ""
+    // 执行载体（noop | dws | zcode）：顶栏切换，写回配置并热生效。
+    this.agent = ""
+    this.agentBusy = false
     // 分配任务卡片的两页：today（已分配）/ pending（待分配，可点接单）
     this.taskTab = "today"
     this.taskPage = 1
@@ -1449,6 +1468,9 @@ class FmConsole extends LitElement {
       this.navOpen = false
     }
     this.addEventListener("chat-target", this._onChatTarget)
+    // 顶栏切载体：noop | 豆包 | zcode。
+    this._onAgentSet = (e) => this.setAgent(e.detail?.agent)
+    this.addEventListener("agent-set", this._onAgentSet)
     // 顶栏汉堡：手机端滑出导航层。
     this._onNavToggle = () => {
       this.navOpen = !this.navOpen
@@ -1541,6 +1563,7 @@ class FmConsole extends LitElement {
     this.loadSchedules()
     this.loadOperations()
     this.loadAgentSessions()
+    this.loadAgent()
     this.loadQueue("inbox")
     this.loadQueue("outbox")
     this._loadTimer = setInterval(() => {
@@ -1563,6 +1586,7 @@ class FmConsole extends LitElement {
     this.removeEventListener("sidebar-toggle", this._onSidebarToggle)
     this.removeEventListener("schedule-save", this._onSchedSave)
     this.removeEventListener("schedule-run", this._onScheduleRun)
+    this.removeEventListener("agent-set", this._onAgentSet)
     this.removeEventListener("node-toggle", this._onNodeToggle)
     this.removeEventListener("operation-filter", this._onOpFilter)
     this.removeEventListener("queue-filter", this._onQueueFilter)
@@ -1772,6 +1796,50 @@ class FmConsole extends LitElement {
     }
   }
 
+  // 载体当前值：顶栏切换控件用。
+  async loadAgent() {
+    try {
+      const res = await fetch("/api/agent", { cache: "no-store" })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const body = await res.json()
+      this.agent = body.agent || "noop"
+    } catch {
+      // 拿不到就不渲染切换控件（agent 为空时顶栏隐藏）
+      this.agent = ""
+    }
+  }
+
+  // 切载体：写回配置 + 服务热换适配器。旧载体还有在跑的会话时服务回 409，
+  // 弹确认后带 force 强切（旧会话不再被监控）。
+  async setAgent(agent, { force = false } = {}) {
+    if (this.agentBusy || !agent || agent === this.agent) return
+    this.agentBusy = true
+    this.agentError = ""
+    try {
+      const res = await fetch("/api/agent", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agent, force }),
+      })
+      const body = await res.json()
+      if (!res.ok || body.ok === false) {
+        if (body.error === "agent_busy" && !force) {
+          const go = window.confirm(`${body.message || "旧载体还有在跑的会话"}\n\n确认强切？旧会话将不再被监控。`)
+          if (go) return this.setAgent(agent, { force: true })
+          throw new Error("已取消切换")
+        }
+        throw new Error(body.message || `HTTP ${res.status}`)
+      }
+      this.agent = body.agent
+      if (body.changed) await this.load()
+      this.loadAgentSessions()
+    } catch (e) {
+      this.error = `切载体失败：${e.message}`
+    } finally {
+      this.agentBusy = false
+    }
+  }
+
   async saveSchedule(id, patch) {
     if (this.schedBusy || !patch) return
     this.schedError = ""
@@ -1859,6 +1927,8 @@ class FmConsole extends LitElement {
           .chatInto=${this.chatInto === true}
           .chatConv=${this.chatConv || ""}
           .chatTitle=${chatTitle}
+          .agent=${this.agent || ""}
+          .agentBusy=${this.agentBusy === true}
         ></fm-head>
         <main class=${this.view === "chat" ? "is-chat" : ""} data-pane=${this.chatInto ? "chat" : "menu"}>
         ${this.view === "chat"

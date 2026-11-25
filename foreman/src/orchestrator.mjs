@@ -109,10 +109,13 @@ export function eligible(issues, repoCfg, cfg, book) {
   })
 }
 
-// 三档：mine（作者是我）、unassigned（无人认领）、others（别人认领）。不同档先按 priority 排，同档按时间。
+// 三档：mine（指派给我）、unassigned（无人认领）、others（别人认领）。不同档先按 priority 排，同档按时间。
 export function bucketOf(issue = {}, me = "") {
-  if (me && String(issue.author ?? "") === String(me)) return "mine"
-  if (!(issue.assignees ?? []).length) return "unassigned"
+  // 「我的」= 指派给我的单（assignees 里有我），不是作者是我——作者的单没指派也算无人认领。
+  const account = String(me ?? "").trim()
+  const assignees = (issue.assignees ?? []).map((x) => String(x).trim())
+  if (account && assignees.includes(account)) return "mine"
+  if (!assignees.length) return "unassigned"
   return "others"
 }
 

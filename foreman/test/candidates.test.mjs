@@ -62,7 +62,7 @@ test("待分配列表：列出全部 open 工单（不看接单标签），只�
 
   const c = cfg({ stateFile })
   const ctx = { cfg: c, gitea: fakeGitea([
-    issue(1, { labels: ["ready-for-agent", "needs-triage"] }),
+    issue(1, { assignees: ["233151"], labels: ["ready-for-agent", "needs-triage"] }),
     issue(2),
     issue(3),
     issue(4, { author: "someone-else", assignees: ["someone"] }),
@@ -135,8 +135,9 @@ test("待分配列表：按「我的 → 无人认领 → 他人认领」排，�
     list.push(issue(n, { author: "someone-else", assignees: ["someone"], createdAt: `2026-11-${String(n).padStart(2, "0")}T00:00:00Z` }))
   }
   list.push(issue(20, { author: "someone-else", assignees: [], createdAt: "2026-11-02T00:00:00Z" }))
-  list.push(issue(21, { createdAt: "2026-11-03T00:00:00Z" }))
-  list.push(issue(22, { createdAt: "2026-11-01T00:00:00Z" }))
+  // 「我的」= 指派给 233151（assignees），不是作者是 233151。
+  list.push(issue(21, { assignees: ["233151"], createdAt: "2026-11-03T00:00:00Z" }))
+  list.push(issue(22, { assignees: ["233151"], createdAt: "2026-11-01T00:00:00Z" }))
   const ctx = { cfg: cfg({ stateFile }), gitea: fakeGitea(list) }
   const r = await candidatesOnce(ctx)
   assert.equal(r.total, 15)

@@ -77,7 +77,7 @@ test("loadQueue：跨仓库取可接工单，按三档排序并截断；已处�
     book.setIssue("demo/a#9", { state: "done" })
     const gitea = {
       listIssues: async (repo) => (repo === "demo/a"
-        ? [issue(1), issue(2, { author: "233151" }), issue(9)]
+        ? [issue(1), issue(2, { assignees: ["233151"] }), issue(9)]
         : [issue(3, { assignees: ["wangwu"] })]),
     }
     const q = await loadQueue({ cfg, book, gitea, limit: 2 })
@@ -94,7 +94,7 @@ test("plannerText：继续接单带工单列表，not-done 带原因与 retry �
   const t1 = plannerText({
     cfg, kind: "continue", watcher: { issueKey: "demo/demo#1" },
     result: { status: "done" }, running: 1, maxRunning: 2,
-    issues: [{ repo: "demo/demo", number: 2, title: "改配置", author: "233151" }],
+    issues: [{ repo: "demo/demo", number: 2, title: "改配置", assignees: ["233151"] }],
   })
   assert.match(t1, /可以继续接单/)
   assert.match(t1, /在跑 1\/2/)

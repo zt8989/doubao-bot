@@ -280,7 +280,7 @@ export function startConsoleHttp({ store, ctx, dir, host, port, token = "", log 
       }
 
       if (pathname === "/api/agent-sessions") {
-        // zcode 载体的会话账本只读视图：headless 会话在 ZCode 桌面列表不可见，这里给统一观察窗口。
+        // zcode 载体的会话账本只读视图：会话跑在 herdr 窗格里，这里给统一观察窗口。
         // 账本是适配器写、这里只读——不经过服务状态，重启/换载体也不影响历史查看。
         const carrier = String(ctx.cfg?.agent ?? "").trim().toLowerCase()
         let ledgerFile = ""
@@ -307,6 +307,30 @@ export function startConsoleHttp({ store, ctx, dir, host, port, token = "", log 
           }
         }
         return sendJson(res, 200, { ok: true, carrier, ledgerFile, sessions })
+      }
+
+      if (pathname === "/api/agent") {
+        // 执行载体查看/热切换：写回配置文件并当场换 session 适配器，不用重启服务。
+        // agent_busy = 旧载体还有在跑的会话，前端确认后带 force 重发。
+        if (req.method === "GET") {
+          const info = typeof ctx.getAgent === "function" ? ctx.getAgent() : { agent: String(ctx.cfg?.agent ?? "noop"), allowed: ["noop", "dws", "zcode"] }
+          return sendJson(res, 200, { ok: true, ...info })
+        }
+        if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
+        if (typeof ctx.setAgent !== "function") return sendJson(res, 501, { ok: false, error: "agent_set_not_supported" })
+        let body
+        try {
+          body = await readBody(req)
+        } catch (e) {
+          return sendJson(res, 400, { ok: false, error: e.code || "bad_request", message: e.message })
+        }
+        try {
+          const r = await ctx.setAgent(body?.agent, { force: body?.force === true })
+          return sendJson(res, 200, r)
+        } catch (e) {
+          const status = e.code === "agent_busy" ? 409 : e.code === "bad_agent" ? 400 : 500
+          return sendJson(res, status, { ok: false, error: e.code || "agent_set_failed", message: e.message })
+        }
       }
 
       if (pathname === "/api/history") {
