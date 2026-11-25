@@ -3089,9 +3089,15 @@ export async function handleRequest(ctx, req) {  const id = req?.id
   }
 
   if (cmd === "stop") {
-    // 先回响应，再退出。
+    // 先回响应，再收口退出。close 会清定时器/worker/http 与 pid/port 文件；
+    // serve 进程（FOREMAN_SERVE 标记，cmdServe 设置）收口完成后自行退出——
+    // 测试/库调用没有这个标记，只 close 不退进程。
     setTimeout(() => ctx.close?.().catch(() => {}), 10)
-    return ok({ stopping: true })
+    const exitAt = setTimeout(() => {
+      if (process.env.FOREMAN_SERVE === "1") process.exit(0)
+    }, 3000)
+    exitAt.unref?.()
+    return ok({ stopping: true, pid: process.pid })
   }
 
   return fail("unknown_cmd", `未知命令：${cmd || "(空)"}`)

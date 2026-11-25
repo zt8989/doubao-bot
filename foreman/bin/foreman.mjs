@@ -23,6 +23,7 @@ const HELP = `foreman — 接单编排 + 常驻服务
 
 用法：
   foreman serve [--daemon] [-c <配置>]
+  foreman stop [-c <配置>]
   foreman ping [-c <配置>] [--no-service]
   foreman status [-c <配置>] [--no-service]
   foreman watch add <会话id|标题> [--notify <会话id|标题>] [--repo <owner/name> --number <N>] [-c] [--no-service]
@@ -167,6 +168,8 @@ function spawnDetached(cfg) {
 }
 
 async function cmdServe(pos, flags) {
+  // 标记 serve 进程身份：rpc stop 收口后靠它决定是否自行退出（测试/库调用不退）。
+  process.env.FOREMAN_SERVE = "1"
   const cfg = loadConfig(flags.config)
   const log = logTo(cfg.service.logFile)
 
@@ -234,6 +237,27 @@ async function cmdPing(pos, flags) {
   out({ ok: true, ...r })
 }
 
+// foreman stop：收口在跑的服务（rpc stop → close → serve 进程自行退出）。
+// 服务本来就没起不算错：清掉陈旧 pid/port 文件，把「没在跑」如实报出来。
+async function cmdStop(_pos, flags) {
+  const cfg = loadConfig(flags.config)
+  let r
+  try {
+    r = await callRaw(resolveTarget(cfg), { id: "cli", cmd: "stop" }, 8000)
+  } catch (e) {
+    const { servicePaths } = await import("../src/service.mjs")
+    const paths = servicePaths(cfg)
+    for (const f of [paths.pidFile, paths.portFile]) {
+      try { fs.rmSync(f, { force: true }) } catch {}
+    }
+    return out({ ok: true, stopped: false, message: `服务没在跑（${String(e.message || e).slice(0, 80)}）；已清理陈旧 pid/port 文件。再起：foreman serve --daemon` })
+  }
+  if (r.ok === false) {
+    process.exitCode = 1
+    return out(r)
+  }
+  out({ ok: true, stopped: true, pid: r.pid, message: `已停止（pid=${r.pid}）。再起：foreman serve --daemon` })
+}
 async function cmdStatus(pos, flags) {
   const cfg = loadConfig(flags.config)
   const r = await callRaw(resolveTarget(cfg), { id: "cli", cmd: "status" }, 3000)
@@ -809,8 +833,9 @@ async function main() {
   const { pos, flags } = parseArgs(argv, { c: "config" })
   const cmd = pos.shift()
 
-  // 除 serve / help 外，所有子命令启动先握手（--no-service 或 cfg.service.enabled===false 时跳过）。
-  if (!["serve", "help"].includes(cmd)) {
+  // 除 serve / help / stop 外，所有子命令启动先握手（--no-service 或 cfg.service.enabled===false 时跳过）。
+  // stop 不握手：服务没起也要能执行（清理陈旧 pid/port 文件）。
+  if (!["serve", "help", "stop"].includes(cmd)) {
     const cfg = loadConfig(flags.config)
     const noService = truthy(flags["no-service"])
     if (!noService && cfg.service?.enabled !== false) {
@@ -828,6 +853,8 @@ async function main() {
   switch (cmd) {
     case "serve":
       return cmdServe(pos, flags)
+    case "stop":
+      return cmdStop(pos, flags)
     case "ping":
       return cmdPing(pos, flags)
     case "status":
