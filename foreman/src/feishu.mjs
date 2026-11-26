@@ -109,8 +109,13 @@ export class FeishuGateway {
     // 凭据不在界面填（config.json feishu 段一次性配置）：没配就明确报错，别让 SDK 自己吐晦涩日志。
     if (!appId || !appSecret) throw new Error("飞书应用凭据未配置：在 config.json 的 feishu.appId/appSecret 里填一次（之后只用扫码授权）")
     const domain = this.feishuCfg.domain === "lark" ? Domain.Lark : Domain.Feishu
-    // 自定义 logger 只留 error：SDK 的 info/warn 会把横幅刷进 service.log / stdout。
-    const logger = { info: () => {}, warn: () => {}, error: (...args) => this.log(`飞书 WS 错误：${args.join(" ")}`) }
+    // 自定义 logger 只留 warn/error：SDK 的 info 会把横幅刷进 service.log / stdout，
+    // 但 warn 要留——事件解密失败、无 handler 被丢弃时 SDK 只发 warn，静音了就完全失明。
+    const logger = {
+      info: () => {},
+      warn: (...args) => this.log(`飞书 SDK：${args.join(" ")}`),
+      error: (...args) => this.log(`飞书 WS 错误：${args.join(" ")}`),
+    }
     const client = new Client({ appId, appSecret, appType: AppType.SelfBuild, domain, logger })
     this.client = client
     const dispatcher = new EventDispatcher({}).register({
@@ -176,6 +181,8 @@ export class FeishuGateway {
         // 私聊被白名单拒收时把 sender 带出来：用户照抄进 config.json 的 allowUsers 就能放行。
         const senderHint = verdict.senderId ? `，sender=${verdict.senderId}` : ""
         this.log(`飞书消息不收：${verdict.reason}${senderHint}（${verdict.messageId || "无 id"}）`)
+        // 真实推流的事件体可能和文档不一致（content 缺失/脱敏/形状变化）：拒收时 dump 原始事件，照日志对账。
+        this.log(`飞书原始事件：${JSON.stringify(data ?? {}).slice(0, 2000)}`)
         return
       }
       if (!this.dedup.check(verdict.messageId)) {
