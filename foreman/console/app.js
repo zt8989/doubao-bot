@@ -27,6 +27,12 @@ const STATE_LABEL = {
 
 const THEME_KEY = "foreman-theme"
 const SIDEBAR_KEY = "foreman-sidebar-collapsed"
+// 视图清单（hash 路由用）：与侧栏导航一一对应，#/<id> 即对应视图，刷新与前进后退都能恢复。
+const VIEWS = ["chat", "inbox", "outbox", "tasks", "sessions", "schedules", "projects", "im", "operations"]
+const viewFromHash = () => {
+  const m = /^#\/([a-z]+)$/.exec(location.hash || "")
+  return m && VIEWS.includes(m[1]) ? m[1] : ""
+}
 const pad2 = (n) => String(n).padStart(2, "0")
 const emit = (host, name, detail) =>
   host.dispatchEvent(new CustomEvent(name, { detail, bubbles: true, composed: true }))
@@ -1737,7 +1743,8 @@ class FmConsole extends LitElement {
     this.projectsNote = ""
     this.projectsWarnings = []
     // Chat 是默认工作台；原有 Inbox / Outbox / Tasks 保留为运维视图。
-    this.view = "chat"
+    // 刷新/分享链接恢复视图：hash 是 #/<视图> 时直接落到对应视图（无 hash 默认 chat）。
+    this.view = viewFromHash() || "chat"
     try {
       this.sidebarCollapsed = localStorage.getItem(SIDEBAR_KEY) === "1"
     } catch {
@@ -1811,20 +1818,13 @@ class FmConsole extends LitElement {
       this.applyDayToUrl()
       this.load()
     }
-    this._onView = (e) => {
-      this.view = e.detail.view
-      this.navOpen = false
-      if (this.view === "inbox" || this.view === "outbox") this.loadQueue(this.view)
-      if (this.view === "schedules") this.loadSchedules()
-      if (this.view === "operations") this.loadOperations()
-      if (this.view === "sessions") this.loadAgentSessions()
-      // IM 面板：进视图拉一次各通道配置与状态（飞书是当前唯一已接入的通道）。
-      if (this.view === "im") this.loadFeishu()
-      // 项目面板：进视图拉一次当前产品/工程。
-      if (this.view === "projects") this.loadProjects()
-      // Chat 视图侧边栏的会话列表也用同一份账本数据。
-      if (this.view === "chat") this.loadAgentSessions()
+    this._onView = (e) => this.enterView(e.detail.view)
+    // 浏览器前进/后退：只切换视图，不再入栈（push=false）。
+    this._onPop = () => {
+      const view = viewFromHash()
+      if (view && view !== this.view) this.enterView(view, { push: false })
     }
+    window.addEventListener("popstate", this._onPop)
     // 侧边栏点选会话：切 Chat 的观察目标（空 = router 当前会话）。手机端顺带开聊天二级页。
     this._onChatTarget = (e) => {
       // detail.back=true = 从聊天页返回一级菜单。点 Router（当前）时 conv 不变（""→""），
@@ -1951,6 +1951,7 @@ class FmConsole extends LitElement {
   disconnectedCallback() {
     clearInterval(this._loadTimer)
     window.removeEventListener("focus", this._onFocus)
+    window.removeEventListener("popstate", this._onPop)
     this._mq?.removeEventListener?.("change", this._onSystemTheme)
     this.removeEventListener("theme-set", this._onTheme)
     this.removeEventListener("day-set", this._onDay)
@@ -1973,6 +1974,26 @@ class FmConsole extends LitElement {
     this.removeEventListener("chat-state", this._onChatState)
     this.removeEventListener("chat-refresh", this._onChatRefresh)
     super.disconnectedCallback()
+  }
+
+  // 视图切换统一入口：更新视图 + 按需拉数据 + hash 入栈；popstate 回放时 push=false 不再入栈。
+  enterView(view, { push = true } = {}) {
+    if (!view || !VIEWS.includes(view) || view === this.view) return
+    this.view = view
+    this.navOpen = false
+    if (push) {
+      try { history.pushState(null, "", `#/${view}`) } catch {}
+    }
+    if (view === "inbox" || view === "outbox") this.loadQueue(view)
+    if (view === "schedules") this.loadSchedules()
+    if (view === "operations") this.loadOperations()
+    if (view === "sessions") this.loadAgentSessions()
+    // IM 面板：进视图拉一次各通道配置与状态（飞书是当前唯一已接入的通道）。
+    if (view === "im") this.loadFeishu()
+    // 项目面板：进视图拉一次当前产品/工程。
+    if (view === "projects") this.loadProjects()
+    // Chat 视图侧边栏的会话列表也用同一份账本数据。
+    if (view === "chat") this.loadAgentSessions()
   }
 
   applyDayToUrl() {
