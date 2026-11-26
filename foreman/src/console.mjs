@@ -114,6 +114,11 @@ export class ConsoleStore {
     fs.mkdirSync(path.dirname(file), { recursive: true })
     this.file = file
     this.db = new DatabaseSync(file)
+    // WAL + busy_timeout：控制台轮询、Worker/Dispatcher、外部 sqlite3 查询共用一个库，
+    // 回滚日志模式下读会挡写，实跑出过 database is locked（Worker/Dispatcher 直接抛异常）。
+    // WAL 模式写在库里持久生效；busy_timeout 是连接级的，每次打开都要设。
+    this.db.exec("PRAGMA journal_mode=WAL")
+    this.db.exec("PRAGMA busy_timeout=3000")
     this.db.exec(SCHEMA)
     // 老库补列：接单派给了哪个会话，统计要靠它。
     try { this.db.exec("ALTER TABLE tasks ADD COLUMN agent TEXT DEFAULT ''") } catch {}
