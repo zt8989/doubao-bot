@@ -132,9 +132,10 @@ test("deliver.mode=existing 时留空提示词也合法（老行为回退）", (
   assert.equal(cfg.deliver.promptFile, "")
 })
 
-test("zcode.mode：默认 yolo，写错直接报错并列出合法值", () => {
+test("zcode.mode：默认 yolo，留空回落默认，写错直接报错并列出合法值", () => {
   const base = { repos: [{ repo: "a/b", dir: "/tmp", base: "sit-test" }] }
   assert.equal(loadConfig(tmpConfig(base).file).zcode.mode, "yolo")
+  assert.equal(loadConfig(tmpConfig({ ...base, zcode: { mode: "" } }).file).zcode.mode, "yolo", "留空回落默认（配置界面会存空值）")
   assert.equal(loadConfig(tmpConfig({ ...base, zcode: { mode: "GUARDED" } }).file).zcode.mode, "guarded", "大小写归一")
   assert.throws(() => {
     loadConfig(tmpConfig({ ...base, zcode: { mode: "sudo" } }).file)

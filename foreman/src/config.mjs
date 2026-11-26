@@ -584,8 +584,9 @@ export function loadConfig(explicit, env = process.env) {
   cfg.dws.bin = expandHome(String(cfg.dws.bin ?? "dws").trim()) || "dws"
 
   // zcode 权限模式：拼进 herdr pane 里 TUI 的启动命令（--mode 本次启动生效，不动全局设置）。
-  // 只认 zcode 支持的五个值；写错启动就报，不悄悄降级。
-  const zMode = String(cfg.zcode?.mode ?? "yolo").trim().toLowerCase()
+  // 只认 zcode 支持的五个值；留空回落默认 yolo（配置界面会把整段表单存盘，空值不当错误），
+  // 其余写错启动就报，不悄悄降级。
+  const zMode = String(cfg.zcode?.mode ?? "").trim().toLowerCase() || "yolo"
   if (!["build", "edit", "plan", "yolo", "guarded"].includes(zMode)) {
     throw new Error(`配置项 zcode.mode 只能是 build/edit/plan/yolo/guarded，现在是：${cfg.zcode.mode}`)
   }
