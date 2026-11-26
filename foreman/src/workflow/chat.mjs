@@ -12,6 +12,15 @@ function cleanClientId(value) {
   return id
 }
 
+function routerRecordOf(book) {
+  return book.data.router ?? book.data.inspector ?? {}
+}
+
+function ledgerOf(ctx) {
+  // 载体可能是裸驱动（.ledger）或适配器包装（.driver.ledger）。
+  return ctx.dws?.ledger ?? ctx.dws?.driver?.ledger ?? null
+}
+
 function chatRole(message) {
   if (message.role === "assistant") return "assistant"
   return String(message.text ?? "").includes("【Chat UI 用户消息】") ? "user" : "event"
@@ -53,6 +62,43 @@ export function createChatWorkflow(ctx) {
       const result = await routerOnce(ctx, { force: true, scheduled: false, notices })
       if (!result.ok || result.skipped) throw new Error(result.error || `Router Agent 暂时不可投递：${result.skipped}`)
       return result
+    },
+
+    // /clear：新建 Router 会话（轮换）。routerOnce 只在 convId 空时走 created，所以这里先
+    // 把旧 convId 写进 history 并解绑；随后 routerOnce 建新会话（只带角色 bootstrap 首条，
+    // 不带巡检、不带注入文本）。旧会话保留在列表里，可手动归档。
+    async clear() {
+      const book = new Book(ctx.cfg.stateFile)
+      const previous = routerRecordOf(book)
+      if (!previous.convId) throw new Error("还没有 Router 会话，无需 /clear")
+      const rotated = {
+        ...previous,
+        convId: "",
+        name: "",
+        history: [...(previous.history ?? []), { convId: previous.convId, name: previous.name ?? "", lastSentAt: previous.lastSentAt ?? "" }].slice(-20),
+      }
+      book.data.router = rotated
+      book.data.inspector = rotated
+      book.save()
+      const result = await routerOnce(ctx, { force: true, scheduled: false, notices: [] })
+      if (!result.ok || result.skipped) throw new Error(result.error || `暂时无法新建 Router 会话：${result.skipped}`)
+      return { ok: true, convId: String(result.convId ?? ""), name: String(result.name ?? ""), previousConvId: String(previous.convId ?? "") }
+    },
+
+    // 归档会话：只支持账本会话（herdr pane 级 stop+close+清账本）；Router 当前会话拒绝。
+    async archive({ target } = {}) {
+      const t = String(target ?? "").trim()
+      if (!t) throw new Error("缺少要归档的会话")
+      if (typeof ctx.dws?.archive !== "function") throw new Error("当前载体不支持归档")
+      const ledger = ledgerOf(ctx)
+      const entry = ledger?.resolve?.(t)
+      if (!entry) throw new Error("只读围观的子智能体会话不在 foreman 账本里，不归档")
+      const routerConv = routerRecordOf(new Book(ctx.cfg.stateFile)).convId ?? ""
+      if (routerConv && ledger.resolve(routerConv)?.key === entry.key) {
+        throw new Error("Router 当前会话不允许归档；要换新会话用 /clear，轮换后旧会话才能归档")
+      }
+      const r = await ctx.dws.archive(entry.key)
+      return { ok: true, archived: entry.name, convId: entry.key, ...(r && typeof r === "object" ? r : {}) }
     },
 
     async messages() {

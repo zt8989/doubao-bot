@@ -1218,6 +1218,23 @@ fm-chat { display: flex; flex: 1; width: 100%; min-height: 0; }
 .chat-meta-model { color: var(--dimmer); font-size: 10px; }
 .chat-readonly-chip { margin: 0 24px 10px; padding: 6px 12px; border: 1px dashed var(--line); border-radius: 8px; color: var(--dimmer); font-size: 11px; text-align: center; }
 
+/* ---------- Chat：滚动到底部 / 斜杠命令 / 会话归档 ---------- */
+.chat-panel { position: relative; }
+.chat-jump { position: absolute; right: 28px; bottom: 132px; z-index: 5; padding: 5px 12px; border: 1px solid var(--line); border-radius: 999px; background: color-mix(in srgb, var(--panel) 88%, transparent); color: var(--dim); font-size: 11px; cursor: pointer; box-shadow: var(--shadow); }
+.chat-jump:hover { color: var(--text); border-color: var(--accent); }
+.chat-slash { margin: 0 24px 6px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); box-shadow: var(--shadow); overflow: hidden; }
+.chat-slash-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 14px; border: 0; background: transparent; color: var(--text); font: 12px/1.4 inherit; text-align: left; cursor: pointer; }
+.chat-slash-item + .chat-slash-item { border-top: 1px solid var(--line-soft, var(--line)); }
+.chat-slash-item:hover { background: var(--panel-2); }
+.chat-slash-cmd { flex: none; padding: 1px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--accent); font-size: 11px; }
+.chat-slash-desc { color: var(--dimmer); font-size: 11px; }
+.chat-slash-empty { padding: 8px 14px; color: var(--dimmer); font-size: 11px; }
+.side-session-archive { flex: none; margin-left: auto; padding: 0 4px; border-radius: 6px; color: var(--dimmer); font-size: 11px; line-height: 1.4; opacity: 0; transition: opacity .12s; }
+.side-session:hover .side-session-archive, .side-session-archive:focus-visible { opacity: 1; }
+.side-session-archive:hover { color: var(--danger, var(--red, #ef4444)); }
+.menu-archive { flex: none; margin-right: 4px; padding: 3px 9px; border: 1px solid var(--line); border-radius: 999px; color: var(--dimmer); font-size: 10px; }
+.menu-archive:active { color: var(--danger, var(--red, #ef4444)); }
+
 /* ---------- 响应式 ---------- */
 @media (max-width: 980px) {
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }

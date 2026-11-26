@@ -5,6 +5,8 @@ const emit = (host, name, detail) =>
 
 const CHAT_UI_MARKER = "【Chat UI 用户消息】"
 const TOOL_STATUS = { pending: "待执行", running: "执行中", completed: "完成", error: "出错" }
+// 斜杠命令：目前只有 /clear（新建 Router 会话）。加新命令在这里追加即可。
+const SLASH_COMMANDS = [{ cmd: "clear", desc: "新建 Router 会话（旧会话进历史，可在列表归档）" }]
 
 class FmChat extends LitElement {
   static properties = {
@@ -17,6 +19,9 @@ class FmChat extends LitElement {
     conv: { type: String },
     // 执行载体：zcode = 实时流模式（SSE 步进转录），其余 = 老账本轮询模式。
     carrier: { type: String },
+    // 内部响应式状态：滚动到底部按钮显隐、斜杠命令草稿。
+    showJump: { state: true },
+    slash: { state: true },
   }
 
   constructor() {
@@ -43,6 +48,8 @@ class FmChat extends LitElement {
     this._sending = false
     this.conversationOld = null
     this._legacyTimer = null
+    this.showJump = false
+    this.slash = ""
   }
 
   createRenderRoot() {
@@ -252,9 +259,71 @@ class FmChat extends LitElement {
     }
   }
 
+  // ---- 滚动到底部：滚离底部 240px 出现悬浮按钮，点击回底 ----
+  _onScroll(event) {
+    const el = event.target
+    const far = el.scrollHeight - el.scrollTop - el.clientHeight > 240
+    if (far !== this.showJump) {
+      this.showJump = far
+      this.requestUpdate()
+    }
+  }
+
+  _jumpBottom() {
+    const el = this.querySelector(".chat-messages")
+    if (el) el.scrollTop = el.scrollHeight
+    this.showJump = false
+  }
+
+  // ---- 斜杠命令：草稿以 / 开头弹菜单；send 时拦截分发 ----
+  _slashMatches() {
+    const prefix = this.slash.slice(1).trim().toLowerCase()
+    return SLASH_COMMANDS.filter((c) => !prefix || c.cmd.startsWith(prefix))
+  }
+
+  _runSlash(cmd) {
+    if (cmd === "clear") return this.doClear()
+  }
+
+  async doClear() {
+    if (this.busy) return
+    if (this.streamMode ? this._readOnly : Boolean(this.conv)) {
+      this.error = "/clear 只作用于 Router 会话；正在围观子智能体，切回 Router 再试。"
+      return
+    }
+    this.busy = true
+    this.error = ""
+    try {
+      const res = await fetch("/api/chat/clear", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })
+      const body = await res.json()
+      if (!res.ok || body.ok === false) throw new Error(body.message || `HTTP ${res.status}`)
+      this.draft = ""
+      this.slash = ""
+      this.notice = `已新建 Router 会话${body.name ? `「${body.name}」` : ""}；旧会话还在列表里，可手动归档`
+      // 现场清空重连：conv="" 的快照会解析到新会话。
+      this._reset()
+      if (this.streamMode) this._connectStream()
+      else this.load()
+      this._loadPending()
+    } catch (e) {
+      this.error = `/clear 失败：${e.message}`
+    } finally {
+      this.busy = false
+    }
+  }
+
   async send() {
     const text = this.draft.trim()
     if (!text || this.busy) return
+    if (text.startsWith("/")) {
+      const cmd = text.slice(1).split(/\s+/)[0].toLowerCase()
+      const known = SLASH_COMMANDS.some((c) => c.cmd === cmd)
+      if (!known) {
+        this.error = `未知命令 /${cmd}；可用：${SLASH_COMMANDS.map((c) => `/${c.cmd}`).join("、")}`
+        return
+      }
+      return this._runSlash(cmd)
+    }
     if (this.streamMode ? this._readOnly : Boolean(this.conv)) {
       this.error = "只读围观：发送只进 Router。切回「Router（当前）」再发消息。"
       return
@@ -375,7 +444,7 @@ class FmChat extends LitElement {
     const watching = Boolean(this.conv)
     const pendingMessages = this._pendingMessages
     return html`<section class="panel chat-panel">
-      <div class="chat-messages" aria-live="polite">
+      <div class="chat-messages" aria-live="polite" @scroll=${this._onScroll}>
         ${messages.length ? messages.map((m, i) => this._renderStreamMessage(m, i, messages.length)) : html`
           <div class="chat-empty">
             ${watching
@@ -386,6 +455,7 @@ class FmChat extends LitElement {
           ? html`<div class="chat-streaming-hint"><span class="chat-live-dot"></span>正在生成——推理与工具调用逐块落库，秒级可见</div>`
           : ""}
       </div>
+      ${this.showJump ? html`<button class="chat-jump" type="button" @click=${this._jumpBottom} aria-label="滚动到底部">↓ 到底</button>` : ""}
       ${this.notice ? html`<div class="chat-notice">${this.notice}</div>` : ""}
       ${this.error ? html`<div class="chat-error chat-load-error">${this.error}</div>` : ""}
       ${this._readOnly ? html`<div class="chat-readonly-chip">只读围观 · 子智能体会话（发送只进 Router）</div>` : ""}
@@ -398,13 +468,19 @@ class FmChat extends LitElement {
           <span class="chat-pending-status">${message.status === "processing" ? "投送中" : "待投送"}</span>
         </div>`)}
       </div>` : ""}
+      ${this.slash !== "" && !this._readOnly ? html`<div class="chat-slash" role="listbox" aria-label="斜杠命令">
+        ${this._slashMatches().map((c) => html`<button type="button" class="chat-slash-item" @click=${() => { this.draft = ""; this.slash = ""; this._runSlash(c.cmd) }}>
+          <span class="chat-slash-cmd">/${c.cmd}</span><span class="chat-slash-desc">${c.desc}</span>
+        </button>`)}
+        ${this._slashMatches().length ? "" : html`<div class="chat-slash-empty">没有匹配的命令</div>`}
+      </div>` : ""}
       ${this._readOnly ? "" : html`<form class="chat-composer" @submit=${(event) => { event.preventDefault(); this.send() }}>
         <textarea
           rows="2"
-          placeholder="给 Router Agent 发消息…"
+          placeholder="给 Router Agent 发消息…（/ 唤起命令）"
           .value=${this.draft}
           ?disabled=${this.busy}
-          @input=${(event) => { this.draft = event.target.value }}
+          @input=${(event) => { this.draft = event.target.value; this.slash = event.target.value.startsWith("/") ? event.target.value : "" }}
           @keydown=${(event) => {
             // IME 组字时的 Enter 是选词上屏（keyCode 229 兼容部分 WebView），
             // 不 preventDefault、不发送，交给输入法。

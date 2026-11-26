@@ -3148,6 +3148,26 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     return ok(await ctx.chat.messagesFor(req.target))
   }
 
+  if (cmd === "chat clear") {
+    if (!ctx.chat) return fail("chat-unavailable", "Chat 不在当前服务里")
+    if (typeof ctx.chat.clear !== "function") return fail("chat-unavailable", "当前 chat 不支持 /clear")
+    try {
+      return ok(await ctx.chat.clear())
+    } catch (e) {
+      return fail(e.code || "chat-clear-failed", e.message)
+    }
+  }
+
+  if (cmd === "chat archive") {
+    if (!ctx.chat) return fail("chat-unavailable", "Chat 不在当前服务里")
+    if (typeof ctx.chat.archive !== "function") return fail("chat-unavailable", "当前 chat 不支持归档")
+    try {
+      return ok(await ctx.chat.archive(req))
+    } catch (e) {
+      return fail(e.code || "chat-archive-failed", e.message)
+    }
+  }
+
   if (cmd === "inbox list") {
     const status = String(req.status ?? "")
     return ok({

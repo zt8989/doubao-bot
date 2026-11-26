@@ -59,6 +59,11 @@ export function createChatStreamSource({ ctx, log = () => {} } = {}) {
     const rows = await zc.listSessions({ limit: 400 })
     const ledgerInfo = new Map([...rootMap].map(([sid, v]) => [sid, { name: v.name, status: v.status }]))
     const nodes = buildWatchTree({ rootIds, sessions: rows, ledgerInfo })
+    // composer 的目标会话（conv="" 解析结果）标 isRouter——前端禁止归档它。
+    let routerConv = ""
+    try {
+      routerConv = (await resolveConv("")).sessionId
+    } catch {}
     // streaming 标记批量查；账本说 error 的以账本为准（库里的 streaming 不掩盖失败）。
     let streaming = {}
     try {
@@ -71,6 +76,7 @@ export function createChatStreamSource({ ctx, log = () => {} } = {}) {
       n.status = n.ledgerStatus === "error" ? "error" : n.streaming ? "running" : "done"
       n.updatedAt = n.timeUpdated ? new Date(n.timeUpdated).toISOString() : ""
       n.readOnly = !n.inLedger
+      n.isRouter = n.convId === routerConv
       delete n.timeUpdated
     }
     return { ok: true, carrier: c, nodes }

@@ -313,6 +313,21 @@ export function startConsoleHttp({ store, ctx, dir, host, port, token = "", log 
         return sendJson(res, result?.ok === false ? 400 : 202, result)
       }
 
+      if (pathname === "/api/chat/clear" || pathname === "/api/chat/archive") {
+        // /clear 新建 Router 会话（轮换）；归档账本会话（Router 当前会话服务端拒绝）。都走 RPC。
+        if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
+        if (!onRpc) return sendJson(res, 501, { ok: false, error: "rpc_not_enabled" })
+        let body
+        try {
+          body = await readBody(req)
+        } catch (e) {
+          return sendJson(res, 400, { ok: false, error: e.code || "bad_request", message: e.message })
+        }
+        const cmd = pathname === "/api/chat/clear" ? "chat clear" : "chat archive"
+        const result = await onRpc({ id: `http-${cmd}`, cmd, target: body?.conv })
+        return sendJson(res, result?.ok === false ? 400 : 200, result)
+      }
+
       if (pathname === "/api/chat/sessions" || pathname === "/api/chat/transcript" || pathname === "/api/chat/stream") {
         // Chat 实时流三件套：会话树（含 CreateSession 子会话）/ 一次性增量 / SSE 常驻推流。
         // zcode 载体专属；非 zcode 载体返回空 nodes，前端回退老的账本视图。

@@ -201,6 +201,13 @@ class FmSidebar extends LitElement {
               >
                 <span class=${"dot " + statusDot(s.status)}></span>
                 <span class="side-session-name">${s.name}</span>
+                ${s.isRouter ? "" : html`<span
+                  class="side-session-archive"
+                  role="button"
+                  tabindex="-1"
+                  title=${s.depth > 0 ? "子智能体会话不归档" : "归档这条会话"}
+                  @click=${(e) => { e.stopPropagation(); emit(this, "session-archive", { conv: s.convId, name: s.name, depth: s.depth }) }}
+                >✕</span>`}
               </button>`)}
             ${sessions.length ? "" : html`<div class="side-sessions-empty">暂无会话留痕</div>`}
           </div>`
@@ -1314,6 +1321,11 @@ class FmSessionMenu extends LitElement {
               <span class="menu-name">${s.name}</span>
               <span class="menu-sub">${s.depth > 0 ? "子智能体 · 只读围观 · " : ""}${statusLabel[s.status] || s.status}${s.updatedAt ? ` · ${s.updatedAt.replace("T", " ").slice(5, 16)}` : ""}</span>
             </span>
+            ${s.isRouter || s.depth > 0 ? "" : html`<span
+              class="menu-archive"
+              role="button"
+              @click=${(e) => { e.stopPropagation(); emit(this, "session-archive", { conv: s.convId, name: s.name, depth: s.depth }) }}
+            >归档</span>`}
             <span class="menu-arrow">›</span>
           </button>`)}
         ${rows.length ? "" : html`<div class="menu-empty">还没有会话留痕；zcode 载体派单后出现在这里</div>`}
@@ -1822,6 +1834,8 @@ class FmConsole extends LitElement {
       this.navOpen = false
     }
     this.addEventListener("chat-target", this._onChatTarget)
+    // 会话列表归档：确认 → POST /api/chat/archive → 刷新列表；正在看的被归档就退回 Router。
+    this.addEventListener("session-archive", (e) => this._archiveSession(e.detail ?? {}))
     // 顶栏切载体：noop | 豆包 | zcode。
     this._onAgentSet = (e) => this.setAgent(e.detail?.agent)
     this.addEventListener("agent-set", this._onAgentSet)
@@ -2163,6 +2177,29 @@ class FmConsole extends LitElement {
       this.agentCarrier = body.carrier || ""
     } catch (e) {
       this.error = `服务 · 拿不到智能体会话（${e.message}）`
+    }
+  }
+
+  // 归档一条账本会话：后端拒绝 Router 当前会话与子智能体；成功后刷新列表，正在看的退回 Router。
+  async _archiveSession({ conv, name, depth }) {
+    if (!conv) return
+    if (depth > 0) return // 子智能体不归档（后端也有同样守卫）
+    if (!globalThis.confirm(`归档会话「${name || conv}」？herdr 窗格会关闭，账本条目一并移除。`)) return
+    try {
+      const res = await fetch("/api/chat/archive", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ conv }),
+      })
+      const body = await res.json()
+      if (!res.ok || body.ok === false) throw new Error(body.message || `HTTP ${res.status}`)
+      if (this.chatConv === conv) {
+        this.chatConv = ""
+        this.chatInto = false
+      }
+      await this.loadAgentSessions()
+    } catch (e) {
+      this.error = `归档失败：${e.message}`
     }
   }
 
