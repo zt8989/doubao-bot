@@ -5,7 +5,7 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { classifyInbound, MessageDedup, FeishuGateway, FeishuReplyPump } from "../src/feishu.mjs"
+import { classifyInbound, MessageDedup, FeishuGateway, FeishuReplyPump, botOpenIdFromInfo } from "../src/feishu.mjs"
 import { loadConfig, normalizeFeishuSection } from "../src/config.mjs"
 import { startServer } from "../src/service.mjs"
 
@@ -69,6 +69,14 @@ test("classifyInbound：WS 长连接事件形状（content 直接挂 message 上
   const ok = classifyInbound(feishuCfg(), ws)
   assert.equal(ok.accept, true)
   assert.equal(ok.text, "测试")
+})
+
+test("botOpenIdFromInfo：真实响应 open_id 在顶层 bot 下，不在 data 下", () => {
+  // 2026-11-26 实测：/bot/v3/info 成功时 msg="ok"，open_id 在顶层 bot 字段——此前读 data.open_id 每次都失败。
+  const real = { code: 0, msg: "ok", bot: { activate_status: 2, app_name: "foreman-bot", open_id: "ou_real1" } }
+  assert.equal(botOpenIdFromInfo(real), "ou_real1")
+  assert.equal(botOpenIdFromInfo({ code: 0, msg: "ok", data: { open_id: "ou_legacy" } }), "ou_legacy")
+  assert.equal(botOpenIdFromInfo({ code: 0, msg: "ok" }), "")
 })
 
 test("classifyInbound：群聊默认 @ 响应，groups.high 全收；allowUsers 留空私聊放行", () => {

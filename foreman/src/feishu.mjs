@@ -94,6 +94,11 @@ function feishuState(book) {
   return book.data.feishu ?? (book.data.feishu = {})
 }
 
+// bot info 响应 → open_id。真实响应形状是顶层 bot.open_id（data 下没有），data 兜底只为兼容旧版。
+export function botOpenIdFromInfo(payload) {
+  return String(payload?.bot?.open_id ?? payload?.data?.open_id ?? "").trim()
+}
+
 export class FeishuGateway {
   constructor({ cfg, ctx, log = () => {} } = {}) {
     this.cfg = cfg
@@ -146,29 +151,29 @@ export class FeishuGateway {
   // 租户凭证 → 机器人信息 → bot open_id。失败不挡启动：回落到配置里的 botName/botOpenId，
   // 什么都没有时非 high 群识别不了 @，会按拒收日志提示。
   async resolveBotOpenId() {
-    const { appId, appSecret, domain } = this.feishuCfg
-    const open = domain === "lark" ? "https://open.larksuite.com" : "https://open.feishu.cn"
-    try {
-      const tokResp = await fetch(`${open}/open-apis/auth/v3/tenant_access_token/internal`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
-      })
-      const tok = await tokResp.json()
-      if (!tok.tenant_access_token) throw new Error(tok.msg || `HTTP ${tokResp.status}`)
-      const botResp = await fetch(`${open}/open-apis/bot/v3/info`, {
-        headers: { authorization: `Bearer ${tok.tenant_access_token}` },
-      })
-      const bot = await botResp.json()
-      const openId = String(bot?.data?.open_id ?? "")
-      if (!openId) throw new Error(bot?.msg || "bot info 缺 open_id")
-      this.log(`飞书机器人身份就绪：${openId}（群聊 @ 识别用）`)
-      return openId
-    } catch (e) {
-      this.log(`拿机器人 open_id 失败（群聊 @ 识别回落到配置 botName/botOpenId）：${e.message}`)
-      return this.feishuCfg.botOpenId || ""
-    }
+  const { appId, appSecret, domain } = this.feishuCfg
+  const open = domain === "lark" ? "https://open.larksuite.com" : "https://open.feishu.cn"
+  try {
+    const tokResp = await fetch(`${open}/open-apis/auth/v3/tenant_access_token/internal`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
+    })
+    const tok = await tokResp.json()
+    if (!tok.tenant_access_token) throw new Error(tok.msg || `HTTP ${tokResp.status}`)
+    const botResp = await fetch(`${open}/open-apis/bot/v3/info`, {
+      headers: { authorization: `Bearer ${tok.tenant_access_token}` },
+    })
+    const bot = await botResp.json()
+    const openId = botOpenIdFromInfo(bot)
+    if (!openId) throw new Error(bot?.msg || "bot info 缺 open_id")
+    this.log(`飞书机器人身份就绪：${openId}（群聊 @ 识别用）`)
+    return openId
+  } catch (e) {
+    this.log(`拿机器人 open_id 失败（群聊 @ 识别回落到配置 botName/botOpenId）：${e.message}`)
+    return this.feishuCfg.botOpenId || ""
   }
+}
 
   async onMessage(data) {
     try {
