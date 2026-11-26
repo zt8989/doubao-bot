@@ -132,6 +132,15 @@ test("deliver.mode=existing 时留空提示词也合法（老行为回退）", (
   assert.equal(cfg.deliver.promptFile, "")
 })
 
+test("zcode.mode：默认 yolo，写错直接报错并列出合法值", () => {
+  const base = { repos: [{ repo: "a/b", dir: "/tmp", base: "sit-test" }] }
+  assert.equal(loadConfig(tmpConfig(base).file).zcode.mode, "yolo")
+  assert.equal(loadConfig(tmpConfig({ ...base, zcode: { mode: "GUARDED" } }).file).zcode.mode, "guarded", "大小写归一")
+  assert.throws(() => {
+    loadConfig(tmpConfig({ ...base, zcode: { mode: "sudo" } }).file)
+  }, /zcode\.mode 只能是 build\/edit\/plan\/yolo\/guarded/)
+})
+
 test("pickup 自动巡检：默认关，开了才按 intervalSeconds 跑，间隔写错直接报错", () => {
   const { file } = tmpConfig({ repos: [{ repo: "a/b", dir: "/tmp", base: "sit-test" }] })
   const cfg = loadConfig(file)

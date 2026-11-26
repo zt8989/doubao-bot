@@ -312,11 +312,13 @@ const HERDR_ERRORS = {
 }
 
 export class ZcodeHerdrDriver extends ZcodeDriverBase {
-  constructor({ bin = "", herdrBin = "", tuiBin = "", ledger, log = () => {} } = {}) {
+  constructor({ bin = "", herdrBin = "", tuiBin = "", ledger, mode = "yolo", log = () => {} } = {}) {
     super({ ledger, log })
     this.herdr = resolveHerdrCommand(herdrBin)
     this.zcode = resolveZcodeCommand(bin)
     this.runtime = resolveZcodeRuntimeCjs(tuiBin, this.zcode)
+    // 权限模式拼进 TUI 启动命令（--mode 是「本次启动生效」旗标，不动 zcode 全局设置）。
+    this.mode = String(mode ?? "").trim() || "yolo"
     this.reportSeq = 0
     // 后台轮的轮询定时器：key → timer，archive 时清。
     this.pollers = new Map()
@@ -372,7 +374,8 @@ export class ZcodeHerdrDriver extends ZcodeDriverBase {
     return { workspaceId: r.workspace?.workspace_id ?? "", paneId: r.root_pane?.pane_id ?? "" }
   }
 
-  // pane 里的启动命令：env 前缀带上 HERDR_* 与占位 session id（绕开 TUI 冷启动卡死），再接 runtime。
+  // pane 里的启动命令：env 前缀带上 HERDR_* 与占位 session id（绕开 TUI 冷启动卡死），再接 runtime
+  // 和权限模式（默认 yolo，无人值守跑满全程，不让 TUI 停下来等权限确认）。
   #launchCommand(paneId, tuiLog = "") {
     const argv = [
       "env",
@@ -382,6 +385,8 @@ export class ZcodeHerdrDriver extends ZcodeDriverBase {
       `ZCODE_SESSION_ID=sess_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`,
       ...(tuiLog ? [`ZCODE_TUI_RUNTIME_LOG=${shQuote(tuiLog)}`] : []),
       ...[this.runtime.cmd, ...this.runtime.baseArgs].map(shQuote),
+      "--mode",
+      shQuote(this.mode),
     ]
     const line = argv.join(" ")
     this.log(`herdr 启动命令：${line}`)

@@ -109,8 +109,9 @@ try {
     if (!p) {
       out({ error: { code: "pane_not_found", message: "no such pane" } })
     } else if (!p.launched) {
-      // 第一次 pane run 是启动 runtime：TUI 就绪画面
+      // 第一次 pane run 是启动 runtime：记下启动命令行（测 --mode 拼装），摆 TUI 就绪画面
       p.launched = true
+      p.launchCmd = text
       p.screen.push("Ask a task about this workspace", "◈ fake/glm ─ ◉ build ─ ctx 100%")
       save(state)
       out({ id: "cli:pane:run", result: { type: "ok" } })

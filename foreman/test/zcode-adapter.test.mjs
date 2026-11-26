@@ -23,7 +23,7 @@ function tmpConfig(obj) {
 }
 
 // herdr 载体的适配器：假 herdr CLI + 假 runtime，状态隔离到临时目录。
-function makeHerdrAdapter({ logs, workMs, block } = {}) {
+function makeHerdrAdapter({ logs, workMs, block, zcodeMode } = {}) {
   const dir = tmpDir()
   const got = logs ?? []
   const stateFile = path.join(dir, "herdr-fake-state.json")
@@ -43,7 +43,7 @@ function makeHerdrAdapter({ logs, workMs, block } = {}) {
     cfg: {
       stateFile: path.join(dir, "state.json"),
       agent: "zcode",
-      zcode: { bin: `node ${RUNTIME_FAKE}`, ledger: path.join(dir, "zcode-sessions.json") },
+      zcode: { bin: `node ${RUNTIME_FAKE}`, ledger: path.join(dir, "zcode-sessions.json"), ...(zcodeMode !== undefined ? { mode: zcodeMode } : {}) },
       herdr: { bin: `node ${HERDR_FAKE}`, enabled: true },
     },
     log: (m) => got.push(m),
@@ -113,6 +113,22 @@ test("zcode 适配器：契约方法齐全，工厂按 agent=zcode 选中", asyn
   } finally {
     cleanup()
   }
+})
+
+test("herdr 启动命令：默认拼 --mode yolo，zcode.mode 配了就跟随", async () => {
+  const openAndReadLaunch = async (mode) => {
+    const { adapter, cleanup, dir } = makeHerdrAdapter({ workMs: 200, zcodeMode: mode })
+    try {
+      await adapter.openExecution({ name: `mode-${mode ?? "默认"}`, prompt: "x" })
+      const state = JSON.parse(fs.readFileSync(path.join(dir, "herdr-fake-state.json"), "utf8"))
+      const launched = Object.values(state.panes).find((p) => p.launched)
+      return launched.launchCmd
+    } finally {
+      cleanup()
+    }
+  }
+  assert.match(await openAndReadLaunch(undefined), /--mode 'yolo'$/, "不配 zcode.mode 时默认 yolo")
+  assert.match(await openAndReadLaunch("build"), /--mode 'build'$/, "配了就跟随配置")
 })
 
 test("herdr open：阻塞跑完首轮，convId=pane 句柄，回复与轮次留痕都在", async () => {
@@ -294,5 +310,5 @@ test("配置：agent 只认 noop/dws/zcode，默认 noop，写错兜底 noop；z
   assert.equal(loadConfig(tmpConfig({ agent: "noop" })).agent, "noop")
   assert.equal(loadConfig(tmpConfig({ agent: "豆包" })).agent, "noop")
   const cfg = loadConfig(tmpConfig({ agent: "zcode" }))
-  assert.deepEqual(cfg.zcode, { bin: "", ledger: "", tuiBin: "" })
+  assert.deepEqual(cfg.zcode, { bin: "", ledger: "", tuiBin: "", mode: "yolo" })
 })

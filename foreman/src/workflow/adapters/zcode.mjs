@@ -11,7 +11,7 @@ export class ZcodeSessionAdapter {
     this.cfg = cfg
     this.log = log
     const ledger = String(z.ledger ?? "").trim() || defaultLedgerPath(cfg)
-    this.driver = new ZcodeHerdrDriver({ herdrBin: cfg.herdr?.bin ?? "herdr", bin: z.bin ?? "", tuiBin: z.tuiBin ?? "", ledger, log })
+    this.driver = new ZcodeHerdrDriver({ herdrBin: cfg.herdr?.bin ?? "herdr", bin: z.bin ?? "", tuiBin: z.tuiBin ?? "", mode: z.mode, ledger, log })
     this.capabilities = { singleInstance: false }
   }
 

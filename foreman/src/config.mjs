@@ -29,8 +29,9 @@ export const DEFAULTS = {
   // ZCode CLI（herdr 窗格常驻 TUI，可围观/插手/批权限，服务重启会话不丢）：
   // bin 显式配置 zcode 命令；tuiBin 显式配置 herdr pane 里跑的 runtime（留空自动推导
   // `node <vendor>/zcode.cjs`——启动器 bin/zcode.js 在 herdr PTY 里会卡死 TUI，必须绕开）；
+  // mode 权限模式拼进 TUI 启动命令（默认 yolo，foreman 的会话要无人值守跑完，别停在权限确认）；
   // ledger 会话账本路径（留空放 stateFile 同目录的 zcode-sessions.json）。
-  zcode: { bin: "", ledger: "", tuiBin: "" },
+  zcode: { bin: "", ledger: "", tuiBin: "", mode: "yolo" },
   herdr: { bin: "herdr", enabled: true },
   // Gitea REST：baseUrl 用于控制台拼链接；令牌实际由 gitea 包按 ~/.foreman/gitea-token 解析。
   gitea: { baseUrl: "http://106.54.199.229:3000", tokenFile: "~/.foreman/gitea-token" },
@@ -581,6 +582,14 @@ export function loadConfig(explicit, env = process.env) {
   // dws 可执行文件：常驻服务的 PATH 不一定有 dws，建议在配置里写绝对路径（支持 ~）。
   cfg.dws = cfg.dws && typeof cfg.dws === "object" ? cfg.dws : {}
   cfg.dws.bin = expandHome(String(cfg.dws.bin ?? "dws").trim()) || "dws"
+
+  // zcode 权限模式：拼进 herdr pane 里 TUI 的启动命令（--mode 本次启动生效，不动全局设置）。
+  // 只认 zcode 支持的五个值；写错启动就报，不悄悄降级。
+  const zMode = String(cfg.zcode?.mode ?? "yolo").trim().toLowerCase()
+  if (!["build", "edit", "plan", "yolo", "guarded"].includes(zMode)) {
+    throw new Error(`配置项 zcode.mode 只能是 build/edit/plan/yolo/guarded，现在是：${cfg.zcode.mode}`)
+  }
+  cfg.zcode.mode = zMode
 
   // 产品分组：每个产品 = 一套 repos + 自己的 promptFile / projectDir（留空回落顶层 deliver）。
   // cfg.repos 一律摊平成产品仓库的并集，后续捞单/PR 扫描不用区分来源。
