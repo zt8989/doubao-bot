@@ -195,9 +195,9 @@ foreman outbox run                 # 排障时手动消费一轮
 
 口径：
 
-- **收谁**：私聊只收 `allowUsers` 白名单（发送者 `open_id`）；`groups.high` 全收；`groups.low` 只有
-  **@机器人** 才收（按 mention 名字命中 `botName`、或 `botOpenId` 命中）；两类名单外的群不收。
-  三类入口一个都没配，`enabled` 直接报错。非文本消息（图片/文件/富文本）暂不收，原因记 `service.log`。
+- **收谁**：私聊默认放行（`allowUsers` 配了就只收名单内的 `open_id`，拒收日志会带出 sender 供照抄）；
+  群聊默认只有 **@机器人** 才收（机器人 open_id 启动时自动获取，`botName`/`botOpenId` 仅作手动兜底）；
+  `groups.high` 是全收群。非文本消息（图片/文件/富文本）暂不收，原因记 `service.log`。
 - **回复发给谁**：目标跟着最近一条飞书入站消息走——私聊发回发件人、群聊发回群；Chat UI / 控制台来的消息不改目标。
   推送断点记在状态文件（`feishu.lastPushedId`），重启不重推；首次启用或 router 会话重建时**只锚定不回放**，
   锚定当刻已存在的最后一条回复不会被推。

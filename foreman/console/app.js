@@ -1455,8 +1455,8 @@ class FmFeishu extends LitElement {
   headSub(cfg, gw) {
     const bits = []
     bits.push(gw?.running ? "运行中 · 长连接已连上" : cfg.enabled ? "已启用 · 未运行" : "未启用")
-    if ((cfg.allowUsers || []).length) bits.push(`私聊白名单 ${cfg.allowUsers.length} 人`)
-    if ((cfg.groups?.high || []).length) bits.push(`高优群 ${cfg.groups.high.length} 个`)
+    bits.push((cfg.allowUsers || []).length ? `私聊白名单 ${cfg.allowUsers.length} 人` : "私聊放行")
+    if ((cfg.groups?.high || []).length) bits.push(`全收群 ${cfg.groups.high.length} 个`)
     return bits.join(" · ")
   }
   render() {
@@ -1509,12 +1509,12 @@ class FmFeishu extends LitElement {
           <div class="im-section-head">
             <div>
               <h3>收发配置</h3>
-              <p class="hint">高优群全收；低优群（仅 @机器人）、私聊白名单 allowUsers、botName 等其余一律走 config.json 默认，不在界面上改。想加私聊白名单：先给机器人发条消息，service.log 的拒收记录里就有你的 open_id。</p>
+              <p class="hint">私聊默认放行；<b>其他群默认 @机器人才收</b>；高优群（全收群）在下面配。私聊白名单 allowUsers（留空=全放行）、低优群等旧配置一律走 config.json。想收紧私聊：把 open_id 填进 allowUsers（拒收日志里有）。</p>
             </div>
           </div>
           <form class="feishu-form" @submit=${(e) => e.preventDefault()}>
             <label>
-              高优群（每行一个 chat_id，全收）
+              全收群 groups.high（每行一个 chat_id；不配则所有群都是 @ 响应）
               <textarea data-feishu-field="high" rows="3" spellcheck="false" .value=${high} placeholder="oc_xxxxxxxx"></textarea>
             </label>
             <div class="schedule-form-actions">

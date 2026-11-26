@@ -200,14 +200,15 @@ export const DEFAULTS = {
   lark: { bin: "lark-cli", as: "user" },
   // 飞书通道（openclaw 式入站）：官方 SDK 长连接收 im.message.receive_v1 → Inbox chat.message；
   // 回复由服务轮询 router 会话增量经 Outbox lark 渠道推回（出站仍走 lark-cli，凭据只管入站订阅）。
-  // 私聊按 allowUsers 白名单全收；群分两级：high 全收，low 只有 @机器人 才收（botName/botOpenId 认 @）。
+  // 私聊 allowUsers 留空 = 放行所有私聊（单管理员自用默认）；groups.high 是全收群，
+  // 其余群默认只有 @机器人才收（机器人 open_id 启动时自动获取，botName/botOpenId 仅作手动兜底）。
   feishu: {
     enabled: false,
     appId: "",
     appSecret: "",
     domain: "feishu",
     allowUsers: [],
-    groups: { high: [], low: [] },
+    groups: { high: [] },
     botName: "",
     botOpenId: "",
     replyPollSeconds: 5,
@@ -298,8 +299,9 @@ export function normalizeRepos(cfg) {
   })
 }
 
-// 飞书通道归一：enabled 才要求凭据与入口；名单一律字符串数组去空，数值写错直接报错。
-// loadConfig 与控制台的 applyFeishu（配置界面保存）共用这一份口径。
+// 飞书通道归一：enabled 只要求凭据；私聊留空放行、群默认 @ 响应，不需要再配入口名单。
+// 名单一律字符串数组去空，数值写错直接报错。loadConfig 与控制台的 applyFeishu（配置界面保存）共用这份口径。
+// groups.low（旧分级）已移除：读入即忽略，保存时不再落盘。
 export function normalizeFeishuSection(raw = {}) {
   const feishu = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {}
   const out = {
@@ -308,7 +310,7 @@ export function normalizeFeishuSection(raw = {}) {
     appSecret: String(feishu.appSecret ?? "").trim(),
     domain: "feishu",
     allowUsers: [],
-    groups: { high: [], low: [] },
+    groups: { high: [] },
     botName: String(feishu.botName ?? "").trim(),
     botOpenId: String(feishu.botOpenId ?? "").trim(),
     replyPollSeconds: 5,
@@ -319,19 +321,10 @@ export function normalizeFeishuSection(raw = {}) {
   const list = (v) => (Array.isArray(v) ? v : []).map((x) => String(x ?? "").trim()).filter(Boolean)
   out.allowUsers = list(feishu.allowUsers)
   out.groups.high = list(feishu.groups?.high)
-  out.groups.low = list(feishu.groups?.low)
   const seconds = Number(feishu.replyPollSeconds ?? 5)
   if (!Number.isFinite(seconds) || seconds <= 0) throw new Error(`配置项 feishu.replyPollSeconds 要是正数，现在是：${feishu.replyPollSeconds}`)
   out.replyPollSeconds = Math.floor(seconds)
-  if (out.enabled) {
-    if (!out.appId || !out.appSecret) throw new Error("配置项 feishu.enabled=true 时 appId/appSecret 必填")
-    if (!out.allowUsers.length && !out.groups.high.length && !out.groups.low.length) {
-      throw new Error("配置项 feishu.enabled=true 时 allowUsers / groups.high / groups.low 至少配一个收消息入口")
-    }
-    if (out.groups.low.length && !out.botName && !out.botOpenId) {
-      throw new Error("配置项 feishu.groups.low 配了低优群就要能认 @机器人：配 botName 或 botOpenId")
-    }
-  }
+  if (out.enabled && (!out.appId || !out.appSecret)) throw new Error("配置项 feishu.enabled=true 时 appId/appSecret 必填")
   return out
 }
 

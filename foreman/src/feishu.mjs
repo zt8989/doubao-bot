@@ -68,22 +68,22 @@ export function classifyInbound(feishuCfg, event, identity = {}) {
   if (!text) return deny(`暂只收文本消息（收到 ${message.message_type || "未知类型"}）`)
 
   if (chatType === "p2p") {
-    if (!feishuCfg.allowUsers.includes(senderId)) return deny("私聊发送者不在 feishu.allowUsers 白名单")
+    // allowUsers 留空 = 放行所有私聊（单管理员自用默认）；配了就只放名单内。
+    if (feishuCfg.allowUsers.length && !feishuCfg.allowUsers.includes(senderId)) {
+      return deny("私聊发送者不在 feishu.allowUsers 白名单")
+    }
     return { accept: true, chatType, chatId, senderId, messageId, text }
   }
   if (chatType === "group") {
+    // 群聊两级口径：groups.high 全收；其余群默认只有 @机器人才收。
     if (feishuCfg.groups.high.includes(chatId)) return { accept: true, chatType, chatId, senderId, messageId, text }
-    if (feishuCfg.groups.low.includes(chatId)) {
-      // @机器人：按 open_id 或名字认 mention；两个都没配就认不出来。
-      const atBot = mentions.some(
-        (m) =>
-          (identity.botOpenId && String(m?.id?.open_id ?? "") === identity.botOpenId) ||
-          (identity.botName && String(m?.name ?? "").trim() === identity.botName)
-      )
-      if (!atBot) return deny("低优群只有 @机器人 才收（配 feishu.botName 或 botOpenId 认 @）")
-      return { accept: true, chatType, chatId, senderId, messageId, text }
-    }
-    return deny("群不在 feishu.groups.high/low 名单")
+    const atBot = mentions.some(
+      (m) =>
+        (identity.botOpenId && String(m?.id?.open_id ?? "") === identity.botOpenId) ||
+        (identity.botName && String(m?.name ?? "").trim() === identity.botName)
+    )
+    if (!atBot) return deny("群聊未 @机器人（默认只有 @ 才收；要全收把群配进 feishu.groups.high）")
+    return { accept: true, chatType, chatId, senderId, messageId, text }
   }
   return deny(`未知会话类型：${chatType || "缺 chat_type"}`)
 }
@@ -119,9 +119,11 @@ export class FeishuGateway {
     const ws = new WSClient({ appId, appSecret, domain, logger })
     this.ws = ws
     await ws.start({ eventDispatcher: dispatcher })
+    // @ 识别要机器人自己的 open_id：启动时用凭据自动获取，省掉手配 botName/botOpenId。
+    this.botOpenId = await this.resolveBotOpenId()
     this.status.running = true
     this.status.error = ""
-    this.log(`飞书通道已启动：${appId}（长连接收消息，私聊 ${this.feishuCfg.allowUsers.length} 人 · 高优群 ${this.feishuCfg.groups.high.length} · 低优群 ${this.feishuCfg.groups.low.length}）`)
+    this.log(`飞书通道已启动：${appId}（长连接收消息，私聊 ${this.feishuCfg.allowUsers.length ? this.feishuCfg.allowUsers.length + " 人白名单" : "放行"} · 全收群 ${this.feishuCfg.groups.high.length} · 其余群 @ 响应）`)
   }
 
   stop() {
@@ -135,10 +137,37 @@ export class FeishuGateway {
     return { enabled: this.feishuCfg.enabled === true, ...this.status }
   }
 
+  // 租户凭证 → 机器人信息 → bot open_id。失败不挡启动：回落到配置里的 botName/botOpenId，
+  // 什么都没有时非 high 群识别不了 @，会按拒收日志提示。
+  async resolveBotOpenId() {
+    const { appId, appSecret, domain } = this.feishuCfg
+    const open = domain === "lark" ? "https://open.larksuite.com" : "https://open.feishu.cn"
+    try {
+      const tokResp = await fetch(`${open}/open-apis/auth/v3/tenant_access_token/internal`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
+      })
+      const tok = await tokResp.json()
+      if (!tok.tenant_access_token) throw new Error(tok.msg || `HTTP ${tokResp.status}`)
+      const botResp = await fetch(`${open}/open-apis/bot/v3/info`, {
+        headers: { authorization: `Bearer ${tok.tenant_access_token}` },
+      })
+      const bot = await botResp.json()
+      const openId = String(bot?.data?.open_id ?? "")
+      if (!openId) throw new Error(bot?.msg || "bot info 缺 open_id")
+      this.log(`飞书机器人身份就绪：${openId}（群聊 @ 识别用）`)
+      return openId
+    } catch (e) {
+      this.log(`拿机器人 open_id 失败（群聊 @ 识别回落到配置 botName/botOpenId）：${e.message}`)
+      return this.feishuCfg.botOpenId || ""
+    }
+  }
+
   async onMessage(data) {
     try {
       const verdict = classifyInbound(this.feishuCfg, data, {
-        botOpenId: this.feishuCfg.botOpenId,
+        botOpenId: this.botOpenId || this.feishuCfg.botOpenId,
         botName: this.feishuCfg.botName,
       })
       this.status.lastInboundAt = nowIso()
