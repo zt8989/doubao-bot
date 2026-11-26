@@ -50,6 +50,8 @@ class FmChat extends LitElement {
     this._legacyTimer = null
     this.showJump = false
     this.slash = ""
+    // 进场跳底标记：刚进 Chat / 切会话 / /clear 后，首个有内容的渲染直接跳到最新消息。
+    this._jumpOnLoad = true
   }
 
   createRenderRoot() {
@@ -109,9 +111,14 @@ class FmChat extends LitElement {
   }
 
   updated() {
+    // 进场跳底：内容满一屏才跳（空列表先不消费标记，等快照到了再跳）。
     // 流式期间别抢用户回看：只有贴底时才自动跟随。
     const list = this.querySelector(".chat-messages")
     if (list) {
+      if (this._jumpOnLoad && list.scrollHeight > list.clientHeight) {
+        list.scrollTop = list.scrollHeight
+        this._jumpOnLoad = false
+      }
       const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 140
       if (nearBottom || this._sending) list.scrollTop = list.scrollHeight
     }
@@ -134,6 +141,8 @@ class FmChat extends LitElement {
     this._esFails = 0
     this.error = ""
     this.notice = ""
+    // 换了现场：等新快照渲染后重新跳到底部。
+    this._jumpOnLoad = true
   }
 
   _closeStream() {
@@ -245,6 +254,8 @@ class FmChat extends LitElement {
     if (this._loading) return
     this._loading = true
     this.loading = true
+    // 拉完渲染后跳到底部（进场 / 手动刷新同理）。
+    this._jumpOnLoad = true
     try {
       const res = await fetch(this.conv ? `/api/chat?conv=${encodeURIComponent(this.conv)}` : "/api/chat", { cache: "no-store" })
       const body = await res.json()

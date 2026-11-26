@@ -795,7 +795,8 @@ fm-console > fm-sidebar {
 .sidebar.is-collapsed .brand { justify-content: center; padding-left: 0; padding-right: 0; }
 .sidebar.is-collapsed .brand-text { display: none; }
 
-.side-nav { display: flex; flex-direction: column; gap: 4px; flex: 1; min-height: 0; overflow-y: auto; }
+/* 导航项垂直平均分：撑满侧栏剩余高度均匀分布，会话列表固定在下 */
+.side-nav { display: flex; flex-direction: column; justify-content: space-evenly; gap: 4px; flex: 1; min-height: 0; overflow-y: auto; }
 
 /* 侧边栏会话列表（Chat 视图下）：导航下方、折叠按钮上方，最多占一半高度滚动 */
 .side-sessions {

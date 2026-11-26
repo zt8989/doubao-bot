@@ -118,9 +118,6 @@ class FmThemeSwitch extends LitElement {
 
 /* ---------------- 左侧导航 ---------------- */
 function navIcon(id) {
-  if (id === "chat") {
-    return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v13H9l-5 4V4zM8 9h8M8 13h5"/></svg>`
-  }
   if (id === "inbox") {
     return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v14H4zM4 14h4l2 3h4l2-3h4M12 4v7M9 8l3 3 3-3"/></svg>`
   }
@@ -147,7 +144,7 @@ class FmSidebar extends LitElement {
     view: { type: String },
     collapsed: { type: Boolean },
     alive: { type: Boolean },
-    // zcode 会话账本（Chat 视图下的左下会话列表）；conv = 当前点选的会话目标。
+    // zcode 会话账本（侧栏下方的会话列表，常驻所有视图）；conv = 当前点选的会话目标。
     agentSessions: { attribute: false },
     conv: { type: String },
   }
@@ -155,8 +152,8 @@ class FmSidebar extends LitElement {
     return this
   }
   render() {
+    // Chat 不设导航项：进 Chat 的唯一入口就是点会话（下方的会话列表）。
     const views = [
-      { id: "chat", label: "Chat" },
       { id: "inbox", label: "Inbox" },
       { id: "outbox", label: "Outbox" },
       { id: "tasks", label: "Tasks" },
@@ -188,7 +185,7 @@ class FmSidebar extends LitElement {
               <span class="side-text">${v.label}</span>
             </button>`)}
         </nav>
-        ${this.view === "chat" && !this.collapsed ? html`
+        ${!this.collapsed ? html`
           <div class="side-sessions" aria-label="智能体会话列表">
             <div class="side-sessions-head">会话</div>
             <button
@@ -1825,12 +1822,14 @@ class FmConsole extends LitElement {
       if (view && view !== this.view) this.enterView(view, { push: false })
     }
     window.addEventListener("popstate", this._onPop)
-    // 侧边栏点选会话：切 Chat 的观察目标（空 = router 当前会话）。手机端顺带开聊天二级页。
+    // 侧边栏点选会话：进 Chat 并切观察目标（空 = router 当前会话）。手机端顺带开聊天二级页。
     this._onChatTarget = (e) => {
       // detail.back=true = 从聊天页返回一级菜单。点 Router（当前）时 conv 不变（""→""），
       // 靠 chatInto 驱动 pane 切换——单靠 chatConv 区分不了「菜单」和「看 Router」。
       this.chatConv = String(e.detail.conv ?? "")
       this.chatInto = !e.detail.back
+      // Chat 没有导航项：从其他视图点会话，这里负责把视图切回 chat（含 hash 入栈）。
+      if (this.view !== "chat") this.enterView("chat")
       this.navOpen = false
     }
     this.addEventListener("chat-target", this._onChatTarget)
