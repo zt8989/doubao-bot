@@ -260,6 +260,62 @@ test("FeishuReplyPump：replyTarget 带 chatId 时优先发会话 id（不出 op
   assert.deepEqual(pushed[0].payload, { chatId: "oc_dm", userId: "", markdown: "带会话回复" })
 })
 
+test("FeishuReplyPump：zcode 直读转录优先（completed assistant 的 text part），账本留痕只做回落", async () => {
+  const { stateFile } = tmpCtx()
+  const { ctx, pushed } = pumpCtx(stateFile, replies("账本里的旧回复", "账本里的新回复"))
+  const pump = new FeishuReplyPump({ cfg: ctx.cfg, ctx, log: () => {} })
+  setFeishuState(stateFile, { replyTarget: { kind: "user", id: "ou_boss", chatId: "oc_dm" } })
+  // 注入假转录源：屏上带标记的用户气泡不该混进来，reasoning/未完成的不推
+  pump.stream = {
+    transcript: async () => ({
+      ok: true,
+      carrier: "zcode",
+      conv: "sess_z",
+      rows: [
+        { kind: "message", id: 1, role: "user", completed: true },
+        { kind: "part", messageId: 1, type: "text", text: "【Chat UI 用户消息】你是谁？\n◇ Thought · Ctrl+O to expand" },
+        { kind: "message", id: 2, role: "assistant", completed: true },
+        { kind: "part", messageId: 2, type: "reasoning", text: "想一想" },
+        { kind: "part", messageId: 2, type: "text", text: "第一段" },
+        { kind: "part", messageId: 2, type: "text", text: "第二段" },
+        { kind: "message", id: 3, role: "assistant", completed: false },
+        { kind: "part", messageId: 3, type: "text", text: "还没写完" },
+      ],
+    }),
+  }
+
+  // 首次锚定：锚在直读转录的最新 completed 回复（id=2）上，不回放
+  assert.equal((await pump.pollOnce()).skipped, "armed")
+  assert.equal(pushed.length, 0)
+  let st = JSON.parse(fs.readFileSync(stateFile, "utf8")).feishu
+  assert.equal(st.lastPushedId, "2")
+
+  // 新的 completed assistant 消息：多段 text 拼接推送
+  pump.stream.transcript = async () => ({
+    ok: true,
+    carrier: "zcode",
+    conv: "sess_z",
+    rows: [
+      { kind: "message", id: 2, role: "assistant", completed: true },
+      { kind: "part", messageId: 2, type: "text", text: "第一段" },
+      { kind: "part", messageId: 2, type: "text", text: "第二段" },
+      { kind: "message", id: 4, role: "assistant", completed: true },
+      { kind: "part", messageId: 4, type: "text", text: "全新回复" },
+    ],
+  })
+  assert.equal((await pump.pollOnce()).pushed, 1)
+  assert.deepEqual(pushed[0].payload, { chatId: "oc_dm", userId: "", markdown: "全新回复" })
+  st = JSON.parse(fs.readFileSync(stateFile, "utf8")).feishu
+  assert.equal(st.lastPushedId, "4")
+
+  // 直读炸了回落账本留痕：锚点（"4"）对不上账本 id → 重新锚定不回放
+  pump.stream.transcript = async () => { throw new Error("db locked") }
+  const logs = []
+  pump.log = (m) => logs.push(m)
+  assert.equal((await pump.pollOnce()).skipped, "armed")
+  assert.ok(logs.some((m) => m.includes("改用账本留痕")))
+})
+
 test("FeishuReplyPump：只推完成的 assistant 回复；群聊目标发 chatId；超长截断", async () => {
   const { stateFile } = tmpCtx()
   const { ctx, pushed } = pumpCtx(stateFile, replies())

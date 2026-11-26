@@ -7,6 +7,7 @@
 // service 里 enabled 才动态 import 本文件，feishu.enabled=false 的机器零加载 SDK。
 import { AppType, Client, Domain, EventDispatcher, WSClient } from "@larksuiteoapi/node-sdk"
 import { Book } from "./book.mjs"
+import { createChatStreamSource } from "./chatstream.mjs"
 import { enqueueOutbound } from "./outbound.mjs"
 import { nowIso } from "./util.mjs"
 
@@ -253,6 +254,7 @@ export class FeishuReplyPump {
     this.timer = null
     this.running = false
     this.lastResult = null
+    this.stream = null // zcode 直读转录源（懒建；测试可注入假源）
   }
 
   start() {
@@ -276,6 +278,34 @@ export class FeishuReplyPump {
     return { book, st: feishuState(book) }
   }
 
+  // 回复清单：优先 zcode 库直读转录（真 assistant 消息、completed 标志、行 id 稳定）。
+  // 账本轮次留痕是读屏来的，屏上混着排队提示（【Chat UI 用户消息】标记）和 Thought 渲染，
+  // 归一后角色会错成 user——泵只认 assistant，会静默漏推（2026-11-26 herdr 恢复后实测踩中）。
+  // 非 zcode 载体或直读失败回落 messagesBase（账本轮次）。
+  async #replies() {
+    try {
+      if (!this.stream) this.stream = createChatStreamSource({ ctx: this.ctx, log: this.log })
+      const t = await this.stream.transcript("", 0)
+      if (t.ok && t.carrier === "zcode" && t.conv) {
+        const replies = new Map()
+        for (const r of t.rows) {
+          if (r.kind !== "message" || r.role !== "assistant" || !r.completed) continue
+          replies.set(String(r.id), { id: String(r.id), role: "assistant", text: "" })
+        }
+        for (const p of t.rows) {
+          if (p.kind !== "part" || p.type !== "text") continue
+          const m = replies.get(String(p.messageId))
+          if (m) m.text = m.text ? `${m.text}\n${String(p.text ?? "").trim()}` : String(p.text ?? "").trim()
+        }
+        const list = [...replies.values()].filter((m) => m.text)
+        if (list.length) return { convId: t.conv, messages: list }
+      }
+    } catch (e) {
+      this.log(`飞书回复泵直读转录失败，改用账本留痕：${e.message}`)
+    }
+    return this.ctx.chat.messagesBase()
+  }
+
   async pollOnce() {
     if (this.running) return { ok: true, skipped: "busy" }
     this.running = true
@@ -284,7 +314,7 @@ export class FeishuReplyPump {
       // 还没从飞书收过消息就没有推送目标（飞书回复只发给飞书来过的会话）。
       const target = st.replyTarget
       if (!target?.id) return { ok: true, skipped: "no-target" }
-      const base = await this.ctx.chat.messagesBase()
+      const base = await this.#replies()
       if (!base?.convId) return { ok: true, skipped: "no-session" }
       const replies = (base.messages ?? []).filter(
         (m) => m.role === "assistant" && m.finished !== false && String(m.text ?? "").trim()
