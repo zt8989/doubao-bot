@@ -58,6 +58,19 @@ test("classifyInbound：私聊白名单放行并替换 @占位符；不在名单
   assert.match(no.reason, /白名单/)
 })
 
+test("classifyInbound：WS 长连接事件形状（content 直接挂 message 上，无 body 壳）也能读出正文", () => {
+  // 2026-11-26 真机 dump：WS 推送解包后 message.content 直接是正文 JSON，与 webhook 文档的 body.content 不同。
+  const ws = evt({
+    chat_type: "p2p",
+    chat_id: "oc_dm",
+    content: JSON.stringify({ text: "测试" }),
+    body: undefined,
+  })
+  const ok = classifyInbound(feishuCfg(), ws)
+  assert.equal(ok.accept, true)
+  assert.equal(ok.text, "测试")
+})
+
 test("classifyInbound：群聊默认 @ 响应，groups.high 全收；allowUsers 留空私聊放行", () => {
   const cfg = feishuCfg()
   // 高优群：任何人发都收

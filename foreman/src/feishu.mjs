@@ -50,10 +50,11 @@ export function classifyInbound(feishuCfg, event, identity = {}) {
   const deny = (reason) => ({ accept: false, reason, messageId })
 
   // 只有文本能读出正文；图片/文件/富文本先拒收（提示原因，后续要再说）。
+  // content 位置两套形状：webhook 是 message.body.content；WS 长连接解包后直接是 message.content。
   let text = ""
   if (String(message.message_type ?? "") === "text") {
     try {
-      text = String(JSON.parse(message.body?.content ?? "{}").text ?? "")
+      text = String(JSON.parse(message.content ?? message.body?.content ?? "{}").text ?? "")
     } catch {
       text = ""
     }
