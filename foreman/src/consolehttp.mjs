@@ -13,6 +13,7 @@ import http from "node:http"
 import path from "node:path"
 import { Book } from "./book.mjs"
 import { sessionTasks } from "./tasktree.mjs"
+import { createChatStreamSource } from "./chatstream.mjs"
 
 const MAX_BODY = 1 << 20
 const LOOPBACK_ADDRESSES = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"])
@@ -103,6 +104,88 @@ pre{background:#111826;padding:12px 16px;border-radius:8px;color:#7dd3fc}</style
  */
 export function startConsoleHttp({ store, ctx, dir, host, port, token = "", log = () => {}, onRpc = null }) {
   const startedAt = Date.now()
+  // Chat 实时流：zcode 只读库的增量转录（src/chatstream.mjs）。并发流上限防多开页面积拖垮 sqlite3。
+  const chatStream = createChatStreamSource({ ctx, log })
+  let chatStreamClients = 0
+  const CHAT_STREAM_MAX = 4
+  const CHAT_STREAM_TICK_MS = 1000
+  const CHAT_STREAM_HEARTBEAT_MS = 15000
+
+  // SSE 常驻推流：snapshot（全量）→ 每秒 delta（增量行）/ status（运行态翻转），15s 心跳。
+  // 断线由 EventSource 自动重连，重连后服务端重发 snapshot，客户端整树重建——无需断点续传。
+  const startChatStream = (res, req, url) => {
+    const convParam = (url.searchParams.get("conv") || "").trim()
+    chatStreamClients += 1
+    res.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-store",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+    })
+    const send = (event, data) => {
+      try {
+        res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+      } catch {}
+    }
+    let timer = null
+    let heartbeat = null
+    let closed = false
+    let cursor = 0
+    let conv = convParam
+    let running = null
+    let lastErrorAt = 0
+    const cleanup = () => {
+      if (closed) return
+      closed = true
+      if (timer) clearInterval(timer)
+      if (heartbeat) clearInterval(heartbeat)
+      chatStreamClients -= 1
+      try {
+        res.end()
+      } catch {}
+    }
+    req.on("close", cleanup)
+    res.on("error", cleanup)
+    const pulse = async () => {
+      if (closed) return
+      try {
+        const d = await chatStream.transcript(conv, cursor)
+        if (d.conv) conv = d.conv // 空 conv 首轮解析出的 router 会话，之后按真 id 轮询
+        if (d.rows.length) {
+          cursor = Math.max(cursor, Number(d.cursor) || 0)
+          send("delta", d)
+        }
+        if (d.running !== running) {
+          running = d.running
+          send("status", { running: d.running })
+        }
+      } catch (e) {
+        // 库暂时读不回（zcode 升级/锁表）：限频报错，别把客户端刷屏。
+        if (Date.now() - lastErrorAt > 30000) {
+          lastErrorAt = Date.now()
+          send("stream-error", { message: e.message })
+        }
+      }
+    }
+    void (async () => {
+      try {
+        const snap = await chatStream.transcript(convParam, 0)
+        conv = snap.conv || convParam
+        cursor = Number(snap.cursor) || 0
+        send("snapshot", snap)
+        send("sessions", await chatStream.sessions())
+      } catch (e) {
+        send("stream-error", { message: e.message })
+      }
+      timer = setInterval(pulse, CHAT_STREAM_TICK_MS)
+      heartbeat = setInterval(() => {
+        try {
+          res.write(": ping\n\n")
+        } catch {}
+      }, CHAT_STREAM_HEARTBEAT_MS)
+      await pulse()
+    })()
+  }
 
   const readBody = (req) =>
     new Promise((resolve, reject) => {
@@ -228,6 +311,26 @@ export function startConsoleHttp({ store, ctx, dir, host, port, token = "", log 
         }
         const result = await onRpc({ id: "http-chat-send", cmd: "chat send", text: body?.text, clientId: body?.clientId })
         return sendJson(res, result?.ok === false ? 400 : 202, result)
+      }
+
+      if (pathname === "/api/chat/sessions" || pathname === "/api/chat/transcript" || pathname === "/api/chat/stream") {
+        // Chat 实时流三件套：会话树（含 CreateSession 子会话）/ 一次性增量 / SSE 常驻推流。
+        // zcode 载体专属；非 zcode 载体返回空 nodes，前端回退老的账本视图。
+        if (pathname === "/api/chat/stream") {
+          if (chatStreamClients >= CHAT_STREAM_MAX) {
+            return sendJson(res, 429, { ok: false, error: "too_many_streams", message: `实时流并发已满（${CHAT_STREAM_MAX}），关掉多余的 Chat 页再试` })
+          }
+          return startChatStream(res, req, url)
+        }
+        try {
+          if (pathname === "/api/chat/sessions") return sendJson(res, 200, await chatStream.sessions())
+          if (req.method !== "GET") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
+          const conv = (url.searchParams.get("conv") || "").trim()
+          const since = Number(url.searchParams.get("since")) || 0
+          return sendJson(res, 200, await chatStream.transcript(conv, since))
+        } catch (e) {
+          return sendJson(res, 500, { ok: false, error: e.code || "chat_stream_failed", message: e.message })
+        }
       }
 
       if (pathname === "/api/rpc") {

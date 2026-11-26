@@ -195,8 +195,8 @@ class FmSidebar extends LitElement {
             </button>
             ${sessions.slice(0, 30).map((s) => html`
               <button
-                class=${"side-session" + (conv === s.convId ? " is-active" : "")}
-                title=${`${s.name} · ${s.status}`}
+                class=${"side-session" + (s.depth > 0 ? " is-child" : "") + (conv === s.convId ? " is-active" : "")}
+                title=${`${s.name} · ${s.status}${s.depth > 0 ? " · 子智能体（只读）" : ""}`}
                 @click=${() => emit(this, "chat-target", { conv: s.convId })}
               >
                 <span class=${"dot " + statusDot(s.status)}></span>
@@ -1308,11 +1308,11 @@ class FmSessionMenu extends LitElement {
           <span class="menu-arrow">›</span>
         </button>
         ${rows.slice(0, 50).map((s) => html`
-          <button class="menu-item" @click=${() => emit(this, "chat-target", { conv: s.convId })}>
+          <button class=${"menu-item" + (s.depth > 0 ? " is-child" : "")} @click=${() => emit(this, "chat-target", { conv: s.convId })}>
             <span class=${"menu-dot " + (s.status === "running" ? "on" : s.status === "error" ? "off" : "done")}></span>
             <span class="menu-main">
               <span class="menu-name">${s.name}</span>
-              <span class="menu-sub">${statusLabel[s.status] || s.status}${s.updatedAt ? ` · ${s.updatedAt.replace("T", " ").slice(5, 16)}` : ""}${s.replyTail ? ` · ${s.replyTail.slice(-60).replace(/\s+/g, " ")}` : ""}</span>
+              <span class="menu-sub">${s.depth > 0 ? "子智能体 · 只读围观 · " : ""}${statusLabel[s.status] || s.status}${s.updatedAt ? ` · ${s.updatedAt.replace("T", " ").slice(5, 16)}` : ""}</span>
             </span>
             <span class="menu-arrow">›</span>
           </button>`)}
@@ -2145,6 +2145,16 @@ class FmConsole extends LitElement {
   }
 
   async loadAgentSessions() {
+    // zcode 载体优先走实时流的会话树（含 CreateSession 子智能体）；拿不到再回退账本列表。
+    try {
+      const res = await fetch("/api/chat/sessions", { cache: "no-store" })
+      const body = await res.json()
+      if (res.ok && body.ok !== false && body.carrier === "zcode") {
+        this.agentSessions = body.nodes || []
+        this.agentCarrier = "zcode"
+        return
+      }
+    } catch {}
     try {
       const res = await fetch("/api/agent-sessions", { cache: "no-store" })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -2375,7 +2385,7 @@ class FmConsole extends LitElement {
         ${this.view === "chat"
           ? html`
               <fm-session-menu .sessions=${this.agentSessions || []} .carrier=${this.agentCarrier || ""}></fm-session-menu>
-              <fm-chat .conv=${this.chatConv || ""}></fm-chat>`
+              <fm-chat .conv=${this.chatConv || ""} .carrier=${this.agentCarrier || ""}></fm-chat>`
           : this.view === "schedules"
           ? html`<fm-schedules .schedules=${this.schedules} .workHours=${this.workHours} .busy=${this.schedBusy} .error=${this.schedError} .note=${this.schedNote}></fm-schedules>`
           : this.view === "im"
