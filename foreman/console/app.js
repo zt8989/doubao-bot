@@ -1326,46 +1326,98 @@ class FmSessionMenu extends LitElement {
   }
 }
 
-/* ---------------- IM：外部 IM 通道统一视图（飞书是当前唯一已接入的渠道） ---------------- */
+/* ---------------- IM：外部 IM 通道（左右结构：左实例列表，右详情/新建宫格） ---------------- */
+const IM_CHANNELS = [
+  { id: "feishu", name: "飞书", tag: "中国", glyph: "飞", bg: "linear-gradient(135deg, #00d6b9, #3370ff)", sub: "扫码授权，立刻出二维码。", on: true },
+  { id: "lark", name: "Lark", tag: "全球", glyph: "L", bg: "linear-gradient(135deg, #00d6b9, #3370ff)", sub: "同飞书（domain 用 lark）。", on: true },
+  { id: "wechat", name: "微信", glyph: "微", bg: "#07c160", sub: "即将支持", on: false },
+  { id: "telegram", name: "Telegram", glyph: "T", bg: "#229ed9", sub: "即将支持", on: false },
+  { id: "dingtalk", name: "钉钉", glyph: "钉", bg: "#0089ff", sub: "即将支持", on: false },
+  { id: "discord", name: "Discord", glyph: "D", bg: "#5865f2", sub: "即将支持", on: false },
+  { id: "wecom", name: "企业微信", glyph: "企", bg: "#0084ff", sub: "即将支持", on: false },
+]
+
 class FmIm extends LitElement {
   static properties = {
     feishu: { attribute: false },
     busy: { type: String },
     error: { type: String },
     note: { type: String },
+    screen: { type: String },
+  }
+  constructor() {
+    super()
+    this.screen = "detail"
   }
   createRenderRoot() {
     return this
   }
+  // 点「新建飞书/Lark」：切到详情并立刻发起扫码——二维码马上出来（凭据已在 config.json 配好的前提）。
+  openChannel(channel) {
+    this.screen = "detail"
+    emit(this, "feishu-auth-start", {})
+  }
   render() {
+    const cfg = this.feishu?.config || {}
     const gw = this.feishu?.gateway
-    const feishuOn = (this.feishu?.config?.enabled || gw?.enabled) === true
+    const on = cfg.enabled === true
+    const running = gw?.running === true
+    const detailActive = this.screen === "detail"
+    return html`
+      <div class="im-layout">
+        <aside class="im-rail">
+          <button type="button" class="im-new" @click=${() => (this.screen = "create")}>
+            <span class="im-new-plus">＋</span> 新建通道
+          </button>
+          <button
+            type="button"
+            class=${"im-item" + (detailActive ? " is-active" : "")}
+            title="飞书通道详情"
+            @click=${() => (this.screen = "detail")}
+          >
+            <span class="im-brand" style=${`background:${IM_CHANNELS[0].bg}`}>飞</span>
+            <span class="im-item-main">
+              <span class="im-item-name">飞书 <span class="im-tag">中国</span></span>
+              <span class="im-item-sub">${running ? "运行中" : on ? "已启用 · 未运行" : "未启用"}</span>
+            </span>
+            <span class=${"im-dot" + (running ? " on" : "")}></span>
+          </button>
+        </aside>
+        <div class="im-pane">
+          ${detailActive
+            ? html`<fm-feishu .feishu=${this.feishu} .busy=${this.busy} .error=${this.error} .note=${this.note}></fm-feishu>`
+            : this.renderCreate()}
+        </div>
+      </div>`
+  }
+  renderCreate() {
     return html`
       <section class="panel">
         <div class="panel-head">
-          <h2>渠道</h2>
-          <div class="panel-side"><span class="hint">外部 IM 统一入口：消息进 Inbox，回复推回原渠道</span></div>
+          <h2>新建通道</h2>
+          <div class="panel-side"><span class="hint">选一个接收消息的渠道；飞书扫码授权后立即生效</span></div>
         </div>
-        <ul class="im-channels">
-          <li class=${"im-channel" + (feishuOn ? " is-on" : "")}>
-            <span class=${"im-channel-dot " + (feishuOn ? "on" : "")}></span>
-            <span class="im-channel-name">飞书</span>
-            <span class="im-channel-sub">${feishuOn ? "已接入 · 长连接收消息" : "未启用"}</span>
-            <span class="badge self">已支持</span>
-          </li>
-          <li class="im-channel is-off">
-            <span class="im-channel-dot"></span>
-            <span class="im-channel-name">钉钉 / 企业微信</span>
-            <span class="im-channel-sub">按同一收发模式接入，暂未开发</span>
-            <span class="badge self">未接入</span>
-          </li>
-        </ul>
-      </section>
-      <fm-feishu .feishu=${this.feishu} .busy=${this.busy} .error=${this.error} .note=${this.note}></fm-feishu>`
+        <div class="im-grid">
+          ${IM_CHANNELS.map(
+            (c) => html`
+              <button
+                type="button"
+                class=${"im-card" + (c.on ? "" : " is-off")}
+                @click=${c.on ? () => this.openChannel(c) : () => {}}
+              >
+                <span class="im-brand" style=${`background:${c.bg}`}>${c.glyph}</span>
+                <span class="im-card-main">
+                  <span class="im-card-name">${c.name} ${c.tag ? html`<span class="im-tag">${c.tag}</span>` : ""}</span>
+                  <span class="im-card-sub">${c.sub}</span>
+                </span>
+              </button>`
+          )}
+        </div>
+      </section>`
   }
 }
 
-/* ---------------- 飞书渠道：配置 + 二维码/链接授权 + 运行状态 ---------------- */
+/* ---------------- 飞书详情：头部开关 + 扫码授权 + 收发配置 ---------------- */
 class FmFeishu extends LitElement {
   static properties = {
     feishu: { attribute: false },
@@ -1391,10 +1443,12 @@ class FmFeishu extends LitElement {
     const high = (this.val("high")?.value || "").split(/[\n,，;；]+/).map((s) => s.trim()).filter(Boolean)
     emit(this, "feishu-save", {
       patch: {
-        enabled: Boolean(this.val("enabled")?.checked),
         groups: { high },
       },
     })
+  }
+  toggleEnabled(e) {
+    emit(this, "feishu-save", { patch: { enabled: Boolean(e.target.checked) } })
   }
   authStart() {
     emit(this, "feishu-auth-start", {})
@@ -1420,23 +1474,26 @@ class FmFeishu extends LitElement {
       this.requestUpdate()
     }
   }
-  gatewayBadge() {
-    const gw = this.feishu?.gateway
-    if (!gw?.enabled) return html`<span class="badge self">未启用</span>`
-    return gw.running
-      ? html`<span class="badge notified">长连接已连上</span>`
-      : html`<span class="badge blocked">未运行</span>`
+  headSub(cfg, gw) {
+    const bits = []
+    bits.push(gw?.running ? "运行中 · 长连接已连上" : cfg.enabled ? "已启用 · 未运行" : "未启用")
+    const auth = this.feishu?.auth
+    if (auth?.status === "authorized" && auth.openId) bits.push(`已绑定 ${auth.userName || ""}（${auth.openId.slice(0, 10)}…）`)
+    else if ((cfg.allowUsers || []).length) bits.push(`白名单 ${cfg.allowUsers.length} 人`)
+    return bits.join(" · ")
   }
   authCard() {
     const auth = this.feishu?.auth || { status: "idle" }
+    const cfg = this.feishu?.config || {}
     if (auth.status === "pending") {
       return html`
         <div class="feishu-auth-box">
           ${this.qrData ? html`<img class="feishu-qr" src=${this.qrData} alt="飞书授权二维码" />` : html`<div class="feishu-qr feishu-qr-empty">生成二维码中…</div>`}
           <div class="feishu-auth-side">
-            <p class="hint">飞书扫一扫上方二维码，或<a href=${auth.verificationUri || auth.verificationUriComplete} target="_blank" rel="noopener">点此打开授权链接</a>。</p>
-            ${auth.userCode ? html`<p class="hint">授权码：<code>${auth.userCode}</code></p>` : ""}
-            <p class="hint is-ok">等待你确认授权…（页面可离开，结果稍后回填）</p>
+            <p class="hint">用飞书扫码并确认授权。</p>
+            ${auth.userCode ? html`<div class="feishu-code"><code>${auth.userCode}</code></div>` : ""}
+            <p class="hint is-ok">⟳ 等待确认…（页面可离开，结果稍后回填）</p>
+            <p class="hint">或<a href=${auth.verificationUri || auth.verificationUriComplete} target="_blank" rel="noopener">点此打开授权链接</a></p>
           </div>
         </div>`
     }
@@ -1446,8 +1503,8 @@ class FmFeishu extends LitElement {
           <div class="feishu-auth-side">
             <p class="hint is-ok">授权成功：${auth.userName || "飞书用户"}（<code>${auth.openId}</code>）</p>
             <p class="hint">把 TA 加进私聊白名单，机器人才能收到 TA 的私聊消息。</p>
-            <button type="button" class="ghost" ?disabled=${this.busy !== "" || (this.feishu?.config?.allowUsers || []).includes(auth.openId)} @click=${() => this.authAddUser()}>
-              ${(this.feishu?.config?.allowUsers || []).includes(auth.openId) ? "已在白名单" : "加入私聊白名单"}
+            <button type="button" class="ghost" ?disabled=${this.busy !== "" || (cfg.allowUsers || []).includes(auth.openId)} @click=${() => this.authAddUser()}>
+              ${(cfg.allowUsers || []).includes(auth.openId) ? "已在白名单" : "加入私聊白名单"}
             </button>
           </div>
         </div>`
@@ -1456,12 +1513,12 @@ class FmFeishu extends LitElement {
     return html`
       <div class="feishu-auth-box">
         <div class="feishu-auth-side">
-          <p class="hint">用设备授权（openclaw 同款）：不用配置回调地址，扫码或点链接确认后自动拿授权人 open_id。</p>
+          <p class="hint">设备授权（openclaw 同款）：不用配置回调地址，扫码或点链接确认后自动拿授权人 open_id。</p>
           ${failed ? html`<p class="hint is-error">${auth.error || "授权未完成"}</p>` : ""}
+          ${!cfg.appId ? html`<p class="hint is-error">应用凭据未配置：在 <code>~/.foreman/config.json</code> 的 <code>feishu.appId / appSecret</code> 里填一次（企业自建应用，长连接订阅 + im.message.receive_v1 权限），之后扫码全程不用填。</p>` : ""}
           <button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.authStart()}>
-            ${failed ? "重新发起授权" : "发起扫码授权"}
+            ${failed ? "重新发起授权" : this.busy === "auth" ? "发起中…" : "扫码"}
           </button>
-          <p class="hint">${this.busy === "auth" ? "发起中…" : (this.feishu?.config?.appId || "") ? "扫码或点链接确认，全程不用填凭据" : "应用凭据未配置：先在 config.json 的 feishu 段填 appId/appSecret（一次性）"}</p>
         </div>
       </div>`
   }
@@ -1471,165 +1528,50 @@ class FmFeishu extends LitElement {
     const high = (cfg.groups?.high || []).join("\n")
     return html`
       <section class="panel">
-        <div class="panel-head">
-          <h2>飞书通道</h2>
-          <div class="panel-side">
-            ${this.gatewayBadge()}
-            ${gw?.enabled ? html`<span class="hint">收 ${gw.accepted ?? 0} · 拒 ${gw.rejected ?? 0} · 重 ${gw.duplicates ?? 0}${gw.lastInboundAt ? ` · 最近消息 ${gw.lastInboundAt.replace("T", " ").slice(5, 16)}` : ""}</span>` : ""}
+        <div class="panel-head im-detail-head">
+          <div class="im-detail-title">
+            <span class="im-brand" style=${`background:${IM_CHANNELS[0].bg}`}>飞</span>
+            <div>
+              <h2>飞书 <span class="im-tag">中国</span></h2>
+              <div class="im-detail-sub">${this.headSub(cfg, gw)}</div>
+            </div>
           </div>
+          <label class="im-switch" title="启用/停用飞书通道">
+            <input type="checkbox" .checked=${cfg.enabled === true} @change=${this.toggleEnabled} />
+            <span></span>
+          </label>
         </div>
         ${this.error ? html`<div class="sched-error">${this.error}</div>` : ""}
         ${this.note ? html`<div class="sched-note schedule-message">${this.note}</div>` : ""}
-        ${this.feishu?.error && !this.feishu?.gateway?.running && cfg.enabled ? html`<div class="sched-error">通道启动失败：${this.feishu.error}</div>` : ""}
-        <form class="feishu-form" @submit=${(e) => e.preventDefault()}>
-          <label>
-            <span class="feishu-toggle">
-              <input type="checkbox" data-feishu-field="enabled" .checked=${cfg.enabled === true} />
-              启用飞书通道（长连接收消息，回复经 Outbox lark 推回）
-            </span>
-          </label>
-          <label>
-            应用凭据
-            <span class="hint">${cfg.appId ? html`已配置（<code>${cfg.appId.slice(0, 10)}…</code>），扫码授权直接可用` : html`<b>未配置</b>：在 <code>~/.foreman/config.json</code> 的 <code>feishu.appId / appSecret</code> 里填一次（企业自建应用，长连接订阅 + im.message.receive_v1 权限），之后只用扫码，界面不再填凭据`}</span>
-          </label>
-          <label>
-            高优群（每行一个 chat_id，全收）
-            <textarea data-feishu-field="high" rows="3" spellcheck="false" .value=${high} placeholder="oc_xxxxxxxx"></textarea>
-            <small>低优群（只有 @机器人 才收）、私聊白名单、botName 等其余配置一律走 config.json 默认，不在界面上改。</small>
-          </label>
-          <div class="schedule-form-actions">
-            <button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.save()}>${this.busy === "save" ? "保存中…" : "保存并当场生效"}</button>
+        ${this.feishu?.error && !gw?.running && cfg.enabled ? html`<div class="sched-error">通道启动失败：${this.feishu.error}</div>` : ""}
+        <div class="im-section">
+          <div class="im-section-head">
+            <div>
+              <h3>扫码授权</h3>
+              <p class="hint">用飞书扫码并确认，授权人一键进私聊白名单。</p>
+            </div>
+            ${this.feishu?.auth?.status !== "pending" ? html`<button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.authStart()}>扫码</button>` : ""}
           </div>
-        </form>
-      </section>
-      <section class="panel">
-        <div class="panel-head">
-          <h2>扫码授权</h2>
-          <div class="panel-side"><span class="hint">授权结果只用来拿你的 open_id（填私聊白名单），token 不落盘</span></div>
+          ${this.authCard()}
         </div>
-        ${this.authCard()}
-      </section>`
-  }
-}
-
-/* ---------------- 项目面板：编辑/添加产品与工程，改基线当场生效 ---------------- */
-class FmProjects extends LitElement {
-  static properties = {
-    projects: { attribute: false },
-    busy: { type: String },
-    error: { type: String },
-    note: { type: String },
-    warnings: { attribute: false },
-  }
-  createRenderRoot() {
-    return this
-  }
-  // 表单值直接绑在加载快照 this.draft 上（深拷贝），输入框 @input 就地改，保存整体提交。
-  setDraft(products) {
-    this.draft = JSON.parse(JSON.stringify(products || []))
-    this.requestUpdate()
-  }
-  willUpdate(changed) {
-    super.willUpdate?.(changed)
-    // 面板 prop 更新（初次加载/保存回填）时刷新编辑草稿；没动过的字段继续用本地草稿。
-    if (changed.has("projects") && this.projects) {
-      if (!this.draft || this.busy === "") this.setDraft(this.projects.products)
-    }
-  }
-  field(pi, ri, key) {
-    return this.querySelector(`[data-proj-field="${pi}-${ri}-${key}"]`)
-  }
-  pfield(pi, key) {
-    return this.querySelector(`[data-proj-pfield="${pi}-${key}"]`)
-  }
-  addRepo(pi) {
-    this.draft[pi].repos.push({ repo: "", dir: "", base: "", verify: [] })
-    this.requestUpdate()
-  }
-  removeRepo(pi, ri) {
-    this.draft[pi].repos.splice(ri, 1)
-    this.requestUpdate()
-  }
-  addProduct() {
-    this.draft.push({ name: "", projectDir: "", repos: [] })
-    this.requestUpdate()
-  }
-  removeProduct(pi) {
-    this.draft.splice(pi, 1)
-    this.requestUpdate()
-  }
-  // 收集表单：只覆盖 name/projectDir/repo/dir/base 四个界面字段，
-  // verify/worktreeHook/promptFile/mergePromptFile 等不进表单的字段原样保留。
-  collect() {
-    return this.draft.map((p, pi) => ({
-      ...p,
-      name: (this.pfield(pi, "name")?.value || "").trim(),
-      projectDir: (this.pfield(pi, "projectDir")?.value || "").trim(),
-      repos: p.repos.map((r, ri) => ({
-        ...r,
-        repo: (this.field(pi, ri, "repo")?.value || "").trim(),
-        dir: (this.field(pi, ri, "dir")?.value || "").trim(),
-        base: (this.field(pi, ri, "base")?.value || "").trim(),
-      })),
-    }))
-  }
-  save() {
-    if (this.busy) return
-    emit(this, "projects-save", { products: this.collect() })
-  }
-  render() {
-    if (!Array.isArray(this.draft)) this.draft = JSON.parse(JSON.stringify(this.projects || []))
-    return html`
-      <section class="panel">
-        <div class="panel-head">
-          <h2>项目与工程</h2>
-          <div class="panel-side"><span class="hint">保存即写回 config.json 并当场生效，不用重启服务</span></div>
+        <div class="im-section">
+          <div class="im-section-head">
+            <div>
+              <h3>收发配置</h3>
+              <p class="hint">高优群全收；低优群、botName 等其余一律走 config.json 默认，不在界面上改。</p>
+            </div>
+          </div>
+          <form class="feishu-form" @submit=${(e) => e.preventDefault()}>
+            <label>
+              高优群（每行一个 chat_id，全收）
+              <textarea data-feishu-field="high" rows="3" spellcheck="false" .value=${high} placeholder="oc_xxxxxxxx"></textarea>
+            </label>
+            <div class="schedule-form-actions">
+              <button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.save()}>${this.busy === "save" ? "保存中…" : "保存并当场生效"}</button>
+            </div>
+          </form>
         </div>
-        ${this.error ? html`<div class="sched-error">${this.error}</div>` : ""}
-        ${this.note ? html`<div class="sched-note schedule-message">${this.note}</div>` : ""}
-        ${(this.warnings || []).length ? html`
-          <div class="projects-warnings">
-            ${(this.warnings || []).map((w) => html`<div class="sched-note schedule-message">⚠ ${w}</div>`)}
-          </div>` : ""}
-        <div class="projects-list">
-          ${(this.draft || []).map((p, pi) => html`
-            <div class="projects-product">
-              <div class="projects-product-head">
-                <label>
-                  产品名
-                  <input type="text" data-proj-pfield=${`${pi}-name`} .value=${p.name || ""} placeholder="win-ai-stack" />
-                </label>
-                <label>
-                  projectDir
-                  <input type="text" data-proj-pfield=${`${pi}-projectDir`} .value=${p.projectDir || ""} placeholder="~/Documents/workspace/…" />
-                </label>
-                <button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.removeProduct(pi)}>删产品</button>
-              </div>
-              <table class="tasks queue-table projects-table">
-                <thead>
-                  <tr><th class="col-repo">仓库（owner/name）</th><th class="col-dir">本地 clone 路径</th><th class="col-base">基线分支 base</th><th class="col-detail"></th></tr>
-                </thead>
-                <tbody>
-                  ${(p.repos || []).map((r, ri) => html`
-                    <tr>
-                      <td><input type="text" data-proj-field=${`${pi}-${ri}-repo`} .value=${r.repo || ""} placeholder="acme/repo" /></td>
-                      <td><input type="text" data-proj-field=${`${pi}-${ri}-dir`} .value=${r.dir || ""} placeholder="~/path/to/clone" /></td>
-                      <td><input type="text" data-proj-field=${`${pi}-${ri}-base`} .value=${r.base || ""} placeholder="sit-20261217" /></td>
-                      <td><button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.removeRepo(pi, ri)}>删</button></td>
-                    </tr>`)}
-                  ${(p.repos || []).length ? "" : html`<tr><td colspan="4" class="projects-empty">还没有工程——先加一条</td></tr>`}
-                </tbody>
-              </table>
-              <div class="projects-repo-actions">
-                <button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.addRepo(pi)}>+ 新增工程</button>
-              </div>
-            </div>`)}
-        </div>
-        <div class="schedule-form-actions">
-          <button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.addProduct()}>+ 新增产品</button>
-          <button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.save()}>${this.busy === "save" ? "保存中…" : "保存并当场生效"}</button>
-        </div>
-        <p class="hint projects-hint">改基线只影响之后新建的工作区；在途工单仍按账本里记录的旧基线走，保存后会在上方列出受影响工单。删除有在途工单的工程要二次确认。</p>
+        ${gw?.enabled ? html`<div class="im-section im-stats">收 ${gw.accepted ?? 0} · 拒 ${gw.rejected ?? 0} · 重 ${gw.duplicates ?? 0}${gw.lastInboundAt ? ` · 最近消息 ${gw.lastInboundAt.replace("T", " ").slice(5, 16)}` : ""}</div>` : ""}
       </section>`
   }
 }
