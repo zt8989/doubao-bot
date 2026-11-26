@@ -322,7 +322,7 @@ function authFetch(routes) {
 test("FeishuAuth：无凭据拒绝发起；设备流 pending → authorized（带 open_id/名字）", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-feishu-auth-"))
   const auth = new FeishuAuth({ cfg: { feishu: {} }, log: () => {} })
-  await assert.rejects(() => auth.start(), /先保存 appId\/appSecret/)
+  await assert.rejects(() => auth.start(), /凭据未配置/)
 
   const auth2 = new FeishuAuth({
     cfg: { feishu: feishuCfg() },
@@ -480,4 +480,9 @@ test("/api/feishu：GET 读配置与状态，POST 保存/校验失败返回 400"
     await server.close()
     fs.rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test("FeishuGateway.start：无凭据明确报错，不进 SDK 也不触网", async () => {
+  const gw = new FeishuGateway({ cfg: { feishu: feishuCfg({ appId: "", appSecret: "" }) }, ctx: {}, log: () => {} })
+  await assert.rejects(() => gw.start(), /凭据未配置/)
 })

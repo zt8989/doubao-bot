@@ -128,8 +128,8 @@ function navIcon(id) {
   if (id === "schedules") {
     return html`<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2M8 2l-2 2M16 2l2 2"/></svg>`
   }
-  if (id === "feishu") {
-    return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l-4 6h4l-9 12 3-9H5l1-9zM14 15h5l-3 6h-3l2-6z"/></svg>`
+  if (id === "im") {
+    return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h9v6H4zM11 10h9v6h-5l-4 4v-4H11z"/></svg>`
   }
   return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h12M8 12h12M8 18h12"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></svg>`
 }
@@ -154,7 +154,7 @@ class FmSidebar extends LitElement {
       { id: "tasks", label: "Tasks" },
       { id: "sessions", label: "Sessions" },
       { id: "schedules", label: "Schedule" },
-      { id: "feishu", label: "飞书" },
+      { id: "im", label: "IM" },
       { id: "operations", label: "操作日志" },
     ]
     const sessions = this.agentSessions || []
@@ -262,7 +262,7 @@ class FmHead extends LitElement {
               <h2>Chat</h2>
             </div>`
           : html`<div class="topbar-title">
-              <h2>${({ inbox: "Inbox", outbox: "Outbox", tasks: "Tasks", sessions: "智能体会话", schedules: "Schedule", feishu: "飞书通道", operations: "操作日志" })[this.view] || "Foreman"}</h2>
+              <h2>${({ inbox: "Inbox", outbox: "Outbox", tasks: "Tasks", sessions: "智能体会话", schedules: "Schedule", im: "IM 通道", operations: "操作日志" })[this.view] || "Foreman"}</h2>
             </div>`}
         <div class="meta">
           ${this.view === "chat" ? html`
@@ -1322,19 +1322,56 @@ class FmSessionMenu extends LitElement {
   }
 }
 
-/* ---------------- 飞书通道：配置 + 二维码/链接授权 + 运行状态 ---------------- */
+/* ---------------- IM：外部 IM 通道统一视图（飞书是当前唯一已接入的渠道） ---------------- */
+class FmIm extends LitElement {
+  static properties = {
+    feishu: { attribute: false },
+    busy: { type: String },
+    error: { type: String },
+    note: { type: String },
+  }
+  createRenderRoot() {
+    return this
+  }
+  render() {
+    const gw = this.feishu?.gateway
+    const feishuOn = (this.feishu?.config?.enabled || gw?.enabled) === true
+    return html`
+      <section class="panel">
+        <div class="panel-head">
+          <h2>渠道</h2>
+          <div class="panel-side"><span class="hint">外部 IM 统一入口：消息进 Inbox，回复推回原渠道</span></div>
+        </div>
+        <ul class="im-channels">
+          <li class=${"im-channel" + (feishuOn ? " is-on" : "")}>
+            <span class=${"im-channel-dot " + (feishuOn ? "on" : "")}></span>
+            <span class="im-channel-name">飞书</span>
+            <span class="im-channel-sub">${feishuOn ? "已接入 · 长连接收消息" : "未启用"}</span>
+            <span class="badge self">已支持</span>
+          </li>
+          <li class="im-channel is-off">
+            <span class="im-channel-dot"></span>
+            <span class="im-channel-name">钉钉 / 企业微信</span>
+            <span class="im-channel-sub">按同一收发模式接入，暂未开发</span>
+            <span class="badge self">未接入</span>
+          </li>
+        </ul>
+      </section>
+      <fm-feishu .feishu=${this.feishu} .busy=${this.busy} .error=${this.error} .note=${this.note}></fm-feishu>`
+  }
+}
+
+/* ---------------- 飞书渠道：配置 + 二维码/链接授权 + 运行状态 ---------------- */
 class FmFeishu extends LitElement {
   static properties = {
     feishu: { attribute: false },
     busy: { type: String },
     error: { type: String },
     note: { type: String },
-    showSecret: { type: Boolean },
     qrData: { type: String },
   }
   constructor() {
     super()
-    this.showSecret = false
     this.qrData = ""
     this._qrFor = ""
   }
@@ -1344,14 +1381,13 @@ class FmFeishu extends LitElement {
   val(name) {
     return this.querySelector(`[data-feishu-field="${name}"]`)
   }
+  // 凭据（appId/appSecret）不在界面上填：config.json 的 feishu 段配一次，之后只用扫码。
   save() {
     if (this.busy) return
     const high = (this.val("high")?.value || "").split(/[\n,，;；]+/).map((s) => s.trim()).filter(Boolean)
     emit(this, "feishu-save", {
       patch: {
         enabled: Boolean(this.val("enabled")?.checked),
-        appId: this.val("appId")?.value.trim() || "",
-        appSecret: this.val("appSecret")?.value.trim() || "",
         groups: { high },
       },
     })
@@ -1421,7 +1457,7 @@ class FmFeishu extends LitElement {
           <button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.authStart()}>
             ${failed ? "重新发起授权" : "发起扫码授权"}
           </button>
-          <p class="hint">${this.busy === "auth" ? "发起中…" : "需要先保存 appId/appSecret"}</p>
+          <p class="hint">${this.busy === "auth" ? "发起中…" : (this.feishu?.config?.appId || "") ? "扫码或点链接确认，全程不用填凭据" : "应用凭据未配置：先在 config.json 的 feishu 段填 appId/appSecret（一次性）"}</p>
         </div>
       </div>`
   }
@@ -1449,16 +1485,8 @@ class FmFeishu extends LitElement {
             </span>
           </label>
           <label>
-            App ID
-            <input data-feishu-field="appId" spellcheck="false" .value=${cfg.appId || ""} placeholder="cli_xxxxxxxxxxxxxxxx" />
-            <small>飞书开放平台企业自建应用；「事件与回调」订阅方式选<b>使用长连接接收事件</b>，订阅 im.message.receive_v1，开通机器人消息权限后发布。</small>
-          </label>
-          <label>
-            App Secret
-            <span class="feishu-secret-row">
-              <input data-feishu-field="appSecret" .type=${this.showSecret ? "text" : "password"} spellcheck="false" .value=${cfg.appSecret || ""} />
-              <button type="button" class="ghost" @click=${() => { this.showSecret = !this.showSecret }}>${this.showSecret ? "隐藏" : "显示"}</button>
-            </span>
+            应用凭据
+            <span class="hint">${cfg.appId ? html`已配置（<code>${cfg.appId.slice(0, 10)}…</code>），扫码授权直接可用` : html`<b>未配置</b>：在 <code>~/.foreman/config.json</code> 的 <code>feishu.appId / appSecret</code> 里填一次（企业自建应用，长连接订阅 + im.message.receive_v1 权限），之后只用扫码，界面不再填凭据`}</span>
           </label>
           <label>
             高优群（每行一个 chat_id，全收）
@@ -1627,8 +1655,8 @@ class FmConsole extends LitElement {
       if (this.view === "schedules") this.loadSchedules()
       if (this.view === "operations") this.loadOperations()
       if (this.view === "sessions") this.loadAgentSessions()
-      // 飞书面板：进视图拉一次配置与通道/授权状态。
-      if (this.view === "feishu") this.loadFeishu()
+      // IM 面板：进视图拉一次各通道配置与状态（飞书是当前唯一已接入的通道）。
+      if (this.view === "im") this.loadFeishu()
       // Chat 视图侧边栏的会话列表也用同一份账本数据。
       if (this.view === "chat") this.loadAgentSessions()
     }
@@ -2196,8 +2224,8 @@ class FmConsole extends LitElement {
               <fm-chat .conv=${this.chatConv || ""}></fm-chat>`
           : this.view === "schedules"
           ? html`<fm-schedules .schedules=${this.schedules} .workHours=${this.workHours} .busy=${this.schedBusy} .error=${this.schedError} .note=${this.schedNote}></fm-schedules>`
-          : this.view === "feishu"
-          ? html`<fm-feishu .feishu=${this.feishu} .busy=${this.feishuBusy} .error=${this.feishuError} .note=${this.feishuNote}></fm-feishu>`
+          : this.view === "im"
+          ? html`<fm-im .feishu=${this.feishu} .busy=${this.feishuBusy} .error=${this.feishuError} .note=${this.feishuNote}></fm-im>`
           : this.view === "operations"
           ? html`<fm-operations .operations=${this.operations} .filter=${this.opFilter} .page=${this.opPage}></fm-operations>`
           : this.view === "sessions"
@@ -2270,6 +2298,7 @@ customElements.define("fm-pagination", FmPagination)
 customElements.define("fm-tasks", FmTasks)
 customElements.define("fm-queue", FmQueue)
 customElements.define("fm-schedules", FmSchedules)
+customElements.define("fm-im", FmIm)
 customElements.define("fm-feishu", FmFeishu)
 customElements.define("fm-operations", FmOperations)
 customElements.define("fm-agent-sessions", FmAgentSessions)

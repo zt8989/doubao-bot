@@ -106,6 +106,8 @@ export class FeishuGateway {
 
   async start() {
     const { appId, appSecret } = this.feishuCfg
+    // 凭据不在界面填（config.json feishu 段一次性配置）：没配就明确报错，别让 SDK 自己吐晦涩日志。
+    if (!appId || !appSecret) throw new Error("飞书应用凭据未配置：在 config.json 的 feishu.appId/appSecret 里填一次（之后只用扫码授权）")
     const domain = this.feishuCfg.domain === "lark" ? Domain.Lark : Domain.Feishu
     // 自定义 logger 只留 error：SDK 的 info/warn 会把横幅刷进 service.log / stdout。
     const logger = { info: () => {}, warn: () => {}, error: (...args) => this.log(`飞书 WS 错误：${args.join(" ")}`) }

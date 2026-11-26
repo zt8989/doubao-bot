@@ -158,9 +158,12 @@ foreman outbox run                 # 排障时手动消费一轮
 
 ### 飞书通道：IM 消息进 Inbox，回复推回（openclaw 式）
 
-控制台侧边栏「飞书」页可直接配置：**启用开关、App ID/Secret、高优群、保存当场生效**，
-并提供**扫码/链接授权**（openclaw 同款设备授权流：二维码 + 授权链接，授权后一键把授权人
-open_id 填进私聊白名单，token 不落盘）。其余配置（低优群、botName、回复轮询间隔等）一律走
+控制台侧边栏「**IM**」是外部 IM 的统一入口，飞书是当前唯一已接入的渠道（钉钉/企微按同一模式后补）。
+飞书页只做三件事：**启用开关、高优群、扫码授权**——**App ID/Secret 不在界面上填**：
+在 `config.json` 的 `feishu.appId / appSecret` 里配一次（企业自建应用，长连接订阅 +
+`im.message.receive_v1` 权限），之后授权、收发全走扫码，保存当场生效。
+扫码授权是 openclaw 同款设备授权流（二维码 + 授权链接），授权后一键把授权人
+open_id 填进私聊白名单，token 不落盘。其余配置（低优群、botName、回复轮询间隔等）一律走
 `config.json` 默认值，界面不改；保存时这些键原样保留。对应 HTTP：`GET/POST /api/feishu`、
 `GET /api/feishu/auth`、`POST /api/feishu/auth/start`。
 

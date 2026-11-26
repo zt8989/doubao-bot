@@ -39,7 +39,7 @@ export class FeishuAuth {
 
   async start() {
     const fc = this.feishuCfg()
-    if (!fc.appId || !fc.appSecret) throw new Error("先保存 appId/appSecret 再发起授权")
+    if (!fc.appId || !fc.appSecret) throw new Error("飞书应用凭据未配置：在 config.json 的 feishu.appId/appSecret 里填一次（之后只用扫码授权）")
     const hosts = OAUTH_HOSTS[fc.domain === "lark" ? "lark" : "feishu"]
     const basic = Buffer.from(`${fc.appId}:${fc.appSecret}`).toString("base64")
     const body = new URLSearchParams({ client_id: fc.appId, scope: "offline_access contact:user.base:readonly" })
