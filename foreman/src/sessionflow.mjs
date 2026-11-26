@@ -5,6 +5,7 @@
 import fs from "node:fs"
 import { Book } from "./book.mjs"
 import { builtinPrompt } from "./builtin-prompts.mjs"
+import { repoWorkDir } from "./config.mjs"
 import { nowIso, expandHome } from "./util.mjs"
 import { originalAgentDocs, resume, withAgentDocs } from "./prompts.mjs"
 import { prMerged } from "./workflow/cleaners.mjs"
@@ -139,7 +140,9 @@ export async function ensureIssueOrchestrator(ctx, { issueKey, repoCfg = null, i
     prompt = `${prompt}\n\n---\n\n${ticketText({ repo: repoCfg.repo, issue, fresh })}`
   }
   const noWait = cfg?.sessionFlow?.waitFirstReply !== true
-  const out = await dws.openNew({ name, prompt, noWait })
+  // 会话真实 cwd 跟工单仓库走（repos[].dir，products 摊平后 cfg.repos 就有）：编码 sub agent
+  // 继承编排会话的 cwd，工单在哪个仓库活就得在哪个仓库干——绝不能落 foreman 进程自己的 cwd。
+  const out = await dws.openNew({ name, prompt, noWait, repo: repoWorkDir(cfg, repoCfg?.repo ?? prev.repo ?? "") })
   const convId = String(out?.convId ?? "").trim()
   if (!convId) throw new Error(`工单编排会话 ${name} 没返回会话 id，不能安全绑定`)
   const number = Number(key.split("#")[1] ?? 0) || null

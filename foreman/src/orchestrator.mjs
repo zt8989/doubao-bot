@@ -17,6 +17,7 @@ import {
   worktreeRemove,
 } from "./gitx.mjs"
 import { decisionKickoff, doneComment, holdComment, issueBranch, kickoff, originalAgentDocs, prBody, resume, withAgentDocs } from "./prompts.mjs"
+import { repoWorkDir } from "./config.mjs"
 import { findWorkspace, reposForIssue, workspacePath } from "./workspaces.mjs"
 import { Book } from "./book.mjs"
 import { startOperation, finishOperation } from "./operations.mjs"
@@ -376,6 +377,7 @@ export async function handleIssue(ctx, repoCfg, summary) {
         name: agentName,
         prompt: kickoffText,
         noWait: true,
+        repo: repoWorkDir(cfg, repoCfg.repo),
       })
       convId = String(opened?.convId ?? "").trim()
     } else {

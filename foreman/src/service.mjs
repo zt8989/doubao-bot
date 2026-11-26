@@ -39,7 +39,7 @@ import { OutboxStore, OutboxDispatcher } from "./core/outbox.mjs"
 import { enqueueOutbound } from "./outbound.mjs"
 import { LarkDriver } from "./lark.mjs"
 import { listSchedules, applySchedules, createAgentSchedule, firstRunAt, customAgentSchedules, hydrateSchedules, scheduleDefinitions, saveScheduleSettings } from "./core/schedules.mjs"
-import { DEFAULTS, agentScheduleCwd, normalizeFeishuSection, normalizeProducts, persistAgent } from "./config.mjs"
+import { DEFAULTS, agentScheduleCwd, normalizeFeishuSection, normalizeProducts, persistAgent, repoWorkDir } from "./config.mjs"
 import { normalizeEventEnvelope } from "./core/schedule-events.mjs"
 import { runConfiguredScript } from "./core/executors.mjs"
 import { startOperation, finishOperation } from "./operations.mjs"
@@ -215,7 +215,7 @@ export async function deliverNewSession(ctx, { text = "", kind = "", repo = "", 
   const key = watcher?.issueKey || repo || ""
   const op = startOperation(ctx, "deliver", `投递${kind || "通知"}`, { key, detail: name })
   try {
-    const out = await dws.openNew({ name, prompt, noWait })
+    const out = await dws.openNew({ name, prompt, noWait, repo: repoWorkDir(cfg, repo || watcher?.repo || "") })
     const convId = String(out?.convId ?? "").trim()
     // notice 记触发类型：「PR待合并」会话核对后直接执行 foreman pr merge，不交 RESULT。
     // 「合并完成」那类会话只做汇报，不再触发一次合并。
@@ -1143,7 +1143,8 @@ ${String(item.prompt ?? "").trim()}
     const stamp = `${at.getFullYear()}${pad(at.getMonth() + 1)}${pad(at.getDate())}-${pad(at.getHours())}${pad(at.getMinutes())}`
     const session = `foreman-${item.id}-${stamp}`
     try {
-      const delivered = await ctx.dws.openNew({ name: session, prompt: agentSchedulePrompt(item, session, at), noWait: true })
+      // cwd 跟配置走（agentScheduleCwd）：提示词里宣称的工作目录必须是会话真实 cwd。
+      const delivered = await ctx.dws.openNew({ name: session, prompt: agentSchedulePrompt(item, session, at), noWait: true, repo: agentScheduleCwd(item.cwd) })
       if (delivered?.ok === false) throw new Error(delivered.error || `Agent 定时任务 ${item.id} 投递失败`)
       runtime.lastAt = nowIso()
       runtime.count++

@@ -23,7 +23,7 @@ function tmpConfig(obj) {
 }
 
 // herdr 载体的适配器：假 herdr CLI + 假 runtime，状态隔离到临时目录。
-function makeHerdrAdapter({ logs, workMs, block, goneMs, zcodeMode } = {}) {
+function makeHerdrAdapter({ logs, workMs, block, goneMs, zcodeMode, fallbackDir } = {}) {
   const dir = tmpDir()
   const got = logs ?? []
   const stateFile = path.join(dir, "herdr-fake-state.json")
@@ -45,7 +45,7 @@ function makeHerdrAdapter({ logs, workMs, block, goneMs, zcodeMode } = {}) {
     cfg: {
       stateFile: path.join(dir, "state.json"),
       agent: "zcode",
-      zcode: { bin: `node ${RUNTIME_FAKE}`, ledger: path.join(dir, "zcode-sessions.json"), ...(zcodeMode !== undefined ? { mode: zcodeMode } : {}) },
+      zcode: { bin: `node ${RUNTIME_FAKE}`, ledger: path.join(dir, "zcode-sessions.json"), fallbackDir: fallbackDir ?? path.join(dir, "no-project"), ...(zcodeMode !== undefined ? { mode: zcodeMode } : {}) },
       herdr: { bin: `node ${HERDR_FAKE}`, enabled: true },
     },
     log: (m) => got.push(m),
@@ -258,6 +258,31 @@ test("herdr agent 消失（TUI 退出）：续说报 agent_gone，不再把消�
   }
 })
 
+test("herdr cwd 口径：deliver 带 repo 用 repo，不带落兜底目录（绝不进程 cwd）", async () => {
+  const { adapter, dir, cleanup } = makeHerdrAdapter({ workMs: 200 })
+  try {
+    const repoDir = path.join(dir, "repo-checkout")
+    fs.mkdirSync(repoDir, { recursive: true })
+    const out = await adapter.deliver({ name: "带仓会话", prompt: "开场", repo: repoDir })
+    for (let i = 0; i < 40; i++) {
+      if (adapter.driver.resolve(out.convId)?.paneId) break
+      await new Promise((r) => setTimeout(r, 250))
+    }
+    assert.equal(adapter.driver.resolve(out.convId).cwd, repoDir)
+
+    // 不带 repo：落 zcode.fallbackDir（测试里指 tmp），绝不落 foreman 进程的 process.cwd()
+    const out2 = await adapter.deliver({ name: "兜底会话", prompt: "开场" })
+    for (let i = 0; i < 40; i++) {
+      if (adapter.driver.resolve(out2.convId)?.paneId) break
+      await new Promise((r) => setTimeout(r, 250))
+    }
+    assert.equal(adapter.driver.resolve(out2.convId).cwd, path.join(dir, "no-project"))
+    assert.notEqual(adapter.driver.resolve(out2.convId).cwd, process.cwd())
+  } finally {
+    cleanup()
+  }
+})
+
 test("herdr stop：给 working 的 pane 发 escape 打断", async () => {
   const { adapter, cleanup } = makeHerdrAdapter({ workMs: 60000 })
   try {
@@ -334,5 +359,5 @@ test("配置：agent 只认 noop/dws/zcode，默认 noop，写错兜底 noop；z
   assert.equal(loadConfig(tmpConfig({ agent: "noop" })).agent, "noop")
   assert.equal(loadConfig(tmpConfig({ agent: "豆包" })).agent, "noop")
   const cfg = loadConfig(tmpConfig({ agent: "zcode" }))
-  assert.deepEqual(cfg.zcode, { bin: "", ledger: "", tuiBin: "", mode: "yolo" })
+  assert.deepEqual(cfg.zcode, { bin: "", ledger: "", tuiBin: "", mode: "yolo", fallbackDir: "" })
 })

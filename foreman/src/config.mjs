@@ -30,8 +30,9 @@ export const DEFAULTS = {
   // bin 显式配置 zcode 命令；tuiBin 显式配置 herdr pane 里跑的 runtime（留空自动推导
   // `node <vendor>/zcode.cjs`——启动器 bin/zcode.js 在 herdr PTY 里会卡死 TUI，必须绕开）；
   // mode 权限模式拼进 TUI 启动命令（默认 yolo，foreman 的会话要无人值守跑完，别停在权限确认）；
+  // fallbackDir 会话没带 repo 时的兜底工作目录（无项目目录，绝不落 foreman 进程自己的 cwd）；
   // ledger 会话账本路径（留空放 stateFile 同目录的 zcode-sessions.json）。
-  zcode: { bin: "", ledger: "", tuiBin: "", mode: "yolo" },
+  zcode: { bin: "", ledger: "", tuiBin: "", mode: "yolo", fallbackDir: "" },
   herdr: { bin: "herdr", enabled: true },
   // Gitea REST：baseUrl 用于控制台拼链接；令牌实际由 gitea 包按 ~/.foreman/gitea-token 解析。
   gitea: { baseUrl: "http://106.54.199.229:3000", tokenFile: "~/.foreman/gitea-token" },
@@ -298,6 +299,14 @@ export function normalizeRepos(cfg) {
       labels: r.labels ?? null,
     }
   })
+}
+
+// 工单仓库（owner/name）→ 本地目录：会话的真实 cwd 用（zcode 载体开 herdr workspace 时 --cwd）。
+// 没配映射给空串，由调用方决定兜底（zcode 载体兜底无项目目录，绝不落 foreman 自己的进程 cwd）。
+export function repoWorkDir(cfg, repo = "") {
+  const key = String(repo ?? "").trim()
+  if (!key) return ""
+  return String((cfg.repos ?? []).find((r) => r.repo === key)?.dir ?? "")
 }
 
 // 飞书通道归一：enabled 只要求凭据；私聊留空放行、群默认 @ 响应，不需要再配入口名单。
@@ -591,6 +600,8 @@ export function loadConfig(explicit, env = process.env) {
     throw new Error(`配置项 zcode.mode 只能是 build/edit/plan/yolo/guarded，现在是：${cfg.zcode.mode}`)
   }
   cfg.zcode.mode = zMode
+  // 兜底工作目录：支持 ~；留空由 zcode 驱动用自己的无项目目录常量。
+  cfg.zcode.fallbackDir = expandHome(String(cfg.zcode?.fallbackDir ?? "").trim())
 
   // 产品分组：每个产品 = 一套 repos + 自己的 promptFile / projectDir（留空回落顶层 deliver）。
   // cfg.repos 一律摊平成产品仓库的并集，后续捞单/PR 扫描不用区分来源。

@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { loadConfig, persistAgent, DEFAULT_EXCLUDE } from "../src/config.mjs"
+import { loadConfig, persistAgent, DEFAULT_EXCLUDE, repoWorkDir } from "../src/config.mjs"
 
 function tmpConfig(obj) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-cfg-"))
@@ -233,4 +233,25 @@ test("persistAgent：只改 agent 键，其余配置原样保留；configPath �
   const written2 = persistAgent(cfg2, "noop")
   assert.equal(written2, cfg2.configFile)
   assert.equal(JSON.parse(fs.readFileSync(cfg2.configFile, "utf8")).agent, "noop")
+})
+
+test("repoWorkDir：repo→dir 映射；未登记仓库给空串（兜底由 zcode 驱动的无项目目录接手）", () => {
+  const { file } = tmpConfig({
+    agent: "zcode",
+    products: [{
+      name: "win-ai-stack",
+      projectDir: "~/Documents/workspace/win-ai-stack",
+      repos: [{ repo: "yyzl/win-ai-specs", dir: "~/Documents/workspace/win-ai-stack/win-ai-specs", base: "main" }],
+    }],
+  })
+  const cfg = loadConfig(file)
+  // products 摊平进 cfg.repos 后按 repo 精确映射（dir 已展开 ~）
+  assert.equal(repoWorkDir(cfg, "yyzl/win-ai-specs"), path.join(os.homedir(), "Documents/workspace/win-ai-stack/win-ai-specs"))
+  assert.equal(repoWorkDir(cfg, "zzz/unmapped"), "")
+  assert.equal(repoWorkDir(cfg, ""), "")
+
+  // zcode.fallbackDir 归一：~ 展开；留空由驱动用 NO_PROJECT_DIR 常量兜底
+  assert.equal(cfg.zcode.fallbackDir, "")
+  const { file: file2 } = tmpConfig({ agent: "zcode", zcode: { fallbackDir: "~/fb" } })
+  assert.equal(loadConfig(file2).zcode.fallbackDir, path.join(os.homedir(), "fb"))
 })

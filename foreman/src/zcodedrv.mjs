@@ -297,6 +297,9 @@ class ZcodeDriverBase {
 // ---- herdr 驱动：zcode TUI 常驻 herdr pane，pane run 投递、插件上报状态机 ----
 const HERDR_SOURCE = "herdr-zcode"
 const HERDR_AGENT = "zcode"
+// 无项目兜底目录：没带 repo 的会话（router、全局编排、定时类）一律落这里，不跟 foreman 进程 cwd。
+// 可用 zcode.fallbackDir 覆盖。
+export const NO_PROJECT_DIR = expandHome("~/Documents/workspace/no-project")
 // TUI 就绪等待 / 首轮接管等待 / 阻塞轮总超时（1 小时）。
 const READY_TIMEOUT_MS = 45000
 const STALL_TIMEOUT_MS = 20000
@@ -313,13 +316,16 @@ const HERDR_ERRORS = {
 }
 
 export class ZcodeHerdrDriver extends ZcodeDriverBase {
-  constructor({ bin = "", herdrBin = "", tuiBin = "", ledger, mode = "yolo", log = () => {} } = {}) {
+  constructor({ bin = "", herdrBin = "", tuiBin = "", ledger, mode = "yolo", fallbackDir = "", log = () => {} } = {}) {
     super({ ledger, log })
     this.herdr = resolveHerdrCommand(herdrBin)
     this.zcode = resolveZcodeCommand(bin)
     this.runtime = resolveZcodeRuntimeCjs(tuiBin, this.zcode)
     // 权限模式拼进 TUI 启动命令（--mode 是「本次启动生效」旗标，不动 zcode 全局设置）。
     this.mode = String(mode ?? "").trim() || "yolo"
+    // 没带 repo 的会话落这个目录（无项目目录）。绝不兜底进程自己的 cwd——foreman 服务
+    // 跑在哪个仓库，新会话就被拖进哪个仓库（2026-11-26 win-ai-stack 工单跑到 doubao-bot 的根因）。
+    this.fallbackDir = String(fallbackDir ?? "").trim() || NO_PROJECT_DIR
     this.reportSeq = 0
     // 后台轮的轮询定时器：key → timer，archive 时清。
     this.pollers = new Map()
@@ -589,7 +595,9 @@ export class ZcodeHerdrDriver extends ZcodeDriverBase {
 
   // 新会话公共段：建 workspace → 起运行时 → 等主屏 → 注册 agent。返回账本条目。
   async #provision({ name, repo = "" }) {
-    const cwd = String(repo ?? "").trim() || process.cwd()
+    // cwd 口径：repo 显式给 > 配置兜底目录 > 无项目目录常量；目录不存在就建（herdr create 需要真实路径）。
+    const cwd = String(repo ?? "").trim() || this.fallbackDir || NO_PROJECT_DIR
+    fs.mkdirSync(cwd, { recursive: true })
     const parsed = await this.#json(["workspace", "create", "--cwd", cwd, "--label", String(name).slice(0, 60), "--no-focus", "--env", "ZCODE_DISABLE_UPDATE_CHECK=1"], { timeout: 60000 })
     const { workspaceId, paneId } = this.#handles(parsed)
     if (!paneId) throw new ZcodeError(`herdr workspace create 没返回 pane id：${JSON.stringify(parsed).slice(-300)}`)
@@ -620,19 +628,19 @@ export class ZcodeHerdrDriver extends ZcodeDriverBase {
     })
   }
 
-  async openNew({ name, prompt, noWait = true }) {
+  async openNew({ name, prompt, noWait = true, repo = "" }) {
     const key = String(name ?? "").trim() || `zcode-new-${++this.seq}`
-    if (!noWait) return this.open({ name: key, prompt })
+    if (!noWait) return this.open({ name: key, prompt, repo })
     const slug = key.replace(/\s+/g, "-").slice(0, 60)
     const pseudo = `zcode-${slug}-${++this.seq}`
     this.log(`zcode open ${key}（herdr 后台跑首轮，伪 id ${pseudo}）`)
-    const entry = { key: pseudo, name: key, sessionId: "", convId: "", paneId: "", workspaceId: "", cwd: "", status: "running", lastReply: "", updatedAt: Date.now() }
+    const entry = { key: pseudo, name: key, sessionId: "", convId: "", paneId: "", workspaceId: "", cwd: String(repo ?? ""), status: "running", lastReply: "", updatedAt: Date.now() }
     this.ledger.put(entry, [key])
     this.queued.add(pseudo)
     // 新会话没有前轮要排队：直接开工，保证 deliver 返回时 status 立刻可见 running。
     enqueueChain(this.chains, pseudo, async () => {
       try {
-        const prov = await this.#provision({ name: key, repo: "" })
+        const prov = await this.#provision({ name: key, repo })
         Object.assign(entry, prov, { convId: prov.paneId })
         this.ledger.put(entry)
         await this.#turnBackground({ entry, prompt })

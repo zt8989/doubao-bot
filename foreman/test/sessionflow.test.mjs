@@ -115,6 +115,7 @@ test("hand：编排职责与工单合进首句一次发出，不 steer，账本�
     assert.equal(out.state, "handed")
     assert.ok(out.convId)
     assert.equal(dws.calls.openNew.length, 1)
+    assert.equal(dws.calls.openNew[0].repo, repo.dir, "编排会话真实 cwd 跟工单仓库走（repos[].dir）")
     assert.equal(dws.calls.steer.length, 0, "hand 不再单独 steer 工单")
     assert.match(dws.calls.openNew[0].prompt, /绑定工单：yyzl\/demo#7/)
     assert.match(dws.calls.openNew[0].prompt, /工单键：yyzl\/demo#7/)
@@ -128,6 +129,23 @@ test("hand：编排职责与工单合进首句一次发出，不 steer，账本�
     const rec = new Book(cfg.stateFile).issue("yyzl/demo#7")
     assert.equal(rec.state, "handed")
     assert.equal(rec.orchestrator, out.convId)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("hand：仓库没配 dir 映射时 openNew 的 repo 给空串（兜底交给 zcode 驱动的无项目目录）", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fm-flow-hand-norepo-"))
+  try {
+    const cfg = mkCfg(dir)
+    cfg.repos = [] // 仓库不在映射里（如 GitHub 仓或未登记的产品仓）
+    const dws = mkDws()
+    const issue = { number: 1, title: "t", body: "b" }
+    const ctx = { cfg, dws, log: () => {}, gitea: { viewIssue: async () => issue } }
+    const repoCfg = { repo: "zzz/unmapped", name: "unmapped", base: "main" }
+    await handToOrchestrator(ctx, { repoCfg, issue })
+    assert.equal(dws.calls.openNew.length, 1)
+    assert.equal(dws.calls.openNew[0].repo, "", "不映射就不带 repo，别把 foreman 进程 cwd 泄漏给会话")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

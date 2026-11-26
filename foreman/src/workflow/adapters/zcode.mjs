@@ -11,7 +11,7 @@ export class ZcodeSessionAdapter {
     this.cfg = cfg
     this.log = log
     const ledger = String(z.ledger ?? "").trim() || defaultLedgerPath(cfg)
-    this.driver = new ZcodeHerdrDriver({ herdrBin: cfg.herdr?.bin ?? "herdr", bin: z.bin ?? "", tuiBin: z.tuiBin ?? "", mode: z.mode, ledger, log })
+    this.driver = new ZcodeHerdrDriver({ herdrBin: cfg.herdr?.bin ?? "herdr", bin: z.bin ?? "", tuiBin: z.tuiBin ?? "", mode: z.mode, fallbackDir: z.fallbackDir, ledger, log })
     this.capabilities = { singleInstance: false }
   }
 
@@ -24,8 +24,8 @@ export class ZcodeSessionAdapter {
     return this.driver.send(name, prompt)
   }
 
-  deliver({ name, prompt, noWait = true } = {}) {
-    return this.driver.openNew({ name, prompt, noWait })
+  deliver({ name, prompt, noWait = true, repo = "" } = {}) {
+    return this.driver.openNew({ name, prompt, noWait, repo })
   }
 
   status(target) {
