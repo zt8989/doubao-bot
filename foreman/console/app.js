@@ -1516,9 +1516,6 @@ class FmFeishu extends LitElement {
           <p class="hint">设备授权（openclaw 同款）：不用配置回调地址，扫码或点链接确认后自动拿授权人 open_id。</p>
           ${failed ? html`<p class="hint is-error">${auth.error || "授权未完成"}</p>` : ""}
           ${!cfg.appId ? html`<p class="hint is-error">应用凭据未配置：在 <code>~/.foreman/config.json</code> 的 <code>feishu.appId / appSecret</code> 里填一次（企业自建应用，长连接订阅 + im.message.receive_v1 权限），之后扫码全程不用填。</p>` : ""}
-          <button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.authStart()}>
-            ${failed ? "重新发起授权" : this.busy === "auth" ? "发起中…" : "扫码"}
-          </button>
         </div>
       </div>`
   }
@@ -1550,7 +1547,7 @@ class FmFeishu extends LitElement {
               <h3>扫码授权</h3>
               <p class="hint">用飞书扫码并确认，授权人一键进私聊白名单。</p>
             </div>
-            ${this.feishu?.auth?.status !== "pending" ? html`<button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.authStart()}>扫码</button>` : ""}
+            ${this.feishu?.auth?.status !== "pending" ? html`<button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.authStart()}>${["failed", "expired"].includes(this.feishu?.auth?.status) ? "重新发起授权" : "扫码"}</button>` : ""}
           </div>
           ${this.authCard()}
         </div>
@@ -1572,6 +1569,128 @@ class FmFeishu extends LitElement {
           </form>
         </div>
         ${gw?.enabled ? html`<div class="im-section im-stats">收 ${gw.accepted ?? 0} · 拒 ${gw.rejected ?? 0} · 重 ${gw.duplicates ?? 0}${gw.lastInboundAt ? ` · 最近消息 ${gw.lastInboundAt.replace("T", " ").slice(5, 16)}` : ""}</div>` : ""}
+      </section>`
+  }
+}
+
+/* ---------------- 项目面板：编辑/添加产品与工程，改基线当场生效 ---------------- */
+class FmProjects extends LitElement {
+  static properties = {
+    projects: { attribute: false },
+    busy: { type: String },
+    error: { type: String },
+    note: { type: String },
+    warnings: { attribute: false },
+  }
+  createRenderRoot() {
+    return this
+  }
+  // 表单值直接绑在加载快照 this.draft 上（深拷贝），输入框 @input 就地改，保存整体提交。
+  setDraft(products) {
+    this.draft = JSON.parse(JSON.stringify(products || []))
+    this.requestUpdate()
+  }
+  willUpdate(changed) {
+    super.willUpdate?.(changed)
+    // 面板 prop 更新（初次加载/保存回填）时刷新编辑草稿；没动过的字段继续用本地草稿。
+    if (changed.has("projects") && this.projects) {
+      if (!this.draft || this.busy === "") this.setDraft(this.projects.products)
+    }
+  }
+  field(pi, ri, key) {
+    return this.querySelector(`[data-proj-field="${pi}-${ri}-${key}"]`)
+  }
+  pfield(pi, key) {
+    return this.querySelector(`[data-proj-pfield="${pi}-${key}"]`)
+  }
+  addRepo(pi) {
+    this.draft[pi].repos.push({ repo: "", dir: "", base: "", verify: [] })
+    this.requestUpdate()
+  }
+  removeRepo(pi, ri) {
+    this.draft[pi].repos.splice(ri, 1)
+    this.requestUpdate()
+  }
+  addProduct() {
+    this.draft.push({ name: "", projectDir: "", repos: [] })
+    this.requestUpdate()
+  }
+  removeProduct(pi) {
+    this.draft.splice(pi, 1)
+    this.requestUpdate()
+  }
+  // 收集表单：只覆盖 name/projectDir/repo/dir/base 四个界面字段，
+  // verify/worktreeHook/promptFile/mergePromptFile 等不进表单的字段原样保留。
+  collect() {
+    return this.draft.map((p, pi) => ({
+      ...p,
+      name: (this.pfield(pi, "name")?.value || "").trim(),
+      projectDir: (this.pfield(pi, "projectDir")?.value || "").trim(),
+      repos: p.repos.map((r, ri) => ({
+        ...r,
+        repo: (this.field(pi, ri, "repo")?.value || "").trim(),
+        dir: (this.field(pi, ri, "dir")?.value || "").trim(),
+        base: (this.field(pi, ri, "base")?.value || "").trim(),
+      })),
+    }))
+  }
+  save() {
+    if (this.busy) return
+    emit(this, "projects-save", { products: this.collect() })
+  }
+  render() {
+    if (!Array.isArray(this.draft)) this.draft = JSON.parse(JSON.stringify(this.projects || []))
+    return html`
+      <section class="panel">
+        <div class="panel-head">
+          <h2>项目与工程</h2>
+          <div class="panel-side"><span class="hint">保存即写回 config.json 并当场生效，不用重启服务</span></div>
+        </div>
+        ${this.error ? html`<div class="sched-error">${this.error}</div>` : ""}
+        ${this.note ? html`<div class="sched-note schedule-message">${this.note}</div>` : ""}
+        ${(this.warnings || []).length ? html`
+          <div class="projects-warnings">
+            ${(this.warnings || []).map((w) => html`<div class="sched-note schedule-message">⚠ ${w}</div>`)}
+          </div>` : ""}
+        <div class="projects-list">
+          ${(this.draft || []).map((p, pi) => html`
+            <div class="projects-product">
+              <div class="projects-product-head">
+                <label>
+                  产品名
+                  <input type="text" data-proj-pfield=${`${pi}-name`} .value=${p.name || ""} placeholder="win-ai-stack" />
+                </label>
+                <label>
+                  projectDir
+                  <input type="text" data-proj-pfield=${`${pi}-projectDir`} .value=${p.projectDir || ""} placeholder="~/Documents/workspace/…" />
+                </label>
+                <button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.removeProduct(pi)}>删产品</button>
+              </div>
+              <table class="tasks queue-table projects-table">
+                <thead>
+                  <tr><th class="col-repo">仓库（owner/name）</th><th class="col-dir">本地 clone 路径</th><th class="col-base">基线分支 base</th><th class="col-detail"></th></tr>
+                </thead>
+                <tbody>
+                  ${(p.repos || []).map((r, ri) => html`
+                    <tr>
+                      <td><input type="text" data-proj-field=${`${pi}-${ri}-repo`} .value=${r.repo || ""} placeholder="acme/repo" /></td>
+                      <td><input type="text" data-proj-field=${`${pi}-${ri}-dir`} .value=${r.dir || ""} placeholder="~/path/to/clone" /></td>
+                      <td><input type="text" data-proj-field=${`${pi}-${ri}-base`} .value=${r.base || ""} placeholder="sit-20261217" /></td>
+                      <td><button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.removeRepo(pi, ri)}>删</button></td>
+                    </tr>`)}
+                  ${(p.repos || []).length ? "" : html`<tr><td colspan="4" class="projects-empty">还没有工程——先加一条</td></tr>`}
+                </tbody>
+              </table>
+              <div class="projects-repo-actions">
+                <button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.addRepo(pi)}>+ 新增工程</button>
+              </div>
+            </div>`)}
+        </div>
+        <div class="schedule-form-actions">
+          <button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.addProduct()}>+ 新增产品</button>
+          <button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.save()}>${this.busy === "save" ? "保存中…" : "保存并当场生效"}</button>
+        </div>
+        <p class="hint projects-hint">改基线只影响之后新建的工作区；在途工单仍按账本里记录的旧基线走，保存后会在上方列出受影响工单。删除有在途工单的工程要二次确认。</p>
       </section>`
   }
 }
