@@ -128,6 +128,9 @@ function navIcon(id) {
   if (id === "schedules") {
     return html`<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2M8 2l-2 2M16 2l2 2"/></svg>`
   }
+  if (id === "projects") {
+    return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h6l2 3h10v11H3z"/></svg>`
+  }
   if (id === "im") {
     return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h9v6H4zM11 10h9v6h-5l-4 4v-4H11z"/></svg>`
   }
@@ -154,6 +157,7 @@ class FmSidebar extends LitElement {
       { id: "tasks", label: "Tasks" },
       { id: "sessions", label: "Sessions" },
       { id: "schedules", label: "Schedule" },
+      { id: "projects", label: "项目" },
       { id: "im", label: "IM" },
       { id: "operations", label: "操作日志" },
     ]
@@ -262,7 +266,7 @@ class FmHead extends LitElement {
               <h2>Chat</h2>
             </div>`
           : html`<div class="topbar-title">
-              <h2>${({ inbox: "Inbox", outbox: "Outbox", tasks: "Tasks", sessions: "智能体会话", schedules: "Schedule", im: "IM 通道", operations: "操作日志" })[this.view] || "Foreman"}</h2>
+              <h2>${({ inbox: "Inbox", outbox: "Outbox", tasks: "Tasks", sessions: "智能体会话", schedules: "Schedule", projects: "项目与工程", im: "IM 通道", operations: "操作日志" })[this.view] || "Foreman"}</h2>
             </div>`}
         <div class="meta">
           ${this.view === "chat" ? html`
@@ -1508,6 +1512,128 @@ class FmFeishu extends LitElement {
   }
 }
 
+/* ---------------- 项目面板：编辑/添加产品与工程，改基线当场生效 ---------------- */
+class FmProjects extends LitElement {
+  static properties = {
+    projects: { attribute: false },
+    busy: { type: String },
+    error: { type: String },
+    note: { type: String },
+    warnings: { attribute: false },
+  }
+  createRenderRoot() {
+    return this
+  }
+  // 表单值直接绑在加载快照 this.draft 上（深拷贝），输入框 @input 就地改，保存整体提交。
+  setDraft(products) {
+    this.draft = JSON.parse(JSON.stringify(products || []))
+    this.requestUpdate()
+  }
+  willUpdate(changed) {
+    super.willUpdate?.(changed)
+    // 面板 prop 更新（初次加载/保存回填）时刷新编辑草稿；没动过的字段继续用本地草稿。
+    if (changed.has("projects") && this.projects) {
+      if (!this.draft || this.busy === "") this.setDraft(this.projects.products)
+    }
+  }
+  field(pi, ri, key) {
+    return this.querySelector(`[data-proj-field="${pi}-${ri}-${key}"]`)
+  }
+  pfield(pi, key) {
+    return this.querySelector(`[data-proj-pfield="${pi}-${key}"]`)
+  }
+  addRepo(pi) {
+    this.draft[pi].repos.push({ repo: "", dir: "", base: "", verify: [] })
+    this.requestUpdate()
+  }
+  removeRepo(pi, ri) {
+    this.draft[pi].repos.splice(ri, 1)
+    this.requestUpdate()
+  }
+  addProduct() {
+    this.draft.push({ name: "", projectDir: "", repos: [] })
+    this.requestUpdate()
+  }
+  removeProduct(pi) {
+    this.draft.splice(pi, 1)
+    this.requestUpdate()
+  }
+  // 收集表单：只覆盖 name/projectDir/repo/dir/base 四个界面字段，
+  // verify/worktreeHook/promptFile/mergePromptFile 等不进表单的字段原样保留。
+  collect() {
+    return this.draft.map((p, pi) => ({
+      ...p,
+      name: (this.pfield(pi, "name")?.value || "").trim(),
+      projectDir: (this.pfield(pi, "projectDir")?.value || "").trim(),
+      repos: p.repos.map((r, ri) => ({
+        ...r,
+        repo: (this.field(pi, ri, "repo")?.value || "").trim(),
+        dir: (this.field(pi, ri, "dir")?.value || "").trim(),
+        base: (this.field(pi, ri, "base")?.value || "").trim(),
+      })),
+    }))
+  }
+  save() {
+    if (this.busy) return
+    emit(this, "projects-save", { products: this.collect() })
+  }
+  render() {
+    if (!Array.isArray(this.draft)) this.draft = JSON.parse(JSON.stringify(this.projects || []))
+    return html`
+      <section class="panel">
+        <div class="panel-head">
+          <h2>项目与工程</h2>
+          <div class="panel-side"><span class="hint">保存即写回 config.json 并当场生效，不用重启服务</span></div>
+        </div>
+        ${this.error ? html`<div class="sched-error">${this.error}</div>` : ""}
+        ${this.note ? html`<div class="sched-note schedule-message">${this.note}</div>` : ""}
+        ${(this.warnings || []).length ? html`
+          <div class="projects-warnings">
+            ${(this.warnings || []).map((w) => html`<div class="sched-note schedule-message">⚠ ${w}</div>`)}
+          </div>` : ""}
+        <div class="projects-list">
+          ${(this.draft || []).map((p, pi) => html`
+            <div class="projects-product">
+              <div class="projects-product-head">
+                <label>
+                  产品名
+                  <input type="text" data-proj-pfield=${`${pi}-name`} .value=${p.name || ""} placeholder="win-ai-stack" />
+                </label>
+                <label>
+                  projectDir
+                  <input type="text" data-proj-pfield=${`${pi}-projectDir`} .value=${p.projectDir || ""} placeholder="~/Documents/workspace/…" />
+                </label>
+                <button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.removeProduct(pi)}>删产品</button>
+              </div>
+              <table class="tasks queue-table projects-table">
+                <thead>
+                  <tr><th class="col-repo">仓库（owner/name）</th><th class="col-dir">本地 clone 路径</th><th class="col-base">基线分支 base</th><th class="col-detail"></th></tr>
+                </thead>
+                <tbody>
+                  ${(p.repos || []).map((r, ri) => html`
+                    <tr>
+                      <td><input type="text" data-proj-field=${`${pi}-${ri}-repo`} .value=${r.repo || ""} placeholder="acme/repo" /></td>
+                      <td><input type="text" data-proj-field=${`${pi}-${ri}-dir`} .value=${r.dir || ""} placeholder="~/path/to/clone" /></td>
+                      <td><input type="text" data-proj-field=${`${pi}-${ri}-base`} .value=${r.base || ""} placeholder="sit-20261217" /></td>
+                      <td><button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.removeRepo(pi, ri)}>删</button></td>
+                    </tr>`)}
+                  ${(p.repos || []).length ? "" : html`<tr><td colspan="4" class="projects-empty">还没有工程——先加一条</td></tr>`}
+                </tbody>
+              </table>
+              <div class="projects-repo-actions">
+                <button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.addRepo(pi)}>+ 新增工程</button>
+              </div>
+            </div>`)}
+        </div>
+        <div class="schedule-form-actions">
+          <button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.addProduct()}>+ 新增产品</button>
+          <button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.save()}>${this.busy === "save" ? "保存中…" : "保存并当场生效"}</button>
+        </div>
+        <p class="hint projects-hint">改基线只影响之后新建的工作区；在途工单仍按账本里记录的旧基线走，保存后会在上方列出受影响工单。删除有在途工单的工程要二次确认。</p>
+      </section>`
+  }
+}
+
 /* ---------------- 根组件：取数、主题、轮询 ---------------- */
 class FmConsole extends LitElement {
   static properties = {
@@ -1560,6 +1686,11 @@ class FmConsole extends LitElement {
     feishuBusy: { type: String },
     feishuError: { type: String },
     feishuNote: { type: String },
+    projects: { attribute: false },
+    projectsBusy: { type: String },
+    projectsError: { type: String },
+    projectsNote: { type: String },
+    projectsWarnings: { attribute: false },
     error: { type: String },
     chatState: { attribute: false },
   }
@@ -1573,6 +1704,11 @@ class FmConsole extends LitElement {
     this.feishuBusy = ""
     this.feishuError = ""
     this.feishuNote = ""
+    this.projects = null
+    this.projectsBusy = ""
+    this.projectsError = ""
+    this.projectsNote = ""
+    this.projectsWarnings = []
     // Chat 是默认工作台；原有 Inbox / Outbox / Tasks 保留为运维视图。
     this.view = "chat"
     try {
@@ -1657,6 +1793,8 @@ class FmConsole extends LitElement {
       if (this.view === "sessions") this.loadAgentSessions()
       // IM 面板：进视图拉一次各通道配置与状态（飞书是当前唯一已接入的通道）。
       if (this.view === "im") this.loadFeishu()
+      // 项目面板：进视图拉一次当前产品/工程。
+      if (this.view === "projects") this.loadProjects()
       // Chat 视图侧边栏的会话列表也用同一份账本数据。
       if (this.view === "chat") this.loadAgentSessions()
     }
@@ -1689,6 +1827,8 @@ class FmConsole extends LitElement {
     this.addEventListener("feishu-save", this._onFeishuSave)
     this._onFeishuAuthStart = () => this.startFeishuAuth()
     this.addEventListener("feishu-auth-start", this._onFeishuAuthStart)
+    this._onProjectsSave = (e) => this.saveProjects(e.detail?.products, { force: e.detail?.force === true })
+    this.addEventListener("projects-save", this._onProjectsSave)
     this._onOpFilter = (e) => {
       this.opFilter = e.detail.filter
       this.opPage = 1
@@ -1793,6 +1933,7 @@ class FmConsole extends LitElement {
     this.removeEventListener("schedule-run", this._onScheduleRun)
     this.removeEventListener("feishu-save", this._onFeishuSave)
     this.removeEventListener("feishu-auth-start", this._onFeishuAuthStart)
+    this.removeEventListener("projects-save", this._onProjectsSave)
     this.stopFeishuAuthPoll()
     this.removeEventListener("agent-set", this._onAgentSet)
     this.removeEventListener("node-toggle", this._onNodeToggle)
@@ -2086,6 +2227,52 @@ class FmConsole extends LitElement {
     }
   }
 
+  // ---- 项目面板 ----
+  async loadProjects() {
+    try {
+      const res = await fetch("/api/products", { cache: "no-store" })
+      const body = await res.json()
+      if (!res.ok || body.ok === false) throw new Error(body.message || `HTTP ${res.status}`)
+      this.projects = body
+      this.projectsError = ""
+    } catch (e) {
+      this.projectsError = `拿不到项目配置：${e.message}`
+    }
+  }
+
+  // 保存项目/工程：写回 config.json + 热替换内存 cfg（实时生效）。删除有在途工单的工程
+  // 服务回 409 repo_busy，弹确认后带 force 重试（在途单不再被监控）。
+  async saveProjects(products, { force = false } = {}) {
+    if (this.projectsBusy) return
+    this.projectsBusy = "save"
+    this.projectsError = ""
+    this.projectsNote = ""
+    try {
+      const res = await fetch("/api/products", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ products, force }),
+      })
+      const body = await res.json()
+      if (!res.ok || body.ok === false) {
+        if (body.error === "repo_busy" && !force) {
+          const names = (body.repos || []).join("、")
+          const go = window.confirm(`${body.message || "有工程还有在途工单"}\n\n确认强制保存？在途工单将不再被监控。`)
+          if (go) return this.saveProjects(products, { force: true })
+          throw new Error(`已取消保存（${names} 仍有在途工单）`)
+        }
+        throw new Error(body.message || `HTTP ${res.status}`)
+      }
+      this.projects = body
+      this.projectsWarnings = body.warnings || []
+      this.projectsNote = "已保存并当场生效"
+    } catch (e) {
+      this.projectsError = `保存失败：${e.message}`
+    } finally {
+      this.projectsBusy = ""
+    }
+  }
+
   async startFeishuAuth() {
     if (this.feishuBusy) return
     this.feishuBusy = "auth"
@@ -2226,6 +2413,8 @@ class FmConsole extends LitElement {
           ? html`<fm-schedules .schedules=${this.schedules} .workHours=${this.workHours} .busy=${this.schedBusy} .error=${this.schedError} .note=${this.schedNote}></fm-schedules>`
           : this.view === "im"
           ? html`<fm-im .feishu=${this.feishu} .busy=${this.feishuBusy} .error=${this.feishuError} .note=${this.feishuNote}></fm-im>`
+          : this.view === "projects"
+          ? html`<fm-projects .projects=${this.projects} .busy=${this.projectsBusy} .error=${this.projectsError} .note=${this.projectsNote} .warnings=${this.projectsWarnings}></fm-projects>`
           : this.view === "operations"
           ? html`<fm-operations .operations=${this.operations} .filter=${this.opFilter} .page=${this.opPage}></fm-operations>`
           : this.view === "sessions"
@@ -2300,6 +2489,7 @@ customElements.define("fm-queue", FmQueue)
 customElements.define("fm-schedules", FmSchedules)
 customElements.define("fm-im", FmIm)
 customElements.define("fm-feishu", FmFeishu)
+customElements.define("fm-projects", FmProjects)
 customElements.define("fm-operations", FmOperations)
 customElements.define("fm-agent-sessions", FmAgentSessions)
 customElements.define("fm-session-menu", FmSessionMenu)

@@ -29,7 +29,7 @@ import { prWatchOnce, prWatchTarget, mergeFailureReason, prNotifyText, shouldRep
 import { pickupWatchOnce } from "./pickupwatch.mjs"
 import { MailDriver, realRecipients } from "./mail.mjs"
 import { acceptanceGate, detectUiChange, mailPollOnce, requestAcceptance, mailAcceptanceSent, mailAcceptanceFailed, deliverMailReply } from "./mailflow.mjs"
-import { inflightIssues } from "./planner.mjs"
+import { runningIssues, inflightIssues } from "./planner.mjs"
 import { routerOnce } from "./core/router.mjs"
 import { dreamOnce } from "./dreaming.mjs"
 import { listPulls, viewPr, mergePr, closeIssue, createPr, commentIssue, viewIssue, createIssue, editIssue, READY_FOR_AGENT } from "./gitea.mjs"
@@ -39,7 +39,7 @@ import { OutboxStore, OutboxDispatcher } from "./core/outbox.mjs"
 import { enqueueOutbound } from "./outbound.mjs"
 import { LarkDriver } from "./lark.mjs"
 import { listSchedules, applySchedules, createAgentSchedule, firstRunAt, customAgentSchedules, hydrateSchedules, scheduleDefinitions, saveScheduleSettings } from "./core/schedules.mjs"
-import { DEFAULTS, agentScheduleCwd, normalizeFeishuSection, persistAgent } from "./config.mjs"
+import { DEFAULTS, agentScheduleCwd, normalizeFeishuSection, normalizeProducts, persistAgent } from "./config.mjs"
 import { normalizeEventEnvelope } from "./core/schedule-events.mjs"
 import { runConfiguredScript } from "./core/executors.mjs"
 import { startOperation, finishOperation } from "./operations.mjs"
@@ -1257,6 +1257,57 @@ ${String(item.prompt ?? "").trim()}
     await startFeishuChannel()
     log(`飞书配置已保存并当场生效：enabled=${next.enabled} · 高优群 ${next.groups.high.length} · 白名单 ${next.allowUsers.length}`)
     return ctx.feishuView()
+  }
+
+  // 控制台「项目」面板：读当前产品/工程；保存 = 同 loadConfig 一套校验 → 原子写回 config.json →
+  // 原地热替换 cfg.products/cfg.repos。所有轮询/派单/PR 消费点都现读 cfg.repos，下一轮即生效，
+  // 不用重启（改 base 只影响之后新建的工作区；在途工单仍按账本记录的旧基线走）。
+  ctx.productsView = () => ({ ok: true, configFile: cfg.configFile, products: cfg.products })
+  ctx.applyProducts = (patch = {}) => {
+    const list = Array.isArray(patch.products) ? patch.products : []
+    if (!list.length) throw new Error("products 不能为空（至少保留一个产品与一条 repos）")
+    // 校验与 loadConfig 同一套 normalize（repo 正则、dir/base 必填、promptFile 存在性）。
+    const next = normalizeProducts({ ...cfg, products: list }, path.dirname(cfg.configFile))
+    // 在途安全：Book 里 state ∈ RUNNING_STATES 的工单记着旧工程/旧基线。
+    const book = new Book(cfg.stateFile)
+    const inflight = new Map() // repo -> [issueKey]
+    for (const it of runningIssues(book)) {
+      const repos = new Set([it.repo, ...(it.workspaces ?? []).map((w) => w.repo)].filter(Boolean))
+      for (const r of repos) inflight.set(r, [...(inflight.get(r) ?? []), it.key])
+    }
+    const nextRepos = new Map(next.flatMap((p) => p.repos.map((r) => [r.repo, r])))
+    const removed = [...inflight.keys()].filter((r) => !nextRepos.has(r))
+    if (removed.length && patch.force !== true) {
+      throw Object.assign(
+        new Error(`这些工程还有在途工单，删掉后不再被监控：${removed.join("、")}；确认删除请用强制保存`),
+        { code: "repo_busy", repos: removed, inflight: removed.map((r) => ({ repo: r, issues: inflight.get(r) })) },
+      )
+    }
+    const warnings = []
+    for (const old of cfg.repos ?? []) {
+      const nw = nextRepos.get(old.repo)
+      const keys = inflight.get(old.repo) ?? []
+      if (nw && nw.base !== old.base && keys.length) {
+        warnings.push(`${old.repo} 基线 ${old.base} → ${nw.base}：${keys.length} 个在途工单仍按账本记录的旧基线走（${keys.join("、")}），新基线只影响之后新建的工作区`)
+      }
+    }
+    // 原子写回 config.json（保留其余键；tmp+rename 防半截文件，同 persistAgent）。
+    let fileData = {}
+    try {
+      fileData = JSON.parse(fs.readFileSync(cfg.configFile, "utf8"))
+    } catch {}
+    fileData.products = next
+    fs.mkdirSync(path.dirname(cfg.configFile), { recursive: true })
+    const tmp = `${cfg.configFile}.tmp`
+    fs.writeFileSync(tmp, JSON.stringify(fileData, null, 2) + "\n")
+    fs.renameSync(tmp, cfg.configFile)
+    // 热替换：保持 loadConfig 的共享引用不变式（cfg.repos 与 products[].repos 同一批对象），
+    // 消费点每轮现读，下一轮即生效；顺手清候选缓存。
+    cfg.products = next
+    cfg.repos = next.flatMap((p) => p.repos)
+    forgetCandidates()
+    log(`项目配置已保存并当场生效：${next.length} 个产品 · ${cfg.repos.length} 条工程${warnings.length ? ` · ${warnings.length} 条基线变更提醒` : ""}`)
+    return { ...ctx.productsView(), warnings }
   }
 
   // 页面上启停定时任务：改内存 cfg → 写 SQLite → 立刻重排定时器，不再写 config.json。

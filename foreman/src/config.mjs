@@ -600,7 +600,8 @@ export function loadConfig(explicit, env = process.env) {
 
 // normalizeProducts：把 products[] 归一成 {name, promptFile, projectDir, repos}。
 // 每条 repoCfg 额外带 product 名，投递时好按仓库找回属于哪个产品。
-function normalizeProducts(cfg, baseDir) {
+// 导出给 service 层复用：控制台保存 products 时用同一套校验与报错措辞。
+export function normalizeProducts(cfg, baseDir) {
   const list = Array.isArray(cfg.products) ? cfg.products : []
   return list.map((p, i) => {
     if (!p || typeof p !== "object") throw new Error(`products[${i}] 要是对象：{"name":"…","repos":[…]}`)

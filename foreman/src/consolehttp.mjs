@@ -359,6 +359,33 @@ export function startConsoleHttp({ store, ctx, dir, host, port, token = "", log 
         return sendJson(res, 200, { ok: true, ...ctx.feishuAuth.view() })
       }
 
+      if (pathname === "/api/products") {
+        // 项目面板：GET 读当前产品/工程；POST 保存 = 校验 → 原子写回 config.json → 热替换内存 cfg（实时生效）。
+        if (req.method === "GET") {
+          return sendJson(res, 200, typeof ctx.productsView === "function" ? ctx.productsView() : { ok: true, configFile: "", products: ctx.cfg?.products ?? [] })
+        }
+        if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
+        if (typeof ctx.applyProducts !== "function") return sendJson(res, 501, { ok: false, error: "products_not_supported" })
+        let body
+        try {
+          body = await readBody(req)
+        } catch (e) {
+          return sendJson(res, 400, { ok: false, error: e.code || "bad_request", message: e.message })
+        }
+        try {
+          return sendJson(res, 200, ctx.applyProducts(body ?? {}))
+        } catch (e) {
+          const status = e.code === "repo_busy" ? 409 : 400
+          return sendJson(res, status, {
+            ok: false,
+            error: e.code || "products_invalid",
+            message: e.message,
+            // repo_busy 时带上在途明细，前端确认弹窗展示用。
+            ...(e.repos ? { repos: e.repos, inflight: e.inflight } : {}),
+          })
+        }
+      }
+
       if (pathname === "/api/feishu/auth/start") {
         if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
         if (typeof ctx.feishuAuthStart !== "function") return sendJson(res, 501, { ok: false, error: "feishu_not_supported" })
