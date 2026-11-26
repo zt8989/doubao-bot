@@ -6,7 +6,6 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { classifyInbound, MessageDedup, FeishuGateway, FeishuReplyPump } from "../src/feishu.mjs"
-import { FeishuAuth } from "../src/feishu-auth.mjs"
 import { loadConfig, normalizeFeishuSection } from "../src/config.mjs"
 import { startServer } from "../src/service.mjs"
 
@@ -310,80 +309,6 @@ test("normalizeFeishuSection：归一不改入参对象、enabled 校验口径�
   assert.throws(() => normalizeFeishuSection({ enabled: true }), /appId\/appSecret 必填/)
 })
 
-function authFetch(routes) {
-  return async (url) => {
-    const hit = routes.find(([prefix]) => url.startsWith(prefix))
-    if (!hit) throw new Error(`意外的请求：${url}`)
-    const [, body, status = 200] = hit
-    return { ok: status === 200, status, json: async () => (typeof body === "function" ? body(url) : body) }
-  }
-}
-
-test("FeishuAuth：无凭据拒绝发起；设备流 pending → authorized（带 open_id/名字）", async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-feishu-auth-"))
-  const auth = new FeishuAuth({ cfg: { feishu: {} }, log: () => {} })
-  await assert.rejects(() => auth.start(), /凭据未配置/)
-
-  const auth2 = new FeishuAuth({
-    cfg: { feishu: feishuCfg() },
-    log: () => {},
-    fetchFn: authFetch([
-      ["https://accounts.feishu.cn/oauth/v1/device_authorization", {
-        device_code: "dc_1",
-        user_code: "ABCD-1234",
-        verification_uri: "https://feishu.cn/auth",
-        verification_uri_complete: "https://feishu.cn/auth?user_code=ABCD-1234",
-        expires_in: 240,
-        interval: 5,
-      }],
-      // 第一轮：还没授权；第二轮：token 到手
-      ["https://open.feishu.cn/open-apis/authen/v2/oauth/token", () => (auth2?.flow._round ? { access_token: "uat_1", refresh_token: "r1" } : { error: "authorization_pending" })],
-      ["https://open.feishu.cn/open-apis/authen/v1/user_info", { code: 0, data: { open_id: "ou_boss", name: "周腾" } }],
-    ]),
-  })
-  await auth2.start()
-  assert.equal(auth2.view().status, "pending")
-  assert.equal(auth2.view().verificationUriComplete, "https://feishu.cn/auth?user_code=ABCD-1234")
-  assert.equal(auth2.view().userCode, "ABCD-1234")
-
-  // 第一轮 check：仍 pending
-  auth2.flow._round = 0
-  await auth2.check()
-  assert.equal(auth2.view().status, "pending")
-  // 第二轮 check：token 到手 → user_info → authorized
-  auth2.flow._round = 1
-  await auth2.check()
-  const view = auth2.view()
-  assert.equal(view.status, "authorized")
-  assert.equal(view.openId, "ou_boss")
-  assert.equal(view.userName, "周腾")
-  auth2.stop()
-})
-
-test("FeishuAuth：拒绝授权 → failed；过期 → expired", async () => {
-  const denied = new FeishuAuth({
-    cfg: { feishu: feishuCfg() },
-    log: () => {},
-    fetchFn: authFetch([
-      ["https://accounts.feishu.cn/oauth/v1/device_authorization", { device_code: "dc_2", user_code: "U1", verification_uri: "https://feishu.cn/a", expires_in: 240, interval: 5 }],
-      ["https://open.feishu.cn/open-apis/authen/v2/oauth/token", { error: "access_denied" }],
-    ]),
-  })
-  await denied.start()
-  await denied.check()
-  assert.equal(denied.view().status, "failed")
-  denied.stop()
-
-  const expired = new FeishuAuth({
-    cfg: { feishu: feishuCfg() },
-    log: () => {},
-    fetchFn: authFetch([["https://open.feishu.cn/", {}]]),
-  })
-  expired.flow = { status: "pending", deviceCode: "dc_3", expiresAt: new Date(Date.now() - 1000).toISOString() }
-  await expired.check()
-  assert.equal(expired.view().status, "expired")
-})
-
 function startServerCfg(obj = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foreman-feishu-srv-"))
   const file = path.join(dir, "foreman.json")
@@ -422,7 +347,6 @@ test("applyFeishu：保存写回 config.json + 通道热启停（enabled 开关�
     assert.equal(onDisk.feishu.appId, "cli_bad")
     assert.ok(server.ctx.feishu, "保存开启后通道要拉起")
     assert.equal(server.ctx.feishu.view().running, true)
-    assert.ok(server.ctx.feishuAuth, "授权器要常驻")
 
     // merge 语义：界面只 patch groups.high，appId/低优群/botName 不动
     const view2 = await server.ctx.applyFeishu({ groups: { high: ["oc_h2"] } })
@@ -455,7 +379,7 @@ test("/api/feishu：GET 读配置与状态，POST 保存/校验失败返回 400"
     const get1 = await (await fetch(`http://127.0.0.1:${server.port}/api/feishu`)).json()
     assert.equal(get1.ok, true)
     assert.equal(get1.config.enabled, false)
-    assert.equal(get1.auth?.status, "idle")
+    assert.equal(get1.auth, undefined, "设备授权已移除，不应再有 auth 字段")
 
     const bad = await fetch(`http://127.0.0.1:${server.port}/api/feishu`, {
       method: "POST",
@@ -472,10 +396,6 @@ test("/api/feishu：GET 读配置与状态，POST 保存/校验失败返回 400"
     const saved = await post.json()
     assert.equal(saved.ok, true)
     assert.equal(saved.config.enabled, true)
-    // 授权进度端点
-    const auth = await (await fetch(`http://127.0.0.1:${server.port}/api/feishu/auth`)).json()
-    assert.equal(auth.ok, true)
-    assert.equal(auth.status, "idle")
   } finally {
     await server.close()
     fs.rmSync(dir, { recursive: true, force: true })

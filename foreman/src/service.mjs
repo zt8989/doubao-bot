@@ -1215,29 +1215,14 @@ ${String(item.prompt ?? "").trim()}
     ctx.feishuPump = null
   }
   await startFeishuChannel()
-  // 设备授权器纯 fetch 零 SDK 依赖，常驻创建（feishu-auth.mjs 不 import feishu.mjs，enabled=false 也不加载 SDK）。
-  try {
-    const { FeishuAuth } = await import("./feishu-auth.mjs")
-    ctx.feishuAuth = new FeishuAuth({ cfg, log })
-  } catch {}
 
   // 控制台「飞书」面板：读当前配置 + 通道/授权状态；保存 = 归一 → 写回 config.json → 通道热重启。
   ctx.feishuView = () => ({
     ok: true,
     config: cfg.feishu,
     gateway: ctx.feishu?.view?.() ?? null,
-    auth: ctx.feishuAuth?.view?.() ?? null,
     error: ctx.feishuError ?? "",
   })
-  ctx.feishuAuthStart = async () => {
-    if (!ctx.feishuAuth) return { ok: false, error: "feishu_not_supported", message: "服务里没有飞书授权器" }
-    try {
-      await ctx.feishuAuth.start()
-      return { ok: true, ...ctx.feishuAuth.view() }
-    } catch (e) {
-      return { ok: false, error: "feishu_auth_start_failed", message: e.message }
-    }
-  }
   ctx.applyFeishu = async (patch = {}) => {
     // groups 里界面只改 high：浅合并会把没传的 low 冲掉，这里先按层合并。
     const merged = { ...cfg.feishu, ...patch }
@@ -1362,7 +1347,6 @@ ${String(item.prompt ?? "").trim()}
     try {
       ctx.feishuPump?.stop()
       ctx.feishu?.stop()
-      ctx.feishuAuth?.stop()
     } catch {}
     await new Promise((r) => consoleHttp.server.close(r))
     consoleStore.close()

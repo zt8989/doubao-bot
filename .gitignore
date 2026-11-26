@@ -5,3 +5,6 @@ node_modules/
 foreman/console/dist/
 dist/
 .zcode/
+
+# 本地 dev 实例配置目录（.wt-dev 等工作目录产物）
+devcfg/

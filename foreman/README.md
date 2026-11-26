@@ -159,13 +159,11 @@ foreman outbox run                 # 排障时手动消费一轮
 ### 飞书通道：IM 消息进 Inbox，回复推回（openclaw 式）
 
 控制台侧边栏「**IM**」是外部 IM 的统一入口，飞书是当前唯一已接入的渠道（钉钉/企微按同一模式后补）。
-飞书页只做三件事：**启用开关、高优群、扫码授权**——**App ID/Secret 不在界面上填**：
-在 `config.json` 的 `feishu.appId / appSecret` 里配一次（企业自建应用，长连接订阅 +
-`im.message.receive_v1` 权限），之后授权、收发全走扫码，保存当场生效。
-扫码授权是 openclaw 同款设备授权流（二维码 + 授权链接），授权后一键把授权人
-open_id 填进私聊白名单，token 不落盘。其余配置（低优群、botName、回复轮询间隔等）一律走
-`config.json` 默认值，界面不改；保存时这些键原样保留。对应 HTTP：`GET/POST /api/feishu`、
-`GET /api/feishu/auth`、`POST /api/feishu/auth/start`。
+通道还没配凭据时 IM 页默认是空的（落在「新建通道」宫格）；飞书页配**启用开关、App ID/Secret、高优群**，
+保存当场生效（写回 config.json + 通道热重启），不用重启服务。低优群（仅 @机器人）、私聊白名单
+`allowUsers`、botName 等其余配置一律走 `config.json` 默认值，界面不改；保存时这些键原样保留。
+想加私聊白名单：先给机器人发条消息，`service.log` 的拒收记录会带出你的 open_id，照抄进
+`config.json` 即可。对应 HTTP：`GET/POST /api/feishu`。
 
 入站走飞书开放平台的**长连接**（官方 `@larksuiteoapi/node-sdk`，不需要公网 IP / 回调地址），
 复用 Chat 页同一条链路：消息 → Inbox `chat.message`（`payload.source: "feishu"`）→ Worker → router agent。

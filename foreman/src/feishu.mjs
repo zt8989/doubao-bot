@@ -144,7 +144,9 @@ export class FeishuGateway {
       this.status.lastInboundAt = nowIso()
       if (!verdict.accept) {
         this.status.rejected++
-        this.log(`飞书消息不收：${verdict.reason}（${verdict.messageId || "无 id"}）`)
+        // 私聊被白名单拒收时把 sender 带出来：用户照抄进 config.json 的 allowUsers 就能放行。
+        const senderHint = verdict.senderId ? `，sender=${verdict.senderId}` : ""
+        this.log(`飞书消息不收：${verdict.reason}${senderHint}（${verdict.messageId || "无 id"}）`)
         return
       }
       if (!this.dedup.check(verdict.messageId)) {

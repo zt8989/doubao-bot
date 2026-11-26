@@ -5,7 +5,6 @@
  * 组件都用 light DOM（createRenderRoot 返回 this），样式继续吃 style.css 的全局类。
  */
 import { LitElement, html } from "lit"
-import QRCode from "qrcode"
 import "./chat.js"
 
 const STATE_LABEL = {
@@ -1328,8 +1327,8 @@ class FmSessionMenu extends LitElement {
 
 /* ---------------- IM：外部 IM 通道（左右结构：左实例列表，右详情/新建宫格） ---------------- */
 const IM_CHANNELS = [
-  { id: "feishu", name: "飞书", tag: "中国", glyph: "飞", bg: "linear-gradient(135deg, #00d6b9, #3370ff)", sub: "扫码授权，立刻出二维码。", on: true },
-  { id: "lark", name: "Lark", tag: "全球", glyph: "L", bg: "linear-gradient(135deg, #00d6b9, #3370ff)", sub: "同飞书（domain 用 lark）。", on: true },
+  { id: "feishu", name: "飞书", tag: "中国", glyph: "飞", bg: "linear-gradient(135deg, #00d6b9, #3370ff)", sub: "App ID + Secret 接入，保存即生效。", on: true },
+  { id: "lark", name: "Lark", tag: "全球", glyph: "L", bg: "linear-gradient(135deg, #00d6b9, #3370ff)", sub: "同飞书，domain 配 lark。", on: true },
   { id: "wechat", name: "微信", glyph: "微", bg: "#07c160", sub: "即将支持", on: false },
   { id: "telegram", name: "Telegram", glyph: "T", bg: "#229ed9", sub: "即将支持", on: false },
   { id: "dingtalk", name: "钉钉", glyph: "钉", bg: "#0089ff", sub: "即将支持", on: false },
@@ -1347,28 +1346,30 @@ class FmIm extends LitElement {
   }
   constructor() {
     super()
-    this.screen = "detail"
+    this.screen = "" // 空 = 未手动选过，按「有没有已配置的通道」决定落在详情还是新建宫格
   }
   createRenderRoot() {
     return this
   }
-  // 点「新建飞书/Lark」：切到详情并立刻发起扫码——二维码马上出来（凭据已在 config.json 配好的前提）。
-  openChannel(channel) {
+  openChannel() {
     this.screen = "detail"
-    emit(this, "feishu-auth-start", {})
   }
   render() {
     const cfg = this.feishu?.config || {}
     const gw = this.feishu?.gateway
     const on = cfg.enabled === true
     const running = gw?.running === true
-    const detailActive = this.screen === "detail"
+    // IM 默认为空：还没配过凭据也没启用时，左侧列表不显示条目，直接落在新建宫格。
+    const hasEntry = Boolean(cfg.appId) || on
+    const screen = this.screen || (hasEntry ? "detail" : "create")
+    const detailActive = screen === "detail"
     return html`
       <div class="im-layout">
         <aside class="im-rail">
           <button type="button" class="im-new" @click=${() => (this.screen = "create")}>
             <span class="im-new-plus">＋</span> 新建通道
           </button>
+          ${hasEntry ? html`
           <button
             type="button"
             class=${"im-item" + (detailActive ? " is-active" : "")}
@@ -1381,7 +1382,7 @@ class FmIm extends LitElement {
               <span class="im-item-sub">${running ? "运行中" : on ? "已启用 · 未运行" : "未启用"}</span>
             </span>
             <span class=${"im-dot" + (running ? " on" : "")}></span>
-          </button>
+          </button>` : ""}
         </aside>
         <div class="im-pane">
           ${detailActive
@@ -1403,7 +1404,7 @@ class FmIm extends LitElement {
               <button
                 type="button"
                 class=${"im-card" + (c.on ? "" : " is-off")}
-                @click=${c.on ? () => this.openChannel(c) : () => {}}
+                @click=${c.on ? () => this.openChannel() : () => {}}
               >
                 <span class="im-brand" style=${`background:${c.bg}`}>${c.glyph}</span>
                 <span class="im-card-main">
@@ -1417,19 +1418,18 @@ class FmIm extends LitElement {
   }
 }
 
-/* ---------------- 飞书详情：头部开关 + 扫码授权 + 收发配置 ---------------- */
+/* ---------------- 飞书详情：头部开关 + App ID/Secret 表单 + 收发配置 ---------------- */
 class FmFeishu extends LitElement {
   static properties = {
     feishu: { attribute: false },
     busy: { type: String },
     error: { type: String },
     note: { type: String },
-    qrData: { type: String },
+    showSecret: { type: Boolean },
   }
   constructor() {
     super()
-    this.qrData = ""
-    this._qrFor = ""
+    this.showSecret = false
   }
   createRenderRoot() {
     return this
@@ -1437,12 +1437,14 @@ class FmFeishu extends LitElement {
   val(name) {
     return this.querySelector(`[data-feishu-field="${name}"]`)
   }
-  // 凭据（appId/appSecret）不在界面上填：config.json 的 feishu 段配一次，之后只用扫码。
+  // 保存 App ID / Secret / 高优群；启用开关在头部单独保存（toggleEnabled）。
   save() {
     if (this.busy) return
     const high = (this.val("high")?.value || "").split(/[\n,，;；]+/).map((s) => s.trim()).filter(Boolean)
     emit(this, "feishu-save", {
       patch: {
+        appId: this.val("appId")?.value.trim() || "",
+        appSecret: this.val("appSecret")?.value.trim() || "",
         groups: { high },
       },
     })
@@ -1450,74 +1452,12 @@ class FmFeishu extends LitElement {
   toggleEnabled(e) {
     emit(this, "feishu-save", { patch: { enabled: Boolean(e.target.checked) } })
   }
-  authStart() {
-    emit(this, "feishu-auth-start", {})
-  }
-  // 授权成功后把授权人的 open_id 补进私聊白名单（跟现有白名单合并去重，写回配置并当场生效）。
-  authAddUser() {
-    const openId = this.feishu?.auth?.openId || ""
-    if (!openId || this.busy) return
-    const existing = this.feishu?.config?.allowUsers || []
-    emit(this, "feishu-save", { patch: { allowUsers: [...new Set([...existing, openId])] } })
-  }
-  async updated(changed) {
-    super.updated?.(changed)
-    // 授权链接一变就重画二维码（verification_uri_complete 自带 user_code，扫一次直接授权）。
-    const link = this.feishu?.auth?.verificationUriComplete || ""
-    if (link && link !== this._qrFor) {
-      this._qrFor = link
-      try {
-        this.qrData = await QRCode.toDataURL(link, { margin: 1, width: 200 })
-      } catch {
-        this.qrData = ""
-      }
-      this.requestUpdate()
-    }
-  }
   headSub(cfg, gw) {
     const bits = []
     bits.push(gw?.running ? "运行中 · 长连接已连上" : cfg.enabled ? "已启用 · 未运行" : "未启用")
-    const auth = this.feishu?.auth
-    if (auth?.status === "authorized" && auth.openId) bits.push(`已绑定 ${auth.userName || ""}（${auth.openId.slice(0, 10)}…）`)
-    else if ((cfg.allowUsers || []).length) bits.push(`白名单 ${cfg.allowUsers.length} 人`)
+    if ((cfg.allowUsers || []).length) bits.push(`私聊白名单 ${cfg.allowUsers.length} 人`)
+    if ((cfg.groups?.high || []).length) bits.push(`高优群 ${cfg.groups.high.length} 个`)
     return bits.join(" · ")
-  }
-  authCard() {
-    const auth = this.feishu?.auth || { status: "idle" }
-    const cfg = this.feishu?.config || {}
-    if (auth.status === "pending") {
-      return html`
-        <div class="feishu-auth-box">
-          ${this.qrData ? html`<img class="feishu-qr" src=${this.qrData} alt="飞书授权二维码" />` : html`<div class="feishu-qr feishu-qr-empty">生成二维码中…</div>`}
-          <div class="feishu-auth-side">
-            <p class="hint">用飞书扫码并确认授权。</p>
-            ${auth.userCode ? html`<div class="feishu-code"><code>${auth.userCode}</code></div>` : ""}
-            <p class="hint is-ok">⟳ 等待确认…（页面可离开，结果稍后回填）</p>
-            <p class="hint">或<a href=${auth.verificationUri || auth.verificationUriComplete} target="_blank" rel="noopener">点此打开授权链接</a></p>
-          </div>
-        </div>`
-    }
-    if (auth.status === "authorized") {
-      return html`
-        <div class="feishu-auth-box">
-          <div class="feishu-auth-side">
-            <p class="hint is-ok">授权成功：${auth.userName || "飞书用户"}（<code>${auth.openId}</code>）</p>
-            <p class="hint">把 TA 加进私聊白名单，机器人才能收到 TA 的私聊消息。</p>
-            <button type="button" class="ghost" ?disabled=${this.busy !== "" || (cfg.allowUsers || []).includes(auth.openId)} @click=${() => this.authAddUser()}>
-              ${(cfg.allowUsers || []).includes(auth.openId) ? "已在白名单" : "加入私聊白名单"}
-            </button>
-          </div>
-        </div>`
-    }
-    const failed = auth.status === "failed" || auth.status === "expired"
-    return html`
-      <div class="feishu-auth-box">
-        <div class="feishu-auth-side">
-          <p class="hint">设备授权（openclaw 同款）：不用配置回调地址，扫码或点链接确认后自动拿授权人 open_id。</p>
-          ${failed ? html`<p class="hint is-error">${auth.error || "授权未完成"}</p>` : ""}
-          ${!cfg.appId ? html`<p class="hint is-error">应用凭据未配置：在 <code>~/.foreman/config.json</code> 的 <code>feishu.appId / appSecret</code> 里填一次（企业自建应用，长连接订阅 + im.message.receive_v1 权限），之后扫码全程不用填。</p>` : ""}
-        </div>
-      </div>`
   }
   render() {
     const cfg = this.feishu?.config || {}
@@ -1544,18 +1484,32 @@ class FmFeishu extends LitElement {
         <div class="im-section">
           <div class="im-section-head">
             <div>
-              <h3>扫码授权</h3>
-              <p class="hint">用飞书扫码并确认，授权人一键进私聊白名单。</p>
+              <h3>应用凭据</h3>
+              <p class="hint">飞书开放平台企业自建应用：「事件与回调」订阅方式选<b>使用长连接接收事件</b>，订阅 im.message.receive_v1，开通机器人消息权限后发布。保存当场生效，不用重启服务。</p>
             </div>
-            ${this.feishu?.auth?.status !== "pending" ? html`<button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.authStart()}>${["failed", "expired"].includes(this.feishu?.auth?.status) ? "重新发起授权" : "扫码"}</button>` : ""}
           </div>
-          ${this.authCard()}
+          <form class="feishu-form" @submit=${(e) => e.preventDefault()}>
+            <label>
+              App ID
+              <input data-feishu-field="appId" spellcheck="false" .value=${cfg.appId || ""} placeholder="cli_xxxxxxxxxxxxxxxx" />
+            </label>
+            <label>
+              App Secret
+              <span class="feishu-secret-row">
+                <input data-feishu-field="appSecret" .type=${this.showSecret ? "text" : "password"} spellcheck="false" .value=${cfg.appSecret || ""} />
+                <button type="button" class="ghost" @click=${() => { this.showSecret = !this.showSecret }}>${this.showSecret ? "隐藏" : "显示"}</button>
+              </span>
+            </label>
+            <div class="schedule-form-actions">
+              <button type="button" class="ghost" ?disabled=${this.busy !== ""} @click=${() => this.save()}>${this.busy === "save" ? "保存中…" : "保存并当场生效"}</button>
+            </div>
+          </form>
         </div>
         <div class="im-section">
           <div class="im-section-head">
             <div>
               <h3>收发配置</h3>
-              <p class="hint">高优群全收；低优群、botName 等其余一律走 config.json 默认，不在界面上改。</p>
+              <p class="hint">高优群全收；低优群（仅 @机器人）、私聊白名单 allowUsers、botName 等其余一律走 config.json 默认，不在界面上改。想加私聊白名单：先给机器人发条消息，service.log 的拒收记录里就有你的 open_id。</p>
             </div>
           </div>
           <form class="feishu-form" @submit=${(e) => e.preventDefault()}>
@@ -1886,8 +1840,6 @@ class FmConsole extends LitElement {
     this._onScheduleRun = (e) => this.runScheduleNow(e.detail.id)
     this._onFeishuSave = (e) => this.saveFeishu(e.detail?.patch)
     this.addEventListener("feishu-save", this._onFeishuSave)
-    this._onFeishuAuthStart = () => this.startFeishuAuth()
-    this.addEventListener("feishu-auth-start", this._onFeishuAuthStart)
     this._onProjectsSave = (e) => this.saveProjects(e.detail?.products, { force: e.detail?.force === true })
     this.addEventListener("projects-save", this._onProjectsSave)
     this._onOpFilter = (e) => {
@@ -1993,9 +1945,7 @@ class FmConsole extends LitElement {
     this.removeEventListener("schedule-save", this._onSchedSave)
     this.removeEventListener("schedule-run", this._onScheduleRun)
     this.removeEventListener("feishu-save", this._onFeishuSave)
-    this.removeEventListener("feishu-auth-start", this._onFeishuAuthStart)
     this.removeEventListener("projects-save", this._onProjectsSave)
-    this.stopFeishuAuthPoll()
     this.removeEventListener("agent-set", this._onAgentSet)
     this.removeEventListener("node-toggle", this._onNodeToggle)
     this.removeEventListener("operation-filter", this._onOpFilter)
@@ -2258,9 +2208,6 @@ class FmConsole extends LitElement {
       if (!res.ok || body.ok === false) throw new Error(body.message || `HTTP ${res.status}`)
       this.feishu = body
       this.feishuError = ""
-      // 有进行中的授权就接着轮询（页面刷新后也能续上）。
-      if (body.auth?.status === "pending") this.pollFeishuAuth()
-      else this.stopFeishuAuthPoll()
     } catch (e) {
       this.feishuError = `拿不到飞书通道状态：${e.message}`
     }
@@ -2332,47 +2279,6 @@ class FmConsole extends LitElement {
     } finally {
       this.projectsBusy = ""
     }
-  }
-
-  async startFeishuAuth() {
-    if (this.feishuBusy) return
-    this.feishuBusy = "auth"
-    this.feishuError = ""
-    this.feishuNote = ""
-    try {
-      const res = await fetch("/api/feishu/auth/start", { method: "POST" })
-      const body = await res.json()
-      if (!res.ok || body.ok === false) throw new Error(body.message || `HTTP ${res.status}`)
-      if (this.feishu) this.feishu = { ...this.feishu, auth: body }
-      this.pollFeishuAuth()
-    } catch (e) {
-      this.feishuError = `发起授权失败：${e.message}`
-    } finally {
-      this.feishuBusy = ""
-    }
-  }
-
-  // 授权进行中每 3 秒查一次状态；到终态（authorized/failed/expired）停表并刷新整块。
-  pollFeishuAuth() {
-    if (this._feishuAuthTimer) return
-    this._feishuAuthTimer = setInterval(async () => {
-      try {
-        const res = await fetch("/api/feishu/auth", { cache: "no-store" })
-        const body = await res.json()
-        if (!res.ok || body.ok === false) return
-        if (this.feishu) this.feishu = { ...this.feishu, auth: body }
-        if (body.status && body.status !== "pending") {
-          this.stopFeishuAuthPoll()
-          this.loadFeishu()
-        }
-      } catch {}
-    }, 3000)
-    this._feishuAuthTimer.unref?.()
-  }
-
-  stopFeishuAuthPoll() {
-    if (this._feishuAuthTimer) clearInterval(this._feishuAuthTimer)
-    this._feishuAuthTimer = null
   }
 
   async saveSchedule(id, patch) {

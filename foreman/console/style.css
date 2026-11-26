@@ -1390,11 +1390,6 @@ fm-chat { display: flex; flex: 1; width: 100%; min-height: 0; }
 .feishu-toggle { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 12.5px; }
 .feishu-secret-row { display: flex; gap: 8px; align-items: stretch; }
 .feishu-secret-row input { flex: 1; }
-.feishu-auth-box { display: flex; gap: 18px; padding: 4px 18px 18px; align-items: flex-start; flex-wrap: wrap; }
-.feishu-qr { width: 168px; height: 168px; border-radius: 10px; border: 1px solid var(--line); background: #fff; padding: 6px; box-sizing: border-box; }
-.feishu-qr-empty { display: flex; align-items: center; justify-content: center; color: var(--dimmer); font-size: 12px; text-align: center; }
-.feishu-auth-side { display: grid; gap: 8px; max-width: 420px; align-content: start; }
-.feishu-auth-side .hint { line-height: 1.6; }
 
 /* ---- 项目面板：产品/工程编辑 ---- */
 .projects-list { display: flex; flex-direction: column; gap: 14px; padding: 4px 18px 0; }
@@ -1502,12 +1497,6 @@ fm-chat { display: flex; flex: 1; width: 100%; min-height: 0; }
 .im-section-head h3 { margin: 0 0 3px; font-size: 13px; }
 .im-section-head .hint { line-height: 1.5; }
 .im-stats { font-size: 12px; color: var(--dimmer); }
-.feishu-code { margin: 4px 0; }
-.feishu-code code {
-  display: inline-block; padding: 6px 14px; border-radius: 8px;
-  background: var(--panel-2); border: 1px solid var(--line-soft);
-  font-size: 15px; letter-spacing: 0.12em; color: var(--text);
-}
 .feishu-form { display: grid; gap: 14px; padding: 0; max-width: 560px; }
 @media (max-width: 900px) {
   .im-layout { grid-template-columns: 1fr; }

@@ -17,8 +17,7 @@
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.77.0",
     "croner": "^9.1.0",
-    "lit": "^3.3.3",
-    "qrcode": "^1.5.4"
+    "lit": "^3.3.3"
   },
   "devDependencies": {
     "vite": "^7.3.8"

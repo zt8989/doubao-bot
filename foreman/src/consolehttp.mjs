@@ -353,12 +353,6 @@ export function startConsoleHttp({ store, ctx, dir, host, port, token = "", log 
         }
       }
 
-      if (pathname === "/api/feishu/auth") {
-        // 授权进度查询：控制台 pending 时每几秒轮一次。
-        if (typeof ctx.feishuAuth?.view !== "function") return sendJson(res, 501, { ok: false, error: "feishu_not_supported" })
-        return sendJson(res, 200, { ok: true, ...ctx.feishuAuth.view() })
-      }
-
       if (pathname === "/api/products") {
         // 项目面板：GET 读当前产品/工程；POST 保存 = 校验 → 原子写回 config.json → 热替换内存 cfg（实时生效）。
         if (req.method === "GET") {
@@ -384,13 +378,6 @@ export function startConsoleHttp({ store, ctx, dir, host, port, token = "", log 
             ...(e.repos ? { repos: e.repos, inflight: e.inflight } : {}),
           })
         }
-      }
-
-      if (pathname === "/api/feishu/auth/start") {
-        if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" })
-        if (typeof ctx.feishuAuthStart !== "function") return sendJson(res, 501, { ok: false, error: "feishu_not_supported" })
-        const r = await ctx.feishuAuthStart()
-        return sendJson(res, r?.ok === false ? 400 : 200, r)
       }
 
       if (pathname === "/api/history") {
