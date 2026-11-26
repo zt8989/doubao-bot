@@ -309,6 +309,7 @@ const HERDR_ERRORS = {
   herdr_not_ready: "zcode TUI 没能在 herdr pane 里就绪（检查 herdr-zcode 插件是否装好：~/.zcode/cli/setting.json 的 plugins.dirs）",
   agent_blocked: "zcode 在等权限确认（去 herdr 的那个 pane 批一下，或 foreman zcode-stop 后重派）",
   agent_stalled: "prompt 提交后 zcode 没有开始干活（插件没上报 working；检查 herdr-zcode 插件）",
+  agent_gone: "会话的 herdr pane 上已经没有 agent（TUI 进程退了，pane 剩个空 shell）——继续投递只会把消息当 shell 命令敲进去；用 /clear 轮换 Router 会话或重派该会话",
 }
 
 export class ZcodeHerdrDriver extends ZcodeDriverBase {
@@ -335,6 +336,7 @@ export class ZcodeHerdrDriver extends ZcodeDriverBase {
     if (code === "timeout") return "herdr_timeout"
     if (/server is not running|could not connect|No such file or directory.*\.sock|connection refused/i.test(m)) return "herdr_server_down"
     if (/agent_blocked/i.test(m)) return "agent_blocked"
+    if (/agent_not_found|agent target .*(not found|不存在)|pane_not_found|no such pane/i.test(m)) return "agent_gone"
     return "herdr_error"
   }
 
@@ -428,6 +430,10 @@ export class ZcodeHerdrDriver extends ZcodeDriverBase {
 
   // 提交 prompt：pane run = 原子「粘贴文本 + 回车」。超长转临时文件让 agent 自己读。
   async #submit(entry, prompt) {
+    // 投递前先确认 pane 上还有注册的 agent：TUI 退出后 pane 剩个空 shell，pane run 会把
+    // prompt 当 shell 命令敲进去（2026-11-26 飞书无回复事故的根因）。agent_gone 直接抛。
+    const reg = await this.#agentState(entry.paneId)
+    if (!reg.status && !reg.seq) throw new ZcodeError(HERDR_ERRORS.agent_gone, { code: "agent_gone" })
     const text = String(prompt ?? "")
     let body = text
     let scratch = null
@@ -461,7 +467,13 @@ export class ZcodeHerdrDriver extends ZcodeDriverBase {
     let sawWorking = false
     while (Date.now() - started < timeoutMs) {
       if (!this.ledger.resolve(entry.key)) return // 会话被 archive，别再等了
-      const { status: st, seq } = await this.#agentState(entry.paneId).catch(() => ({ status: "", seq: baseline }))
+      let st = ""
+      let seq = baseline
+      try {
+        ;({ status: st, seq } = await this.#agentState(entry.paneId))
+      } catch (e) {
+        if (e?.code === "agent_gone") throw e // pane 上的 agent 没了，这轮永远等不到结果
+      }
       if (st === "working") sawWorking = true
       else if (st === "blocked") throw new ZcodeError(HERDR_ERRORS.agent_blocked, { code: "agent_blocked" })
       else if ((st === "idle" || st === "done") && seq > baseline) return
@@ -525,16 +537,32 @@ export class ZcodeHerdrDriver extends ZcodeDriverBase {
     } catch (e) {
       this.ledger.recordTurn(entry, { status: "error", error: e.message, prompt })
       this.#cleanupScratch(entry)
+      this.log(`zcode ${entry.name} 后台轮提交失败：${e.message}`)
       return
     }
     await new Promise((resolveBg) => {
+      const started = Date.now()
+      const finish = (error = "") => {
+        this.#cleanupScratch(entry)
+        this.pollers.delete(entry.key)
+        resolveBg()
+        if (error) {
+          this.ledger.recordTurn(entry, { status: "error", error, prompt })
+          this.log(`zcode ${entry.name} 后台轮失败：${error}`)
+        }
+      }
       const tick = async () => {
         if (!this.ledger.resolve(entry.key)) {
-          this.#cleanupScratch(entry)
-          resolveBg()
+          finish()
           return
         }
-        const { status: st } = await this.#agentState(entry.paneId).catch(() => ({ status: "" }))
+        let st = ""
+        try {
+          ;({ status: st } = await this.#agentState(entry.paneId))
+        } catch (e) {
+          // agent 没了（TUI 退出）就永远等不到 idle：立刻落错收尾，别无限轮询。
+          if (e?.code === "agent_gone") return finish(e.message)
+        }
         if (st === "idle" || st === "done") {
           try {
             const text = await this.#readPane(entry.paneId, 120)
@@ -543,14 +571,12 @@ export class ZcodeHerdrDriver extends ZcodeDriverBase {
           } catch (e) {
             this.ledger.recordTurn(entry, { status: "error", error: `这轮跑完了但读屏失败：${e.message}`, prompt })
           }
-          this.#cleanupScratch(entry)
-          this.pollers.delete(entry.key)
-          resolveBg()
+          finish()
         } else if (st === "blocked") {
-          this.ledger.recordTurn(entry, { status: "error", error: HERDR_ERRORS.agent_blocked, prompt })
-          this.#cleanupScratch(entry)
-          this.pollers.delete(entry.key)
-          resolveBg()
+          finish(HERDR_ERRORS.agent_blocked)
+        } else if (Date.now() - started > TURN_TIMEOUT_MS) {
+          // 与阻塞轮同一个超时口径；pane 还在跑的话活儿不会丢，只是这轮不再跟。
+          finish(`zcode 这一轮后台跟丢（超 ${Math.round(TURN_TIMEOUT_MS / 60000)} 分钟，pane 可还在跑，去 herdr 看）`)
         } else {
           const t = setTimeout(tick, POLL_MS)
           t.unref?.() // 别让轮询定时器拖住进程退出
@@ -612,8 +638,9 @@ export class ZcodeHerdrDriver extends ZcodeDriverBase {
         await this.#turnBackground({ entry, prompt })
       } catch (e) {
         this.ledger.recordTurn(entry, { status: "error", error: e.message, prompt })
+        this.log(`zcode ${entry.name} 首轮失败：${e.message}`)
       }
-    }).catch(() => {}).finally(() => this.queued.delete(pseudo))
+    }).catch((e) => this.log(`zcode ${entry.name} 首轮失败：${e.message}`)).finally(() => this.queued.delete(pseudo))
     return { ok: true, convId: pseudo, name: key, sessionId: "", background: true }
   }
 
@@ -637,7 +664,7 @@ export class ZcodeHerdrDriver extends ZcodeDriverBase {
     enqueueChain(this.chains, entry.key, async () => {
       if (!entry.paneId) throw new ZcodeError(`会话 ${entry.name} 还没拿到 herdr pane`, { code: "zcode_error" })
       await this.#turnBackground({ entry, prompt: text })
-    }).catch(() => {}).finally(() => this.queued.delete(entry.key))
+    }).catch((e) => this.log(`zcode ${label} ${entry.name} 失败：${e.message}`)).finally(() => this.queued.delete(entry.key))
     return { ok: true, convId: entry.convId, name: entry.name, background: true }
   }
 

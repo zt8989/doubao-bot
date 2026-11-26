@@ -167,9 +167,9 @@ test("FeishuGateway.onMessage：命中入箱（payload/dedupeKey/replyTarget）�
   assert.equal(event.payload.senderId, "ou_boss")
   assert.equal(event.dedupeKey, `chat:message:${event.payload.clientId}`)
   assert.match(event.payload.clientId, /^feishu-om_1$/)
-  // 回复目标跟来源走：私聊 → user
+  // 回复目标跟来源走：私聊 → user（带会话 id，回复优先发 chat_id）
   const st = JSON.parse(fs.readFileSync(stateFile, "utf8")).feishu
-  assert.deepEqual(st.replyTarget, { kind: "user", id: "ou_boss" })
+  assert.deepEqual(st.replyTarget, { kind: "user", id: "ou_boss", chatId: "oc_dm" })
 
   // WS 重连重投同一 message_id：不重复入箱，计入 duplicates
   await gateway.onMessage(evt({ chat_type: "p2p", chat_id: "oc_dm" }))
@@ -230,13 +230,13 @@ test("FeishuReplyPump：无目标跳过、首次锚定不回放、增量推送�
   let st = JSON.parse(fs.readFileSync(stateFile, "utf8")).feishu
   assert.equal(st.lastPushedId, "m2")
 
-  // 新回复出现：推给私聊目标（userId + markdown），断点前移
+  // 新回复出现：推给私聊目标（旧状态无 chatId 回落 userId + markdown），断点前移
   ctx.chat.messagesBase = async () => replies("旧回复一", "旧回复二", "新回复三")
   const r = await pump.pollOnce()
   assert.equal(r.ok, true)
   assert.equal(r.pushed, 1)
   assert.equal(pushed.length, 1)
-  assert.equal(pushed[0].channel, "lark")
+  assert.equal(pushed[0].channel, "feishu")
   assert.deepEqual(pushed[0].payload, { chatId: "", userId: "ou_boss", markdown: "新回复三" })
   assert.match(pushed[0].dedupeKey, /feishu:push:m3/)
   st = JSON.parse(fs.readFileSync(stateFile, "utf8")).feishu
@@ -245,6 +245,19 @@ test("FeishuReplyPump：无目标跳过、首次锚定不回放、增量推送�
   // 再轮询：没有新货，不重推
   assert.equal((await pump.pollOnce()).skipped, "no-new")
   assert.equal(pushed.length, 1)
+})
+
+test("FeishuReplyPump：replyTarget 带 chatId 时优先发会话 id（不出 open_id）", async () => {
+  const { stateFile } = tmpCtx()
+  const { ctx, pushed } = pumpCtx(stateFile, replies("旧回复"))
+  const pump = new FeishuReplyPump({ cfg: ctx.cfg, ctx, log: () => {} })
+  setFeishuState(stateFile, { replyTarget: { kind: "user", id: "ou_boss", chatId: "oc_dm" } })
+
+  // 锚定旧回复
+  await pump.pollOnce()
+  ctx.chat.messagesBase = async () => replies("旧回复", "带会话回复")
+  assert.equal((await pump.pollOnce()).pushed, 1)
+  assert.deepEqual(pushed[0].payload, { chatId: "oc_dm", userId: "", markdown: "带会话回复" })
 })
 
 test("FeishuReplyPump：只推完成的 assistant 回复；群聊目标发 chatId；超长截断", async () => {
@@ -424,4 +437,33 @@ test("/api/feishu：GET 读配置与状态，POST 保存/校验失败返回 400"
 test("FeishuGateway.start：无凭据明确报错，不进 SDK 也不触网", async () => {
   const gw = new FeishuGateway({ cfg: { feishu: feishuCfg({ appId: "", appSecret: "" }) }, ctx: {}, log: () => {} })
   await assert.rejects(() => gw.start(), /凭据未配置/)
+})
+
+test("FeishuGateway.sendOutbound：同 app 直发，chat_id/open_id 二选一，code!=0 报错", async () => {
+  const calls = []
+  const gw = new FeishuGateway({ cfg: { feishu: feishuCfg() }, ctx: {}, log: () => {} })
+  gw.client = {
+    im: { v1: { message: {
+      create: async ({ params, data }) => {
+        calls.push({ params, data })
+        return { code: 0, msg: "success", data: { message_id: "om_out" } }
+      },
+    } } },
+  }
+  const okResp = await gw.sendOutbound({ chatId: "oc_dm", markdown: "**hi**" })
+  assert.equal(okResp.message_id, "om_out")
+  assert.deepEqual(calls[0].params, { receive_id_type: "chat_id" })
+  assert.deepEqual(calls[0].data, { receive_id: "oc_dm", msg_type: "text", content: JSON.stringify({ text: "**hi**" }) })
+
+  // 无 chatId 时按 open_id 发（出站与入站同 app，不会跨 app）
+  await gw.sendOutbound({ userId: "ou_boss", text: "hello" })
+  assert.deepEqual(calls[1].params, { receive_id_type: "open_id" })
+
+  // 业务错误码透出
+  gw.client.im.v1.message.create = async () => ({ code: 99992361, msg: "open_id cross app" })
+  await assert.rejects(() => gw.sendOutbound({ chatId: "oc_x", text: "y" }), /99992361.*cross app/s)
+
+  // 通道没起：明确报错
+  const off = new FeishuGateway({ cfg: { feishu: feishuCfg() }, ctx: {}, log: () => {} })
+  await assert.rejects(() => off.sendOutbound({ chatId: "oc_x", text: "y" }), /未启动/)
 })

@@ -1059,6 +1059,13 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     handlers: {
       mail: (event) => ctx.mail.send(event.payload),
       lark: (event) => larkDriver.send({ ...event.payload, idempotencyKey: `fm-${event.uuid}` }),
+      // feishu 渠道：入站同一个 app 的 SDK client 直发（lark 渠道是 lark-cli 的另一个 app，
+      // open_id/chat 成员关系都跨不过去——飞书回复推送必须走这个渠道）。
+      feishu: (event) => {
+        const gw = ctx.feishu
+        if (!gw || typeof gw.sendOutbound !== "function") throw new Error("飞书通道未启用（feishu.enabled=false 或启动失败），feishu 渠道不可外发")
+        return gw.sendOutbound(event.payload)
+      },
     },
     onSent: (event) => mailAcceptanceSent(ctx, event),
     onFailed: (event, error) => mailAcceptanceFailed(ctx, event, error),

@@ -1,8 +1,8 @@
 // 飞书入站通道（openclaw 式）：官方 SDK 的 WS 长连接收 im.message.receive_v1，
 // 按白名单/群分级筛选后写成 Inbox 的 chat.message 事件——之后复用现有链路
 // （Worker → chat.deliver → routerOnce → router agent），本文件不碰会话编排。
-// 回复推送（FeishuReplyPump）轮询 router 会话的 assistant 增量，经 Outbox lark 渠道发回飞书；
-// 出站仍走 lark-cli，SDK 凭据只管入站订阅。
+// 回复推送（FeishuReplyPump）轮询 router 会话的 assistant 增量，经 Outbox feishu 渠道发回飞书；
+// 出站用入站同一个 app 直发（open_id/chat_id 都是 app 作用域的，换 app 发会报 open_id cross app）。
 //
 // service 里 enabled 才动态 import 本文件，feishu.enabled=false 的机器零加载 SDK。
 import { AppType, Client, Domain, EventDispatcher, WSClient } from "@larksuiteoapi/node-sdk"
@@ -148,6 +148,21 @@ export class FeishuGateway {
     return { enabled: this.feishuCfg.enabled === true, ...this.status }
   }
 
+  // 出站直发（Outbox feishu 渠道的 adapter）：用入站同一个 app 的 SDK client 发消息。
+  // text/markdown 都按飞书 text 消息发——markdown 修饰符原样保留，换 app 转渲染不值得。
+  async sendOutbound({ chatId = "", userId = "", text = "", markdown = "" } = {}) {
+    if (!this.client) throw new Error("飞书通道未启动（feishu.enabled=false 或启动失败），feishu 渠道不可外发")
+    const receiveId = String(chatId || userId || "").trim()
+    if (!receiveId) throw new Error("feishu 渠道外发需要 chatId 或 userId（open_id）")
+    const body = String(text.trim() ? text : markdown)
+    const r = await this.client.im.v1.message.create({
+      params: { receive_id_type: chatId ? "chat_id" : "open_id" },
+      data: { receive_id: receiveId, msg_type: "text", content: JSON.stringify({ text: body }) },
+    })
+    if (r?.code !== 0) throw new Error(`飞书外发失败：code=${r?.code} ${r?.msg || "未知错误"}`)
+    return r?.data ?? {}
+  }
+
   // 租户凭证 → 机器人信息 → bot open_id。失败不挡启动：回落到配置里的 botName/botOpenId，
   // 什么都没有时非 high 群识别不了 @，会按拒收日志提示。
   async resolveBotOpenId() {
@@ -196,10 +211,13 @@ export class FeishuGateway {
         return
       }
       this.status.accepted++
-      // 回复目标跟着来源走：私聊发回发件人，群聊发回群；console/chat-ui 来的消息不改目标。
+      // 回复目标跟着来源走：私聊发回发件人（带上会话 id，直发用 chat_id 更稳），群聊发回群；
+      // console/chat-ui 来的消息不改目标。open_id 是 app 作用域的，跨 app 发必被拒。
       const book = new Book(this.cfg.stateFile)
       const st = feishuState(book)
-      st.replyTarget = verdict.chatType === "p2p" ? { kind: "user", id: verdict.senderId } : { kind: "chat", id: verdict.chatId }
+      st.replyTarget = verdict.chatType === "p2p"
+        ? { kind: "user", id: verdict.senderId, chatId: verdict.chatId }
+        : { kind: "chat", id: verdict.chatId }
       st.lastInboundAt = nowIso()
       book.save()
       // client 格式与 chat.send 的 cleanClientId 兼容（字母数字._:-），复用同一套去重与 UI 口径。
@@ -225,7 +243,7 @@ export class FeishuGateway {
   }
 }
 
-// 回复推送：轮询 router 会话，把新完成的 assistant 回复经 Outbox lark 渠道发回飞书。
+// 回复推送：轮询 router 会话，把新完成的 assistant 回复经 Outbox feishu 渠道发回飞书。
 // console Chat 页是拉模式（自己轮询会话内容），飞书侧必须推，所以单独要这个泵。
 export class FeishuReplyPump {
   constructor({ cfg, ctx, log = () => {} } = {}) {
@@ -287,11 +305,14 @@ export class FeishuReplyPump {
       for (const m of fresh) {
         const text = String(m.text).trim()
         const body = text.length > MAX_PUSH_CHARS ? `${text.slice(0, MAX_PUSH_CHARS)}\n…（已截断，完整内容见控制台）` : text
+        // 私聊优先发 chat_id（p2p 会话 id，全局唯一）；旧状态里没有 chatId 时回落 open_id——
+        // 出站与入站同 app，open_id 不会跨 app。群聊本来就是 chat id。
+        const recv = target.kind === "user"
+          ? (target.chatId ? { chatId: target.chatId } : { userId: target.id })
+          : { chatId: target.id }
         enqueueOutbound(
           this.ctx,
-          target.kind === "user"
-            ? { type: "lark", input: { userId: target.id, markdown: body }, dedupeKey: `feishu:push:${m.id}` }
-            : { type: "lark", input: { chatId: target.id, markdown: body }, dedupeKey: `feishu:push:${m.id}` }
+          { type: "feishu", input: { ...recv, markdown: body }, dedupeKey: `feishu:push:${m.id}` }
         )
       }
       st.lastPushedId = String(fresh[fresh.length - 1].id)

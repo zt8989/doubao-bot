@@ -23,7 +23,7 @@ function tmpConfig(obj) {
 }
 
 // herdr 载体的适配器：假 herdr CLI + 假 runtime，状态隔离到临时目录。
-function makeHerdrAdapter({ logs, workMs, block, zcodeMode } = {}) {
+function makeHerdrAdapter({ logs, workMs, block, goneMs, zcodeMode } = {}) {
   const dir = tmpDir()
   const got = logs ?? []
   const stateFile = path.join(dir, "herdr-fake-state.json")
@@ -32,6 +32,8 @@ function makeHerdrAdapter({ logs, workMs, block, zcodeMode } = {}) {
   else delete process.env.HERDR_FAKE_WORK_MS
   if (block) process.env.HERDR_FAKE_BLOCK = "1"
   else delete process.env.HERDR_FAKE_BLOCK
+  if (goneMs) process.env.HERDR_FAKE_GONE_MS = String(goneMs)
+  else delete process.env.HERDR_FAKE_GONE_MS
   // 插件检查走 ZCODE_CLI_SETTINGS_FILE：伪造一个挂了 herdr-zcode 的 setting.json
   const pluginDir = path.join(dir, "fake-plugin")
   fs.mkdirSync(path.join(pluginDir, ".zcode-plugin"), { recursive: true })
@@ -52,6 +54,7 @@ function makeHerdrAdapter({ logs, workMs, block, zcodeMode } = {}) {
     delete process.env.HERDR_FAKE_STATE
     delete process.env.HERDR_FAKE_WORK_MS
     delete process.env.HERDR_FAKE_BLOCK
+    delete process.env.HERDR_FAKE_GONE_MS
     if (prevSettings === undefined) delete process.env.ZCODE_CLI_SETTINGS_FILE
     else process.env.ZCODE_CLI_SETTINGS_FILE = prevSettings
   }
@@ -229,6 +232,27 @@ test("herdr blocked：权限待批时立刻报错，archive 收尾", async () =>
     assert.equal(adapter.driver.resolve("卡权限").status, "error")
     assert.equal((await adapter.archive("卡权限")).ok, true)
     assert.deepEqual(await adapter.runningMap(), {})
+  } finally {
+    cleanup()
+  }
+})
+
+test("herdr agent 消失（TUI 退出）：续说报 agent_gone，不再把消息敲进空 shell", async () => {
+  const { adapter, cleanup } = makeHerdrAdapter({ workMs: 60000, goneMs: 300 })
+  try {
+    const out = await adapter.deliver({ name: "会掉线的会话", prompt: "开场" })
+    // 等 prompt 提交进 fake（working，300ms 后 fake 把 agent 注销）
+    for (let i = 0; i < 40; i++) {
+      const e = adapter.driver.resolve(out.convId)
+      if (e?.paneId) break
+      await new Promise((r) => setTimeout(r, 250))
+    }
+    await adapter.driver.waitFinished(out.convId, { timeoutMs: 15000, pollMs: 200 })
+    const entry = adapter.driver.resolve(out.convId)
+    assert.equal(entry.status, "error")
+    assert.match(entry.error ?? "", /agent.*没了|TUI 进程退了|空 shell|没有 agent/)
+    // 后续续说：#submit 前置校验直接拦（不把 prompt 敲进 shell）
+    await assert.rejects(adapter.driver.send("会掉线的会话", "你是谁"), /agent.*没了|TUI|空 shell|agent_gone|没有 agent/)
   } finally {
     cleanup()
   }

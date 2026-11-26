@@ -1,4 +1,4 @@
-// 统一外发入口：send --type mail|lark → Outbox。
+// 统一外发入口：send --type mail|lark|feishu → Outbox。
 import { withSessionRoute } from "./mail.mjs"
 // 这里只校验并持久化，不调用外部 CLI；实际发送由 Dispatcher 的通道 adapter 完成。
 export function outboundPayload(type, input = {}) {
@@ -12,7 +12,7 @@ export function outboundPayload(type, input = {}) {
     const sessionId = String(input.sessionId ?? "").trim()
     return { channel, payload: { to, subject: withSessionRoute(subject, sessionId), body: String(input.body ?? ""), ...(sessionId ? { sessionId } : {}) } }
   }
-  if (channel === "lark") {
+  if (channel === "lark" || channel === "feishu") {
     const chatId = String(input.chatId ?? "").trim()
     const userId = String(input.userId ?? "").trim()
     const text = String(input.text ?? "")
@@ -21,7 +21,7 @@ export function outboundPayload(type, input = {}) {
     if (Boolean(text.trim()) === Boolean(markdown.trim())) throw new Error("send --type lark 的 --text 与 --markdown 必须且只能提供一个")
     return { channel, payload: { chatId, userId, ...(text.trim() ? { text } : { markdown }) } }
   }
-  throw new Error("send 需要 --type mail|lark")
+  throw new Error("send 需要 --type mail|lark|feishu")
 }
 
 export function enqueueOutbound(ctx, { type, input = {}, dedupeKey = "" } = {}) {

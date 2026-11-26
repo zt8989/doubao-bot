@@ -2,6 +2,7 @@
 // 假 herdr CLI：模拟 herdr 0.9.5 的 agent/pane JSON 面，供 zcodedrv 的 herdr 驱动测试用。
 // 状态存 HERDR_FAKE_STATE 指定的 JSON 文件；轮次时长 HERDR_FAKE_WORK_MS（默认 1200ms）；
 // HERDR_FAKE_BLOCK=1 时轮次永远 blocked（测权限拦截）。
+// HERDR_FAKE_GONE_MS=N：轮次开始 N ms 后 agent 注销（registered=false，模拟 TUI 进程退出）。
 // 支持的子命令：--version / status server / workspace create|close / pane run|read|send-keys /
 // report-agent / agent get|list。轮次完成靠 agent get 时按时间翻转 working→idle 并推 seq。
 // waitFinished 的 status 轮询与驱动轮询会并发调 CLI：读改写必须拿锁串行，否则互相覆盖丢提交。
@@ -76,6 +77,12 @@ function completeIfDue(p, now = Date.now()) {
     p.status = "idle"
     p.seq += 2
     p.replies.push(replyFor(p.prompts.at(-1) ?? ""))
+  }
+  // HERDR_FAKE_GONE_MS：working 一段时间后 agent 消失（模拟 TUI 退出、注册丢失）。
+  const goneMs = Number(process.env.HERDR_FAKE_GONE_MS ?? 0)
+  if (goneMs > 0 && p.status === "working" && p.workingSince && now - p.workingSince >= goneMs) {
+    p.registered = false
+    p.status = "unknown"
   }
 }
 
