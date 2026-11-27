@@ -131,6 +131,8 @@ export function exec(cmd, args, { cwd, timeout = 60000, input, env } = {}) {
         )
       })
     )
+    // 子进程提前死亡时 stdin 写入会 EPIPE：挂 error 监听吞掉，调用方经 close/timeout 路径拿结果。
+    child.stdin.on("error", () => {})
     child.stdin.end(input ?? "")
   })
 }

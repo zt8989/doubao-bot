@@ -146,6 +146,8 @@ export function startConsoleHttp({ store, ctx, dir, host, port, token = "", log 
     }
     req.on("close", cleanup)
     res.on("error", cleanup)
+    // res.on("error") 覆盖不到底层 socket：客户端强断时 socket 的 EPIPE 无人接会炸进程。
+    res.socket?.on?.("error", () => {})
     const pulse = async () => {
       if (closed) return
       try {
