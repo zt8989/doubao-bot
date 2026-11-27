@@ -79,13 +79,15 @@ test("router agent首轮新建，后续巡检复用同一条会话", async () =>
     assert.equal(f.queued[0].target, "router-1")
     assert.match(f.opened[0].prompt, /## 职责/)
     assert.match(f.opened[0].prompt, /## 技能调用时机/)
-    // 子智能体分配协议：foreman session open 开工作会话（弃 CreateSession），收工自动通知
+    // 子智能体分配协议：foreman session open 开工作会话（正面表述，弃 CreateSession），收工自动通知
     assert.match(f.opened[0].prompt, /## 子智能体分配协议/)
-    assert.match(f.opened[0].prompt, /不要用 CreateSession/)
+    assert.doesNotMatch(f.opened[0].prompt, /CreateSession/)
+    assert.match(f.opened[0].prompt, /一律在 foreman 开的独立工作会话/)
     assert.match(f.opened[0].prompt, /foreman session open --role coder.*agents[/\\]coder\.md/)
     assert.match(f.opened[0].prompt, /--role 换成 reviewer.*agents[/\\]reviewer\.md/)
     assert.match(f.opened[0].prompt, /foreman steer/)
-    assert.match(f.opened[0].prompt, /不要轮询等待结果/)
+    assert.match(f.opened[0].prompt, /收工时 foreman 自动把【工作会话状态变化】/)
+    assert.match(f.opened[0].prompt, /待命等待任务消息/, "初始化=确认后待命，由任务消息驱动")
     assert.match(f.opened[0].prompt, /修正本地账本/)
     assert.match(f.opened[0].prompt, /foreman tasks --json/)
     assert.match(f.opened[0].prompt, /真实运行/)

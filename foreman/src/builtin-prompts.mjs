@@ -2,7 +2,8 @@
 // 配置里 sessionFlow.promptFile / deliver.promptFile / products[].promptFile 留空时就用这里的，
 // 提示词和编排逻辑同版本、同评审——不再靠 ~/.foreman/prompts 下的运行时副本。
 // 另有 src/builtin/agents/*.md：按智能体拆分的岗位提示词（coder/reviewer），
-// zcode 载体下 router 用 CreateSession 开独立子会话，把这里的绝对路径写进首句让子智能体自读。
+// zcode 载体下 router 用 foreman session open 开独立工作会话，把这里的绝对路径写进首句让子会话自读。
+// 每次调用都现读文件（进程内无缓存）：改 md 当场生效，服务免重启。
 import fs from "node:fs"
 import { fileURLToPath } from "node:url"
 
@@ -19,15 +20,11 @@ const AGENT_PROMPT_FILES = {
   reviewer: "agents/reviewer.md",
 }
 
-const cache = new Map()
-
 export const BUILTIN_PROMPT_LANES = Object.keys(FILES)
 
 export function builtinPrompt(lane = "dispatch") {
   const normalized = lane === "inspector" ? "router" : lane
   const key = ["orchestrator", "router", "merge"].includes(normalized) ? normalized : "dispatch"
-  const hit = cache.get(key)
-  if (hit) return hit
   const file = new URL(`./builtin/${FILES[key]}`, import.meta.url)
   let text = ""
   try {
@@ -36,7 +33,6 @@ export function builtinPrompt(lane = "dispatch") {
     throw new Error(`读不到内置提示词 ${FILES[key]}：${e.message}`)
   }
   if (!text.trim()) throw new Error(`内置提示词是空文件：${FILES[key]}`)
-  cache.set(key, text)
   return text
 }
 

@@ -355,3 +355,17 @@ function normalizePr(it) {
     prUrl: String(o.prUrl ?? "").trim(),
   }
 }
+
+// 运行环境附录：创建会话时现采现注（飞书通道状态与回投目标等），配置改动即时生效、与服务重启解耦。
+// 纯数据入参（调用方从 cfg/网关现采），本模块不感知 ctx。
+export function runtimeEnvSection({ feishu = null } = {}) {
+  if (!feishu?.enabled) return ""
+  const lines = [
+    "## 运行环境（本会话创建时现采，均为最新值）",
+    `- 飞书通道：已启用（长连接入站${feishu.appId ? `，app ${feishu.appId}` : ""}${feishu.running === false ? "，当前未运行" : ""}）`,
+  ]
+  if ((feishu.groups?.high ?? []).length) lines.push(`- 全收群 chatId：${feishu.groups.high.join("、")}`)
+  if (feishu.botOpenId) lines.push(`- 机器人 open_id：${feishu.botOpenId}`)
+  lines.push('- 给用户发飞书消息：`foreman send --type feishu --chat-id <chatId> --markdown "<内容>"`（chatId 用消息来源附带的 id，或上面的全收群）')
+  return lines.join("\n")
+}

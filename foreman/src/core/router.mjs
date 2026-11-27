@@ -3,26 +3,28 @@ import { Book } from "../book.mjs"
 import { agentExecutor } from "./executors.mjs"
 import { builtinAgentPromptPath } from "../builtin-prompts.mjs"
 import { memoryBootstrap } from "./memory.mjs"
+import { runtimeEnvSection } from "../prompts.mjs"
 
-// 子智能体分配协议：编码/审查由 foreman 开独立工作会话（yolo，不卡审批，收工自动通知 router）。
-// 不用 CreateSession：它开的子会话是 build 权限模式，每个改动都要审批，必然卡死（2026-11-27 实测）；
-// 不用 Agent 工具：子代理一次性，审查-修复循环无法跨轮续说。
+// 子智能体分配协议：编码/审查全部经由 foreman 工作会话（yolo，开工不受审批阻塞，收工自动通知 router）。
+// 提示词一律正面表述：只写「用什么、怎么用」，反面清单留在本注释备查——
+// CreateSession 子会话是 build 权限模式（每个改动都要审批，2026-11-27 实测卡死）；
+// Agent 工具子代理一次性，审查-修复循环无法跨轮续说。
 // 任务包写文件传 --task-file；delivered 会话无 --cwd，任务包必须自带 worktree 绝对路径。
 function agentProtocol() {
   const coder = builtinAgentPromptPath("coder")
   const reviewer = builtinAgentPromptPath("reviewer")
   return [
-    "## 子智能体分配协议（编码/审查必须这样派，不要在自己会话内串行写码或审查）",
+    "## 子智能体分配协议（编码/审查全部经由 foreman 工作会话完成）",
     "",
-    "**不要用 CreateSession**（它开的子会话是 build 权限模式，每个改动都要审批，必然卡死）**也不要用 Agent 工具**（子代理一次性，无法跨轮续说）。编码与审查一律用 foreman 开独立工作会话（yolo，不卡审批，收工自动通知你）：",
+    "编码与审查一律在 foreman 开的独立工作会话里进行：yolo 权限开工顺滑、工作目录随会话就位、收工结论自动回投你的收件箱，你在本会话专注编排与汇总：",
     "",
     "1. 任务包先写成文件（绝对路径）：工单键与链接、正文与验收标准、涉及工程及基线——含各工程 worktree 绝对路径与工作分支、补充约束；审查会话的则给 PR 列表与测试报告。",
     `2. 开编码会话：\`foreman session open --role coder --issue <owner/repo>#<单号> --repo <worktree 绝对路径> --task-file <任务包绝对路径>\`（coder 岗位提示词：${coder}，foreman 自动装配，工作目录就是 --repo）。`,
     `3. 开审查会话：同上把 --role 换成 reviewer（reviewer 岗位提示词：${reviewer}）。`,
-    "4. **不要轮询等待结果**：会话收工时 foreman 自动把【工作会话状态变化】连同最终回复原文投进你的收件箱。期间响应用户新消息优先。",
-    "5. 修复循环：审查有阻断时，把审查 JSON 原文用 `foreman steer <会话名> --text \"<审查意见>\"` 续给**原编码会话**逐项修复；修完再开新的审查会话复审。",
-    "6. 同一工单始终复用同一条编码会话（用 steer 续），不要重复 open。",
-    "7. 会话清单与实时状态看 `foreman tasks --json`；open/steer 报错（如 blocked=目标会话卡死）时按报错处理：解除阻塞或换新会话，不要反复重试同一个卡死的会话。",
+    "4. 会话收工时 foreman 自动把【工作会话状态变化】连同最终回复原文投进你的收件箱；等待结论期间优先响应新任务与用户消息。",
+    "5. 修复循环：审查有阻断时，把审查 JSON 原文用 `foreman steer <会话名> --text \"<审查意见>\"` 续给原编码会话逐项修复；修完再开新的审查会话复审。",
+    "6. 同一工单全程复用同一条编码会话（用 steer 续说保持上下文），结论链路完整可追溯。",
+    "7. 会话清单与实时状态看 `foreman tasks --json`；open/steer 返回 blocked 说明目标会话正被占用或等待，按报错指引解除后重发即可。",
   ].join("\n")
 }
 
@@ -62,15 +64,23 @@ async function deliver(ctx, rec, text, { now, action, reason = "", scheduled = f
   if (action === "created") {
     name = `foreman-router-${stamp(now)}`
     const projectDir = String(routerConfig(cfg).projectDir ?? cfg.deliver?.projectDir ?? "").trim()
+    // 运行环境现采现注：飞书通道状态与回投目标随配置即时生效，服务免重启。
+    const f = cfg?.feishu ?? {}
+    const env = runtimeEnvSection({
+      feishu: f?.enabled
+        ? { enabled: true, appId: f.appId, groups: f.groups, botOpenId: ctx.feishu?.botOpenId ?? f.botOpenId ?? "", running: ctx.feishu?.view?.()?.running }
+        : { enabled: false },
+    })
     const first = [
       agentExecutor(cfg).prompt,
       memoryBootstrap(cfg),
       projectDir ? `监控项目目录：${projectDir}` : "",
       agentProtocol(),
+      env,
       rec?.convId ? `上一条 router agent 会话 ${rec.convId} 已连续 24 小时未成功接收消息；你接替它，不假定旧会话仍可用。` : "",
       scheduled
-        ? "这是首次巡检，请按上面的职责开始检查。"
-        : "这是 router agent 的首条事件，请按上面的职责处理。",
+        ? "这是首次巡检任务，请按上面的职责开始检查。"
+        : "这是初始化确认：收到后回一句确认（例如「已就绪，待命」），然后待命等待任务消息；巡检、派工等动作由后续任务消息逐条驱动。",
       text,
     ].filter(Boolean).join("\n\n")
     const opened = await session.openNew({ name, prompt: first, noWait: true })

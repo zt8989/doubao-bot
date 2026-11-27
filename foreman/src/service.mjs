@@ -6,7 +6,7 @@ import path from "node:path"
 import crypto from "node:crypto"
 import { nowIso, sleep, inWorkHours } from "./util.mjs"
 import { Book } from "./book.mjs"
-import { deliverPrompt, noticeSessionName, issueBranch } from "./prompts.mjs"
+import { deliverPrompt, noticeSessionName, issueBranch, runtimeEnvSection } from "./prompts.mjs"
 import { builtinPrompt } from "./builtin-prompts.mjs"
 import { notifyTarget, shouldNotify, notifyText, runRound, acquireLock, releaseLock, bucketOf, CLOSED_STATES } from "./orchestrator.mjs"
 import {
@@ -179,6 +179,19 @@ export function deliverContextFor(cfg, repo = "") {
   }
 }
 
+// 飞书环境快照：运行环境附录的数据源（cfg 里的常量 + 网关的实时状态）。
+function feishuEnvSnapshot(ctx) {
+  const f = ctx.cfg?.feishu ?? {}
+  if (!f?.enabled) return { enabled: false }
+  return {
+    enabled: true,
+    appId: f.appId ?? "",
+    groups: f.groups ?? {},
+    botOpenId: ctx.feishu?.botOpenId ?? f.botOpenId ?? "",
+    running: ctx.feishu?.view?.()?.running,
+  }
+}
+
 // 编排提示词：配置给了路径就读那份（运行时副本、人工可改）；没给就用代码内置的。
 // 给了路径但读不到 / 是空文件，仍然直接报错，不悄悄退回内置（那样人改了却不知道没生效）。
 // lane=merge 读合并会话提示词，其余读派单会话提示词。
@@ -212,6 +225,9 @@ export async function deliverNewSession(ctx, { text = "", kind = "", repo = "", 
     fixed, projectDir: dc.projectDir, product: dc.product, kind, text,
     running, maxRunning, lane: laneName,
   })
+  // 运行环境现采现注：飞书通道状态与回投目标随配置即时生效，服务免重启。
+  const env = runtimeEnvSection({ feishu: feishuEnvSnapshot(ctx) })
+  if (env) prompt += `\n\n${env}`
   const name = noticeSessionName({ prefix: cfg?.deliver?.namePrefix ?? "foreman", kind: laneName === "merge" ? "合并" : "派单" })
   const noWait = cfg?.deliver?.waitFirstReply !== true
   const key = watcher?.issueKey || repo || ""
