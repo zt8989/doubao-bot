@@ -386,10 +386,10 @@ export async function applyVerdict(ctx, { req, from = "", messageId = "", verdic
 
   const target = sessionTargetFor(book, String(prev.issueKey ?? ""))
   let steered = false
-  if (target && typeof ctx?.dws?.steer === "function") {
+  if (target && typeof ctx?.session?.steer === "function") {
     const body = verdictText({ req: prev, verdict, from, summary })
     try {
-      await ctx.dws.steer(target, body)
+      await ctx.session.steer(target, body)
       book.markSteer(target, { kind: "mail-verdict", chars: body.length })
       steered = true
       ctx?.log?.(`验收回复已注回会话 ${target}（${key} · ${verdict}）`)
@@ -449,12 +449,12 @@ function missingConversation(error) {
 }
 
 async function conversationExists(ctx, sessionId) {
-  if (typeof ctx.dws?.info !== "function") return true // 旧 adapter 没有查询能力，交给 steer 自己判定。
+  if (typeof ctx.session?.info !== "function") return true // 旧 adapter 没有查询能力，交给 steer 自己判定。
   try {
-    const info = await ctx.dws.info(sessionId)
+    const info = await ctx.session.info(sessionId)
     if (info === null) return false
     if (info?.ok === false) {
-      const message = String(info?.error?.message ?? info?.error ?? info?.message ?? "dws.info 查询会话失败")
+      const message = String(info?.error?.message ?? info?.error ?? info?.message ?? "查询会话失败")
       if (missingConversation(message)) return false
       throw new Error(message)
     }
@@ -472,8 +472,8 @@ export async function deliverMailReply(ctx, event) {
   let sessionId = requested && await conversationExists(ctx, requested) ? requested : ""
   if (sessionId) {
     try {
-      if (typeof ctx.dws?.steer !== "function") throw new Error("dws.steer 不可用，无法投递邮件回复")
-      await ctx.dws.steer(sessionId, event.text)
+      if (typeof ctx.session?.steer !== "function") throw new Error("会话适配器 steer 不可用，无法投递邮件回复")
+      await ctx.session.steer(sessionId, event.text)
       const book = ctx.book ?? ctx.bookFactory?.() ?? new Book(ctx.cfg.stateFile)
       book?.markSteer?.(sessionId, { kind: "mail.reply", chars: String(event.text ?? "").length })
       book?.save?.()

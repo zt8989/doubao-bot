@@ -54,7 +54,7 @@ function sseGet(url) {
 
 test("数据源：会话树挂子、增量转录、未知会话只读、非 zcode 载体全空", async (t) => {
   const { cfg, dws } = await fixture(t)
-  const src = createChatStreamSource({ ctx: { cfg, dws }, log: () => {} })
+  const src = createChatStreamSource({ ctx: { cfg, session: dws }, log: () => {} })
 
   const sess = await src.sessions()
   assert.equal(sess.carrier, "zcode")
@@ -87,7 +87,7 @@ test("数据源：会话树挂子、增量转录、未知会话只读、非 zcod
 
 test("HTTP：三路由可用，SSE 推快照与增量，并发超限 429", { timeout: 30000 }, async (t) => {
   const { dir, db, cfg, dws, now } = await fixture(t)
-  const h = await startConsoleHttp({ store: storeStub, ctx: { cfg, dws }, dir: path.join(dir, "dist"), host: "127.0.0.1", port: 0, token: "", onRpc: null })
+  const h = await startConsoleHttp({ store: storeStub, ctx: { cfg, session: dws }, dir: path.join(dir, "dist"), host: "127.0.0.1", port: 0, token: "", onRpc: null })
   // SSE 连接不会自然结束：teardown 用 body.cancel() 收（未读流 abort 会产生 unhandled
   // AbortError，node:test 会被它挂住），服务端的推流定时器随 req close 清掉。
   const cleanup = []

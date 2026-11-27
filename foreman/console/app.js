@@ -1472,6 +1472,8 @@ class FmFeishu extends LitElement {
     bits.push(gw?.running ? "运行中 · 长连接已连上" : cfg.enabled ? "已启用 · 未运行" : "未启用")
     bits.push((cfg.allowUsers || []).length ? `私聊白名单 ${cfg.allowUsers.length} 人` : "私聊放行")
     if ((cfg.groups?.high || []).length) bits.push(`全收群 ${cfg.groups.high.length} 个`)
+    // worker 认领到飞书消息 → bot 处理中；回复经 outbox 送出后熄灭（网关 processing 状态）
+    if (gw?.processing?.text) bits.push(`处理中：${gw.processing.text}`)
     return bits.join(" · ")
   }
   render() {
@@ -1926,6 +1928,7 @@ class FmConsole extends LitElement {
       if (this.view === "schedules") this.loadSchedules()
       if (this.view === "operations") this.loadOperations()
       if (this.view === "sessions") this.loadAgentSessions()
+      if (this.view === "im") this.loadFeishu()
     }
     window.addEventListener("focus", this._onFocus)
 
@@ -1944,6 +1947,7 @@ class FmConsole extends LitElement {
       if (this.view === "schedules") this.loadSchedules()
       if (this.view === "operations") this.loadOperations()
       if (this.view === "sessions" || this.view === "chat") this.loadAgentSessions()
+      if (this.view === "im") this.loadFeishu()
     }, 15000)
   }
 

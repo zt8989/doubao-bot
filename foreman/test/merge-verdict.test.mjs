@@ -35,7 +35,7 @@ test("deliverNewSession：合并会话记下触发类型与仓库", async () => 
     const ctx = {
       cfg,
       log: () => {},
-      dws: { openNew: async () => ({ convId: "conv-new" }) },
+      session: { openNew: async () => ({ convId: "conv-new" }) },
     }
     const out = await deliverNewSession(ctx, { text: "PR demo/demo#268 待合并", kind: "PR待合并", repo: "demo/demo", lane: "merge" })
     assert.equal(out.convId, "conv-new")

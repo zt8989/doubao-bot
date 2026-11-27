@@ -29,7 +29,7 @@ function fixture(over = {}) {
     },
   }
   const state = { router: { running: false, count: 0 } }
-  return { dir, cfg, dws, state, opened, queued }
+  return { dir, cfg, session: dws, state, opened, queued }
 }
 
 test("router agent底层投递使用 dws msg --mode queue", async () => {
@@ -79,14 +79,13 @@ test("router agent首轮新建，后续巡检复用同一条会话", async () =>
     assert.equal(f.queued[0].target, "router-1")
     assert.match(f.opened[0].prompt, /## 职责/)
     assert.match(f.opened[0].prompt, /## 技能调用时机/)
-    // 子智能体分配协议：首句必须带上两个岗位提示词文件的绝对路径与 CreateSession 分配方式
+    // 子智能体分配协议：foreman session open 开工作会话（弃 CreateSession），收工自动通知
     assert.match(f.opened[0].prompt, /## 子智能体分配协议/)
-    assert.match(f.opened[0].prompt, /CreateSession/)
-    assert.match(f.opened[0].prompt, /编码智能体提示词文件：.*agents[/\\]coder\.md/)
-    assert.match(f.opened[0].prompt, /审查智能体提示词文件：.*agents[/\\]reviewer\.md/)
-    assert.match(f.opened[0].prompt, /没有 project\/工作目录参数/)
-    assert.match(f.opened[0].prompt, /WaitSessions/)
-    assert.match(f.opened[0].prompt, /SendToSession/)
+    assert.match(f.opened[0].prompt, /不要用 CreateSession/)
+    assert.match(f.opened[0].prompt, /foreman session open --role coder.*agents[/\\]coder\.md/)
+    assert.match(f.opened[0].prompt, /--role 换成 reviewer.*agents[/\\]reviewer\.md/)
+    assert.match(f.opened[0].prompt, /foreman steer/)
+    assert.match(f.opened[0].prompt, /不要轮询等待结果/)
     assert.match(f.opened[0].prompt, /修正本地账本/)
     assert.match(f.opened[0].prompt, /foreman tasks --json/)
     assert.match(f.opened[0].prompt, /真实运行/)
@@ -183,13 +182,13 @@ test("从未成功投递的会话也从首次失败计满24小时才轮换", asy
     queue: async (conv, text) => { queues.push(conv); throw new Error("窗口忙") },
   }
   const cfg = { stateFile, router: { enabled: true, intervalSeconds: 600, recreateAfterHours: 24 }, pickup: { maxRunning: 2 } }
-  await routerOnce({ cfg, dws, log() {} }, { now: new Date(clock) })
+  await routerOnce({ cfg, session: dws, log() {} }, { now: new Date(clock) })
   clock += 10 * 60 * 1000
-  await routerOnce({ cfg, dws, log() {} }, { now: new Date(clock) })
+  await routerOnce({ cfg, session: dws, log() {} }, { now: new Date(clock) })
   assert.deepEqual(opens, [], "首次失败后才10分钟，不得新建")
   assert.deepEqual(queues, ["inspect-never-ok", "inspect-never-ok"])
   clock = new Date("2026-11-19T00:01:00.000Z").getTime()
-  const out = await routerOnce({ cfg, dws, log() {} }, { now: new Date(clock) })
+  const out = await routerOnce({ cfg, session: dws, log() {} }, { now: new Date(clock) })
   assert.equal(out.ok, true)
   assert.equal(out.action, "created")
   assert.equal(out.reason, "stale-24h")
@@ -202,7 +201,7 @@ test("投递失败不刷新成功时间，满24小时才重建路由会话", asy
   const f = fixture()
   try {
     await routerOnce(f, { now: new Date("2026-11-19T00:00:00Z") })
-    f.dws.queue = async () => { throw new Error("app_unavailable") }
+    f.session.queue = async () => { throw new Error("app_unavailable") }
 
     const failed = await routerOnce(f, { now: new Date("2026-11-19T00:10:00Z") })
     assert.equal(failed.ok, false)
@@ -212,7 +211,7 @@ test("投递失败不刷新成功时间，满24小时才重建路由会话", asy
     assert.equal(early.ok, false)
     assert.equal(f.opened.length, 1)
 
-    f.dws.queue = async () => ({ ok: true })
+    f.session.queue = async () => ({ ok: true })
     const rotated = await routerOnce(f, { now: new Date("2026-11-20T00:00:00Z") })
     assert.equal(rotated.action, "created")
     assert.equal(rotated.reason, "stale-24h")
@@ -261,12 +260,12 @@ test("服务 Schedule 用代码轮询执行会话，手动 route 仍调用路由
   })
   let server
   let pollCalls = 0
-  f.dws.runningMap = async () => {
+  f.session.runningMap = async () => {
     pollCalls++
     return {}
   }
   try {
-    server = await startServer({ cfg: f.cfg, dws: f.dws, log() {} })
+    server = await startServer({ cfg: f.cfg, driver: f.session, log() {} })
     assert.equal(f.opened.length, 0, "Schedule 同步时不得直接调用 Agent")
     assert.equal(f.queued.length, 0)
     const fired = await server.schedules.tick(new Date())
@@ -303,7 +302,7 @@ test("投递目标不存在时清掉死绑定，下一轮直接新建（不等 2
 
     const dead = new Error("zcode 账本里没有会话：noop-foreman-router-dead-1（可能从没派过，或账本被清了）")
     dead.code = "session_missing"
-    f.dws.queue = async () => {
+    f.session.queue = async () => {
       throw dead
     }
     const first = await routerOnce(f, { now: new Date("2026-11-19T00:10:00Z") })
@@ -312,7 +311,7 @@ test("投递目标不存在时清掉死绑定，下一轮直接新建（不等 2
     assert.equal(afterFail.data.router.convId, "", "死绑定应被立即清空，不等 recreateAfterHours")
     assert.equal(afterFail.data.router.name, "")
 
-    f.dws.queue = async (target, text) => {
+    f.session.queue = async (target, text) => {
       f.queued.push({ target, text })
       return { ok: true }
     }

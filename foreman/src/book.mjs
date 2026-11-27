@@ -70,6 +70,8 @@ export class Book {
       updateRoutedAt: pr.updateRoutedTo ? nowIso() : prev.updateRoutedAt ?? "",
       merged: pr.merged ?? prev.merged ?? false,
       mergeError: pr.mergeError ?? prev.mergeError ?? "",
+      // 存量接口变更巡检：这单 PR 已经拉过 diff、粗筛过（不管有没有成为候选），下轮不再扫。
+      apiCheckedAt: pr.apiCheckedAt ?? prev.apiCheckedAt ?? "",
     }
     this.save()
     return this.prSeen[key]
@@ -417,7 +419,7 @@ export class Book {
     return this.notified[String(target)]
   }
 
-  // 发出去之前先记一笔：同一指纹的尝试次数 +1。dws 有时会「消息到了却报发送失败」，
+  // 发出去之前先记一笔：同一指纹的尝试次数 +1。载体 send 有时会「消息到了却报发送失败」，
   // 没有这笔账就会每轮 poll 重发一次，把调用方会话刷成重复通知。
   markAttempted(target, fingerprint, extra = {}) {
     this.reload()
@@ -438,7 +440,7 @@ export class Book {
   }
 
   // 收工这一轮已经处理过（通知了，或者没什么可通知）：记一笔 idle。
-  // 之后每轮只看侧边栏的 running，不再逐条 dws status —— 读 status 会 goto，
+  // 之后每轮只看侧边栏的 running，不再逐条 status —— 读 status 会 goto，
   // 把用户窗口一遍遍拽到被监听的会话上。
   markIdle(target, extra = {}) {
     this.reload()
@@ -467,7 +469,7 @@ export class Book {
   }
 
   // 侧边栏里根本没有这条（已归档/已收起）：落 gone，之后不再为它读 status。
-  // dws status 切不过去只会报「侧边栏里没有任务」，每 20s 刷一次日志、白拽一次窗口。
+  // 载体 status 切不过去只会报「侧边栏里没有任务」，每 20s 刷一次日志、白拽一次窗口。
   markGone(target) {
     this.reload()
     const key = String(target)

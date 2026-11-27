@@ -98,10 +98,10 @@ test("prWatchOnce：别人的 PR 报一次、自己的不报、重复扫描不�
     }
     const gitea = { listPulls: async (_repo, { page }) => pages[page] ?? [] }
     const sent = []
-    const dws = { notify: async (target, text) => sent.push({ target, text }) }
+    const session = { notify: async (target, text) => sent.push({ target, text }) }
     const log = () => {}
 
-    let r = await prWatchOnce({ cfg, gitea, dws, log })
+    let r = await prWatchOnce({ cfg, gitea, session, log })
     assert.equal(r.notified, 1)
     assert.equal(r.target, "conv-first")
     assert.equal(sent.length, 1)
@@ -114,7 +114,7 @@ test("prWatchOnce：别人的 PR 报一次、自己的不报、重复扫描不�
     assert.equal(seen["demo/demo#1"].notifiedAt, "")
     assert.ok(seen["demo/demo#2"].notifiedAt)
 
-    r = await prWatchOnce({ cfg, gitea, dws, log })
+    r = await prWatchOnce({ cfg, gitea, session, log })
     assert.equal(r.notified, 0)
     assert.equal(sent.length, 1)
   } finally {
@@ -147,9 +147,9 @@ test("prWatchOnce：issues 账本里挂着 PR 的自家单，author 为空也不
     // Gitea 列表把作者丢了（流水线账号 / 解析为空），账本 prWatch 里没有这条
     const gitea = { listPulls: async () => [{ repo: "demo/demo", number: 7, title: "自家的", author: "", url: "http://x/pulls/7", state: "open" }] }
     const sent = []
-    const dws = { notify: async (target, text) => sent.push({ target, text }) }
+    const session = { notify: async (target, text) => sent.push({ target, text }) }
 
-    const r = await prWatchOnce({ cfg, gitea, dws, log: () => {} })
+    const r = await prWatchOnce({ cfg, gitea, session, log: () => {} })
     assert.equal(r.notified, 0)
     assert.equal(sent.length, 0)
     assert.equal(new Book(cfg.stateFile).prSeen["demo/demo#7"], undefined)
@@ -170,9 +170,9 @@ test("prWatchOnce：账本里登记过 skipped=self 的自家 PR，author 解析
     // Gitea 列表把作者丢了（流水线账号 / 解析为空）
     const gitea = { listPulls: async () => [{ repo: "demo/demo", number: 7, title: "自家的", author: "", url: "http://x/pulls/7", state: "open" }] }
     const sent = []
-    const dws = { notify: async (target, text) => sent.push({ target, text }) }
+    const session = { notify: async (target, text) => sent.push({ target, text }) }
 
-    const r = await prWatchOnce({ cfg, gitea, dws, log: () => {} })
+    const r = await prWatchOnce({ cfg, gitea, session, log: () => {} })
     assert.equal(r.notified, 0)
     assert.equal(sent.length, 0)
     assert.equal(new Book(cfg.stateFile).prSeen["demo/demo#7"].notifiedAt, "")
@@ -187,15 +187,15 @@ test("prWatchOnce：没有调用方会话时不发，等有了再补发", async 
     const cfg = baseCfg(dir)
     const gitea = { listPulls: async () => [{ repo: "demo/demo", number: 3, title: "待合并", author: "lisi", url: "http://x/pulls/3" }] }
     const sent = []
-    const dws = { notify: async (target, text) => sent.push({ target, text }) }
+    const session = { notify: async (target, text) => sent.push({ target, text }) }
 
-    let r = await prWatchOnce({ cfg, gitea, dws, log: () => {} })
+    let r = await prWatchOnce({ cfg, gitea, session, log: () => {} })
     assert.equal(r.notified, 0)
     assert.equal(r.pending, 1)
     assert.equal(sent.length, 0)
 
     new Book(cfg.stateFile).record("caller-1", { convId: "conv-first" })
-    r = await prWatchOnce({ cfg, gitea, dws, log: () => {} })
+    r = await prWatchOnce({ cfg, gitea, session, log: () => {} })
     assert.equal(r.notified, 1)
     assert.equal(sent[0].target, "conv-first")
   } finally {
@@ -213,13 +213,13 @@ test("服务里 prPoll：起服务后能手动跑一轮，状态里带 PR 计数
     book.record("caller-1", { convId: "conv-first" })
 
     const opened = []
-    const dws = {
+    const session = {
       openNew: async (args) => { opened.push(args); return { convId: "inspector-1" } },
       queue: async () => { throw new Error("首次通知应直接随检查会话首句进入") },
     }
     const gitea = { listPulls: async () => [{ repo: "demo/demo", number: 4, title: "新单", author: "wangwu", url: "http://x/pulls/4" }] }
 
-    server = await startServer({ cfg, book, dws, gitea, log: () => {} })
+    server = await startServer({ cfg, book, driver: session, gitea, log: () => {} })
     const r = await server.prPoll()
     await server.worker.idle()
     assert.equal(r.notified, 1)
@@ -254,7 +254,7 @@ test("服务里 prPoll：sessionFlow 开启时 PR 仍只交router agent，不 st
         listPulls: async () => [{ repo: "demo/demo", number: 5, title: "待合并", author: "wangwu", url: "http://x/pulls/5" }],
         viewPr: async () => ({ mergeNote: "可以合并", state: "open" }),
       },
-      dws: {
+      session: {
         steer: async (target) => { steered.push(target) },
       },
       notifyInspector: async (text) => {
@@ -294,7 +294,7 @@ test("PR 扫描把他人候选直投合并会话，自己的和作者不明的�
     const inspected = []
     const delivered = []
     const out = await prWatchOnce({
-      cfg, gitea, dws: {}, log: () => {},
+      cfg, gitea, session: {}, log: () => {},
       inspect: async (text) => { inspected.push(text); return { ok: true, convId: "inspector-1" } },
       deliver: async (args) => { delivered.push(args); return { session: "foreman-合并-72", convId: "merge-72" } },
     })
@@ -360,7 +360,7 @@ test("本人 UI PR 只 queue 验收指派候选，不进入他人合并助手链
       viewPr: async () => ({ state: "open", author: "233151", files: [{ name: "src/App.vue" }], assignees: [] }),
     }
     const out = await prWatchOnce({
-      cfg, gitea, dws: {}, log: () => {},
+      cfg, gitea, session: {}, log: () => {},
       inspect: async (text) => { inspected.push(text); return { ok: true, convId: "inspector-1" } },
       deliver: async () => { throw new Error("本人 UI PR 不能创建合并助手") },
     })
@@ -469,8 +469,8 @@ test("合并会话投递失败时不记已通知，下一轮继续补发", async
       viewPr: async () => ({ mergeNote: "可以合并", state: "open" }),
     }
     const out = await prWatchOnce({
-      cfg, gitea, dws: {}, log: () => {},
-      deliver: async () => { throw new Error("dws 打不开合并会话") },
+      cfg, gitea, session: {}, log: () => {},
+      deliver: async () => { throw new Error("载体打不开合并会话") },
     })
     assert.equal(out.notified, 0)
     assert.equal(out.failedNotify, true)
@@ -488,18 +488,18 @@ test("prWatchOnce：通知失败下一轮补发，发成功后不再重发", asy
     let notifyFails = 1
     const gitea = { listPulls: async () => [{ repo: "demo/demo", number: 6, title: "别人的", author: "zhangsan", url: "http://x/pulls/6" }] }
     const sent = []
-    const dws = { notify: async (target, text) => { if (notifyFails-- > 0) throw new Error("dws 没开"); sent.push(text) } }
+    const session = { notify: async (target, text) => { if (notifyFails-- > 0) throw new Error("载体没开"); sent.push(text) } }
 
-    const r1 = await prWatchOnce({ cfg, gitea, dws, log: () => {} })
+    const r1 = await prWatchOnce({ cfg, gitea, session, log: () => {} })
     assert.equal(r1.notified, 0)
     assert.equal(r1.failedNotify, true)
     assert.equal(sent.length, 0)
 
-    const r2 = await prWatchOnce({ cfg, gitea, dws, log: () => {} })
+    const r2 = await prWatchOnce({ cfg, gitea, session, log: () => {} })
     assert.equal(r2.notified, 1)
     assert.equal(sent.length, 1)
 
-    const r3 = await prWatchOnce({ cfg, gitea, dws, log: () => {} })
+    const r3 = await prWatchOnce({ cfg, gitea, session, log: () => {} })
     assert.equal(r3.notified, 0)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
@@ -521,8 +521,8 @@ test("prWatchOnce：默认过滤有冲突的 PR，不通知", async () => {
         : { mergeNote: "可以合并", state: "open" }),
     }
     const sent = []
-    const dws = { notify: async (target, text) => sent.push(text) }
-    const r = await prWatchOnce({ cfg, gitea, dws, log: () => {} })
+    const session = { notify: async (target, text) => sent.push(text) }
+    const r = await prWatchOnce({ cfg, gitea, session, log: () => {} })
     assert.equal(r.notified, 1)
     assert.equal(r.conflicting, 1)
     assert.match(sent[0], /demo\/demo#9/)
@@ -544,7 +544,7 @@ test("prWatchOnce：filterConflicts=false 时冲突单照报", async () => {
       viewPr: async () => ({ mergeNote: "存在冲突", state: "open" }),
     }
     const sent = []
-    const r = await prWatchOnce({ cfg, gitea, dws: { notify: async (_t, text) => sent.push(text) }, log: () => {} })
+    const r = await prWatchOnce({ cfg, gitea, session: { notify: async (_t, text) => sent.push(text) }, log: () => {} })
     assert.equal(r.notified, 1)
     assert.match(sent[0], /demo\/demo#10/)
   } finally {
@@ -568,18 +568,18 @@ test("prWatchOnce：代码检测 PR 更新，首次建基线，变化后交 rout
     const inspected = []
     const inspect = async (event) => { inspected.push(event); return { ok: true, convId: "router-1" } }
 
-    let out = await prWatchOnce({ cfg, gitea, dws: {}, log: () => {}, inspect })
+    let out = await prWatchOnce({ cfg, gitea, session: {}, log: () => {}, inspect })
     assert.equal(out.updatedNotified, 0, "首次扫描只建立基线，不路由历史状态")
     assert.equal(inspected.length, 0)
     assert.ok(new Book(cfg.stateFile).prSeen["demo/demo#400"].updateFingerprint)
 
-    out = await prWatchOnce({ cfg, gitea, dws: {}, log: () => {}, inspect })
+    out = await prWatchOnce({ cfg, gitea, session: {}, log: () => {}, inspect })
     assert.equal(out.updatedNotified, 0, "相同状态指纹不重复通知")
     assert.equal(inspected.length, 0)
 
     view.comments = [...view.comments, { id: 6987, author: "ywwb1328", body: "补充：验收通过" }]
     view.updatedAt = "2026-11-20T01:31:31Z"
-    out = await prWatchOnce({ cfg, gitea, dws: {}, log: () => {}, inspect })
+    out = await prWatchOnce({ cfg, gitea, session: {}, log: () => {}, inspect })
     assert.equal(out.updatedNotified, 1)
     assert.equal(inspected.length, 1)
     assert.equal(inspected[0].type, "pr.updates")
@@ -590,19 +590,19 @@ test("prWatchOnce：代码检测 PR 更新，首次建基线，变化后交 rout
     assert.deepEqual(inspected[0].json.updates[0].changes, ["新评论"])
     assert.equal(inspected[0].json.updates[0].headSha, "head-a")
 
-    out = await prWatchOnce({ cfg, gitea, dws: {}, log: () => {}, inspect })
+    out = await prWatchOnce({ cfg, gitea, session: {}, log: () => {}, inspect })
     assert.equal(out.updatedNotified, 0)
     assert.equal(inspected.length, 1, "已路由的评论不重复通知")
 
     view.headSha = "head-b"
     view.updatedAt = "2026-11-20T01:36:31Z"
-    out = await prWatchOnce({ cfg, gitea, dws: {}, log: () => {}, inspect })
+    out = await prWatchOnce({ cfg, gitea, session: {}, log: () => {}, inspect })
     assert.equal(out.updatedNotified, 0, "单纯提交变化不通知 router agent")
     assert.equal(inspected.length, 1)
 
     view.comments = [...view.comments, { id: 6988, author: "ywwb1328", body: "新提交后再次验收" }]
     view.updatedAt = "2026-11-20T01:41:31Z"
-    out = await prWatchOnce({ cfg, gitea, dws: {}, log: () => {}, inspect })
+    out = await prWatchOnce({ cfg, gitea, session: {}, log: () => {}, inspect })
     assert.equal(out.updatedNotified, 1)
     assert.equal(inspected.length, 2)
     assert.deepEqual(inspected[1].json.updates[0].changes, ["新评论"])
@@ -618,7 +618,7 @@ test("prWatch.enabled=false 时整条路径不跑", async () => {
     const cfg = baseCfg(dir)
     cfg.prWatch.enabled = false
     const gitea = { listPulls: async () => { throw new Error("不该调用 gitea") } }
-    const r = await prWatchOnce({ cfg, gitea, dws: { notify: async () => {} }, log: () => {} })
+    const r = await prWatchOnce({ cfg, gitea, session: { notify: async () => {} }, log: () => {} })
     assert.equal(r.skipped, "disabled")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
@@ -636,7 +636,7 @@ test("PR 扫描只写 pr.merge Inbox，不建会话、不提前记已通知", as
     const events = []
     const delivered = []
     const out = await prWatchOnce({
-      cfg, gitea, dws: {}, log: () => {},
+      cfg, gitea, session: {}, log: () => {},
       enqueue: async (event) => { events.push(event); return { id: 1, status: "pending" } },
       deliver: async () => { delivered.push(true); return { session: "不该建" } },
     })
@@ -702,17 +702,17 @@ test("pr.merge 转投 router 后，router 会话投递失败由 Inbox 重试", a
     cfg.prWatch.intervalSeconds = 3600
     const book = new Book(cfg.stateFile)
     let calls = 0
-    const dws = {
+    const session = {
       openNew: async () => {
         calls++
-        if (calls === 1) throw new Error("dws 暂时不可用")
+        if (calls === 1) throw new Error("载体暂时不可用")
         return { convId: "router-retry" }
       },
       queue: async () => {},
     }
     const gitea = { listPulls: async () => [{ repo: "demo/demo", number: 96, title: "他人的", author: "zhangsan", url: "http://x/pulls/96" }] }
 
-    server = await startServer({ cfg, book, dws, gitea, log: () => {} })
+    server = await startServer({ cfg, book, driver: session, gitea, log: () => {} })
     const scanned = await server.prPoll()
     assert.equal(scanned.via, "inbox")
     await server.worker.idle()
@@ -723,7 +723,7 @@ test("pr.merge 转投 router 后，router 会话投递失败由 Inbox 重试", a
     // router.notice 首次投递（新建 router 会话）失败，留在 Inbox 等重试
     const pendingRouter = server.inbox.list({ status: "pending" }).filter((e) => e.kind === "router.notice")
     assert.equal(pendingRouter.length, 1, "router 投递失败的事件留在 Inbox")
-    assert.match(pendingRouter[0].lastError ?? "", /dws 暂时不可用/)
+    assert.match(pendingRouter[0].lastError ?? "", /载体暂时不可用/)
 
     const retried = await server.worker.runOnce(new Date(Date.now() + 60000))
     assert.equal(retried.ok, true)

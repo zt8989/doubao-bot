@@ -77,7 +77,7 @@ test("编排会话幂等：账本里已有 convId 就复用，绝不开第二条
   try {
     const cfg = mkCfg(dir)
     const dws = mkDws()
-    const ctx = { cfg, dws, log: () => {} }
+    const ctx = { cfg, session: dws, log: () => {} }
     const first = await ensureOrchestrator(ctx)
     assert.equal(first.created, true)
     assert.equal(dws.calls.openNew.length, 1)
@@ -109,7 +109,7 @@ test("hand：编排职责与工单合进首句一次发出，不 steer，账本�
     cfg.repos = [repo]
     const dws = mkDws()
     const issue = { number: 7, title: "镜像页", body: "改 demo 的镜像页" }
-    const ctx = { cfg, dws, log: () => {}, gitea: { viewIssue: async () => issue } }
+    const ctx = { cfg, session: dws, log: () => {}, gitea: { viewIssue: async () => issue } }
 
     const out = await handToOrchestrator(ctx, { repoCfg: repo, issue })
     assert.equal(out.state, "handed")
@@ -141,7 +141,7 @@ test("hand：仓库没配 dir 映射时 openNew 的 repo 给空串（兜底交�
     cfg.repos = [] // 仓库不在映射里（如 GitHub 仓或未登记的产品仓）
     const dws = mkDws()
     const issue = { number: 1, title: "t", body: "b" }
-    const ctx = { cfg, dws, log: () => {}, gitea: { viewIssue: async () => issue } }
+    const ctx = { cfg, session: dws, log: () => {}, gitea: { viewIssue: async () => issue } }
     const repoCfg = { repo: "zzz/unmapped", name: "unmapped", base: "main" }
     await handToOrchestrator(ctx, { repoCfg, issue })
     assert.equal(dws.calls.openNew.length, 1)
@@ -160,7 +160,7 @@ test("自动巡检：每张工单各建独立编排并绑定，重复交同一�
     const dws = mkDws()
     const ctx = {
       cfg,
-      dws,
+      session: dws,
       log: () => {},
       gitea: { viewIssue: async (_repo, n) => ({ number: n, title: `工单 ${n}`, body: `处理 ${n}` }) },
     }
@@ -194,7 +194,7 @@ test("fresh hand：router agent显式要求时才重开独立编排，普通 han
     cfg.repos = [repo]
     const dws = mkDws()
     const issue = { number: 7, title: "失联编排", body: "核对后重新分配" }
-    const ctx = { cfg, dws, log: () => {}, gitea: { viewIssue: async () => issue } }
+    const ctx = { cfg, session: dws, log: () => {}, gitea: { viewIssue: async () => issue } }
 
     const first = await handToOrchestrator(ctx, { repoCfg: repo, issue })
     const reused = await handToOrchestrator(ctx, { repoCfg: repo, issue })
@@ -230,7 +230,7 @@ test("resume：只按工作会话 id 定位并 steer 续跑，绝不新开", asy
     })
     const dws = mkDws()
     book.markIdle("conv-worker-1")
-    const out = await resumeWorker({ cfg, dws, log: () => {} }, { sessionId: "conv-worker-1" })
+    const out = await resumeWorker({ cfg, session: dws, log: () => {} }, { sessionId: "conv-worker-1" })
     assert.equal(out.ok, true)
     assert.equal(dws.calls.openNew.length, 0, "resume 不许开新会话")
     assert.equal(dws.calls.steer.length, 1)
@@ -283,7 +283,7 @@ test("pollOnce：工作会话最终回复经 Inbox/Worker queue 给所属编排"
       state: { polling: false, watchers: new Map(), dwsErrors: 0, notifiedCount: 0 },
       log: () => {},
       gitea: {},
-      dws: {
+      session: {
         runningMap: async () => ({ "conv-a": { running: false, title: "foreman-demo-1" } }),
         status: async () => ({ streaming: false, finished: true, chars: 500, head: "H", tail: "T", status: "ok" }),
         info: async () => ({ lastReply: "改完了，已提交，npm test 通过。" }),
@@ -322,7 +322,7 @@ test("pollOnce：没有编排会话时只落痕（降级不报错）", async () 
       state: { polling: false, watchers: new Map(), dwsErrors: 0, notifiedCount: 0 },
       log: () => {},
       gitea: {},
-      dws: {
+      session: {
         runningMap: async () => ({ "conv-a": { running: false } }),
         status: async () => ({ streaming: false, finished: true, chars: 500, head: "H", tail: "T" }),
         info: async () => ({ lastReply: '<RESULT>{"status":"done","summary":"改完了"}</RESULT>' }),
@@ -342,13 +342,13 @@ test("steerOrchestrator：账本留痕；没有编排会话直接回 no-orchestr
   try {
     const cfg = mkCfg(dir)
     const dws = mkDws()
-    const miss = await steerOrchestrator({ cfg, dws, log: () => {} }, "hi")
+    const miss = await steerOrchestrator({ cfg, session: dws, log: () => {} }, "hi")
     assert.equal(miss.ok, false)
     assert.equal(miss.reason, "no-orchestrator")
 
     const book = new Book(cfg.stateFile)
     book.setOrchestrator({ convId: "conv-orch", name: "编排" })
-    const hit = await steerOrchestrator({ cfg, dws, log: () => {} }, "工作会话更新", { kind: "done" })
+    const hit = await steerOrchestrator({ cfg, session: dws, log: () => {} }, "工作会话更新", { kind: "done" })
     assert.equal(hit.ok, true)
     assert.equal(dws.calls.steer[0].target, "conv-orch")
     assert.equal(new Book(cfg.stateFile).steers["conv-orch"].at(-1).kind, "done")
@@ -373,7 +373,7 @@ test("clean --local：PR 未全合也能单独清本地（不关单、账本不�
     const remoteCalls = []
     const ctx = {
       cfg,
-      dws: mkDws(),
+      session: mkDws(),
       log: () => {},
       gitea: { closeIssue: async (r, n) => { remoteCalls.push(`${r}#${n}`) } },
     }
@@ -408,7 +408,7 @@ test("clean --remote：PR 全合并时只关单摘标签，不删工作区", asy
     book.markMergeAsked("yyzl/demo#10", { pr: 10, status: "merged" })
     const ctx = {
       cfg,
-      dws: mkDws(),
+      session: mkDws(),
       log: () => {},
       gitea: { closeIssue: async () => {}, editLabels: async () => ({ changed: true }) },
     }
@@ -442,7 +442,7 @@ test("clean 拆分：pr-open 且 PR 全合并 → clean 关单（closeIssue + �
     const labels = []
     const ctx = {
       cfg,
-      dws: mkDws(),
+      session: mkDws(),
       log: () => {},
       gitea: {
         closeIssue: async (repo, n) => { remoteClosed.push(`${repo}#${n}`) },
@@ -472,7 +472,7 @@ test("clean 拆分：PR 没合完 → 拒绝清理（先去 pr merge）", async 
       repo: "yyzl/demo",
       prs: [{ repo: "yyzl/demo", pr: 9, branch: "fix/issue-9" }],
     })
-    const ctx = { cfg, dws: mkDws(), log: () => {}, gitea: { closeIssue: async () => { throw new Error("不应关单") } } }
+    const ctx = { cfg, session: mkDws(), log: () => {}, gitea: { closeIssue: async () => { throw new Error("不应关单") } } }
     const out = await cleanIssue(ctx, { issueKey: "yyzl/demo#9" })
     assert.equal(out.ok, false)
     assert.equal(out.reason, "pr-not-merged")
@@ -503,7 +503,7 @@ test("clean：合并关单后归档工作会话、摘监听、清账本会话字
     book.setWatch({ target: "conv-worker-1", name: "foreman-demo-7", issueKey: "yyzl/demo#7", repo: "yyzl/demo", number: 7 })
 
     const dws = mkDws()
-    const out = await cleanIssue({ cfg, dws, log: () => {} }, { issueKey: "yyzl/demo#7" })
+    const out = await cleanIssue({ cfg, session: dws, log: () => {} }, { issueKey: "yyzl/demo#7" })
     assert.equal(out.ok, true)
     assert.ok(out.notes.some((n) => /worktree 已不在/.test(n)))
     assert.ok(out.notes.some((n) => /编排会话已归档/.test(n)), "编排会话要一起归档")
@@ -517,7 +517,7 @@ test("clean：合并关单后归档工作会话、摘监听、清账本会话字
     assert.equal(after.session("foreman-demo-7-编排"), null, "编排会话记录也要摘掉")
 
     // 幂等：第二次没有可归档的，也不报错
-    const again = await cleanIssue({ cfg, dws, log: () => {} }, { issueKey: "yyzl/demo#7" })
+    const again = await cleanIssue({ cfg, session: dws, log: () => {} }, { issueKey: "yyzl/demo#7" })
     assert.equal(again.ok, true)
     assert.equal(dws.calls.archive.length, 2)
   } finally {
@@ -540,7 +540,7 @@ test("clean：编排会话是调用方自己的会话时不归档（只留一条
       orchestrator: "conv-user-9",
     })
     const dws = mkDws()
-    const out = await cleanIssue({ cfg, dws, log: () => {} }, { issueKey: "yyzl/demo#9" })
+    const out = await cleanIssue({ cfg, session: dws, log: () => {} }, { issueKey: "yyzl/demo#9" })
     assert.equal(out.ok, true)
     assert.deepEqual(dws.calls.archive, [], "用户自己的会话绝不能被归档")
     const after = new Book(cfg.stateFile)
@@ -581,7 +581,7 @@ test("clean：currentConv 就是编排会话本身时不归档（dws 不允许�
     book.record("foreman-demo-15-编排", { convId: "conv-self", kind: "orchestrator", issueKey: "yyzl/demo#15", issue: 15 })
 
     const dws = mkDws()
-    const out = await cleanIssue({ cfg, dws, log: () => {} }, { issueKey: "yyzl/demo#15", currentConv: "conv-self" })
+    const out = await cleanIssue({ cfg, session: dws, log: () => {} }, { issueKey: "yyzl/demo#15", currentConv: "conv-self" })
     assert.deepEqual(dws.calls.archive, [], "自己不能归档自己")
     assert.ok(out.notes.some((n) => /就是当前会话/.test(n)))
     assert.equal(new Book(cfg.stateFile).issue("yyzl/demo#15").orchestrator, "conv-self", "留给服务下一轮收")
@@ -601,7 +601,7 @@ test("dry-run + run：只打印会投 router，不开会话、不写账本", asy
     const ctx = {
       cfg,
       book: new Book(cfg.stateFile),
-      dws,
+      session: dws,
       log: () => {},
       dryRun: true,
       once: true,
@@ -628,7 +628,7 @@ test("用户自主发起 hand：直接交给调用方会话（不开全局编排
     cfg.repos = [repo]
     const dws = mkDws()
     const issue = { number: 7, title: "镜像页", body: "改 demo 的镜像页" }
-    const ctx = { cfg, dws, log: () => {}, gitea: { viewIssue: async () => issue } }
+    const ctx = { cfg, session: dws, log: () => {}, gitea: { viewIssue: async () => issue } }
 
     const out = await handToOrchestrator(ctx, { repoCfg: repo, issue, orchestrator: "conv-user" })
     assert.equal(out.convId, "conv-user")
@@ -664,7 +664,7 @@ test("pollOnce：任务事件 queue 到工单绑定的发起方，而不是全�
       state: { polling: false, watchers: new Map(), dwsErrors: 0, notifiedCount: 0 },
       log: () => {},
       gitea: {},
-      dws: {
+      session: {
         runningMap: async () => ({ "conv-a": { running: false, title: "foreman-demo-1" } }),
         status: async () => ({ streaming: false, finished: true, chars: 500, head: "H", tail: "T", status: "ok" }),
         info: async () => ({ lastReply: "还需要修改另一个仓库，当前工作区无法完成。" }),

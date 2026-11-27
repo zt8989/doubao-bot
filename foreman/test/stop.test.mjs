@@ -27,7 +27,7 @@ function tmpCfg(obj = {}) {
 test("rpc stop：收口关闭 http、清 pid/port 文件；非 serve 环境不退进程", async () => {
   delete process.env.FOREMAN_SERVE
   const { cfg, dir } = tmpCfg()
-  const server = await startServer({ cfg, book: null, dws: { runningMap: async () => ({}) }, log: () => {} })
+  const server = await startServer({ cfg, book: null, driver: { runningMap: async () => ({}) }, log: () => {} })
   const pidFile = path.join(dir, "foreman.pid")
   const portFile = path.join(dir, "service.port")
   assert.ok(fs.existsSync(pidFile), "起服务要写 pid 文件")
@@ -54,7 +54,7 @@ test("rpc stop：收口关闭 http、清 pid/port 文件；非 serve 环境不�
 test("rpc stop 重复调用幂等（close 已关过就直通）", async () => {
   delete process.env.FOREMAN_SERVE
   const { cfg } = tmpCfg()
-  const server = await startServer({ cfg, book: null, dws: { runningMap: async () => ({}) }, log: () => {} })
+  const server = await startServer({ cfg, book: null, driver: { runningMap: async () => ({}) }, log: () => {} })
   const close = server.close
   await close()
   // 第二次 close 不抛（state.closed 直通）

@@ -1,7 +1,7 @@
-// 编排：捞单 → herdr 建工作区 → dws 开会话派活 → 记账 → 登记监听 → 返回。
+// 编排：捞单 → herdr 建工作区 → 会话适配器开会话派活 → 记账 → 登记监听 → 返回。
 // run 现在只派活：不等会话回复、不读 RESULT、不验收、不 push/PR、不发通知。
-// 通知由常驻服务按 pollSeconds 轮询 dws status 后异步发出（见 service.mjs）。
-// 三个工具各管一段：gitea 管工单，herdr 管 worktree，dws 管豆包会话。
+// 通知由常驻服务按 pollSeconds 轮询载体状态后异步发出（见 service.mjs）。
+// 三个工具各管一段：gitea 管工单，herdr 管 worktree，会话适配器管开会话（载体按 cfg.agent 选）。
 import fs from "node:fs"
 import path from "node:path"
 import { exec, execShell, nowIso } from "./util.mjs"
@@ -44,7 +44,7 @@ export function shouldNotify(notify = {}, state = "") {
 }
 
 // 通知正文：一眼能看出哪条单、什么结果、有没有 PR、是哪条会话跑出来的。
-// 执行会话 id 必须带：编排会话要靠它 dws info 排查 / 续跑，光给工单号无从下手。
+// 执行会话 id 必须带：编排会话要靠它载体 info 排查 / 续跑，光给工单号无从下手。
 export function notifyText(issue = {}, out = {}) {
   const title = String(issue.title ?? "").trim()
   const head = `${issue.repo ? `${issue.repo} ` : ""}#${issue.number}${title ? ` ${title}` : ""}`
@@ -63,7 +63,7 @@ export function notifyText(issue = {}, out = {}) {
   else if (out.pr) lines.push(`合并：PR 已开好，核对工单/改动后自己跑 foreman pr merge ${out.pr}（不再有合并通道）`)
   if (out.cleanup?.notes?.length) lines.push(`清理：${out.cleanup.notes.join("；")}`)
   if (out.reason) lines.push(`原因：${String(out.reason).slice(0, 200)}`)
-  // 合并也交一个 RESULT 块：编排会话读完就能收尾、这条通知会话随后可归档（dws archive）。
+  // 合并也交一个 RESULT 块：编排会话读完就能收尾、这条通知会话随后可归档（载体 archive）。
   if (out.merged && out.pr) {
     const summary = [`PR #${out.pr} 已合并`, ...(out.cleanup?.notes ?? [])].join("；")
     lines.push("", `<RESULT>${JSON.stringify({
@@ -197,13 +197,13 @@ function withDispatchPrompt(text, extra = "") {
   return `${String(text ?? "").trim()}\n\n---\n\n编排智能体补充指令（本次派单，仍需遵守上述工作区与交付边界）：\n${instruction}`
 }
 
-// 派活：读工单 → 建/复用 worktree → 记账 working → dws.open/send 派出去 → 记账会话 → 登记监听。
+// 派活：读工单 → 建/复用 worktree → 记账 working → 载体 open/send 派出去 → 记账会话 → 登记监听。
 // 返回 { repo, number, state:"dispatched", branch, convId }。不 waitFinished、不 info、不验收、不 PR。
 export async function handleIssue(ctx, repoCfg, summary) {
-  const { cfg, dws, log } = ctx
+  const { cfg, session, log } = ctx
   const dispatchPrompt = String(ctx.dispatchPrompt ?? "").trim()
   // 账本兜底：自动接单那一路（pickup/run）的 ctx 自带 book，服务里 `foreman dispatch` 那条 RPC
-  // 用的是服务级 ctx（只有 state/cfg/dws/engine），不带 book——不兜底就会在 book.issue 上崩
+  // 用的是服务级 ctx（只有 state/cfg/session/engine），不带 book——不兜底就会在 book.issue 上崩
   // （Cannot read properties of undefined (reading 'issue')）。
   const book = ctx.book ?? new Book(cfg.stateFile)
   const gitea = ctx.gitea ?? realGitea
@@ -298,7 +298,7 @@ export async function handleIssue(ctx, repoCfg, summary) {
 
   const attempt = (prev.attempts ?? 0) + 1
   // 决策单（needs-info 这类标签的手动接单）：提示词换成「先判断再决定动不动手」，不绑编排会话。
-  // 注意会话仍走 openNew（只确认送达）：dws.open 会等第一轮跑完，会把 HTTP 请求拖到超时。
+  // 注意会话仍走 openNew（只确认送达）：载体 open 会等第一轮跑完，会把 HTTP 请求拖到超时。
   const decision = ctx.decision === true
   const flowOn = sessionFlowEnabled(cfg)
   const orchOn = flowOn && !decision
@@ -362,18 +362,18 @@ export async function handleIssue(ctx, repoCfg, summary) {
     if (boundTarget) {
       // 决策单续跑也发决策提示词：上一次的「继续改」口径会把 agent 又推回去直接写代码。
       const again = decision ? kickoffText : resumeText
-      if (flowOn && typeof dws.steer === "function") {
+      if (flowOn && typeof session.steer === "function") {
         log(`${key}：steer 已有工作会话 ${boundTarget}（attempt ${attempt}，不新开）`)
-        await dws.steer(boundTarget, again)
+        await session.steer(boundTarget, again)
       } else {
         log(`${key}：续会话 ${agentName}（attempt ${attempt}）`)
-        await dws.send(agentName, again)
+        await session.send(agentName, again)
       }
       book.clearIdle(boundTarget)
       book.clearGone(boundTarget)
-    } else if (flowOn && typeof dws.openNew === "function") {
+    } else if (flowOn && typeof session.openNew === "function") {
       log(`${key}：开工作会话 ${agentName}（attempt ${attempt}，只确认送达）`)
-      const opened = await dws.openNew({
+      const opened = await session.openNew({
         name: agentName,
         prompt: kickoffText,
         noWait: true,
@@ -382,7 +382,7 @@ export async function handleIssue(ctx, repoCfg, summary) {
       convId = String(opened?.convId ?? "").trim()
     } else {
       log(`${key}：开新会话 ${name}（attempt ${attempt}）`)
-      const opened = await dws.open({
+      const opened = await session.open({
         name,
         repo: repoCfg.repo,
         prompt: kickoffText,

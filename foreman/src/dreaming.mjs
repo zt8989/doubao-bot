@@ -54,7 +54,7 @@ export async function dreamOnce(ctx, { now = new Date(), day = "", force = false
   const session = `memory-dreaming-${targetDay}-${begun.runId.split("-").at(-1)}`
   try {
     const prompt = dreamingPrompt({ store, day: targetDay, runId: begun.runId, session, source, configPath: ctx.cfg.configPath || "" })
-    const delivered = await ctx.dws.openNew({ name: session, prompt, noWait: true })
+    const delivered = await ctx.session.openNew({ name: session, prompt, noWait: true })
     if (delivered?.ok === false) throw new Error(delivered.error || "dreaming Agent 投递失败")
     return { ok: true, day: targetDay, runId: begun.runId, session, dispatched: true, convId: delivered?.convId || "" }
   } catch (error) {

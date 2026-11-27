@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// foreman：接单编排（gitea REST + dws + herdr）+ 常驻服务（会话监听与异步通知）。
+// foreman：接单编排（gitea REST + 会话载体 + herdr）+ 常驻服务（会话监听与异步通知）。
 import fs from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -43,6 +43,7 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman pr merge <N> --repo R [--issue <单号>] [--style merge|rebase|squash] [--approved-by <人>] [--ui]   # 只合并不动工作区
   foreman send --type mail --to <邮箱>[,...] --subject <主题> [--body <正文>] [--session-id <会话ID>]
   foreman send --type lark (--chat-id <oc_...>|--user-id <ou_...>) (--text <正文>|--markdown <正文>)
+  foreman send --type feishu --chat-id <oc_...> (--text <正文>|--markdown <正文>) [--dedupe-key <键>]
   foreman outbox list [--limit <N>] [--status <状态>] [--channel mail|lark]
   foreman outbox run                       手动让 Dispatcher 消费一轮（排障用）
   foreman memory show                     查看精简核心记忆 MEMORY.md / USER.md
@@ -67,6 +68,11 @@ const HELP = `foreman — 接单编排 + 常驻服务
   foreman issue comment <N> --repo R --body <正文>
   foreman issue close <N> --repo R
   foreman run   [--once] [--dry-run] [--repo <名字|owner/name>] [-c <配置>]    # 扫描可接工单，逐条投 router
+  foreman session open --role coder|reviewer --issue <owner/repo>#<单号>
+                    --repo <worktree绝对路径> --task-file <任务包绝对路径>
+                    # foreman 开独立编码/审查工作会话（yolo 不卡审批）；收工自动通知路由智能体
+  foreman steer <会话名|convId> --text <续说内容>
+                    # 把审查意见等续说给既有工作会话（修复循环用），输入排队立即返回
   foreman orch show                    看每条编排会话绑了哪些工作会话、最近 steer 了什么
   foreman hand <owner/name>#<单号>           把工单投给 router agent（唯一编排者，接单入口）
   foreman clean <owner/name>#<单号>     合并关单后清 worktree、本地分支、工作会话与这张单的编排会话（幂等）
@@ -144,7 +150,7 @@ function makeCtx(cfg, extra = {}) {
   return {
     cfg,
     book: new Book(cfg.stateFile),
-    dws: makeSessionAdapter(cfg, { log }),
+    session: makeSessionAdapter(cfg, { log }),
     log,
     ...extra,
   }
@@ -572,8 +578,8 @@ async function cmdMemory(pos, flags) {
   const store = new MemoryStore(cfg)
   if (action === "show") return out({ ok: true, ...store.show() })
   if (action === "dream") {
-    const dws = makeSessionAdapter(cfg, {})
-    return out(await dreamOnce({ cfg, dws }, { day: strFlag(flags.day), force: flags.force === true }))
+    const session = makeSessionAdapter(cfg, {})
+    return out(await dreamOnce({ cfg, session }, { day: strFlag(flags.day), force: flags.force === true }))
   }
   if (action === "dream-status") return out(store.dreamStatus())
   if (action === "dream-report") {
@@ -668,7 +674,7 @@ async function cmdDoctor(pos, flags) {
       checks.push({ name: "执行载体 noop", ok: true, detail: "不碰任何前端，无人真正干活" })
     } else if (cfg.agent === "zcode") {
       try {
-        const started = await ctx.dws.start()
+        const started = await ctx.session.start()
         checks.push({
           name: "zcode CLI（herdr 窗格）",
           ok: true,
@@ -679,7 +685,7 @@ async function cmdDoctor(pos, flags) {
       }
     } else {
       try {
-        await ctx.dws.start()
+        await ctx.session.start()
         checks.push({ name: "dws 窗口/登录", ok: true, detail: "窗口可用，已登录" })
       } catch (e) {
         checks.push({ name: "dws 窗口/登录", ok: false, detail: e.message })
@@ -708,6 +714,32 @@ async function cmdDoctor(pos, flags) {
   const ok = checks.every((c) => c.ok)
   out({ ok, checks, config: cfg.configPath || "（用默认值）" })
   if (!ok) process.exitCode = 1
+}
+
+async function cmdSession(pos, flags) {
+  const cfg = loadConfig(flags.config)
+  const action = String(pos[0] ?? "open")
+  if (action !== "open") throw new Error("用法：foreman session open --role coder|reviewer --issue <owner/repo>#<单号> --repo <worktree绝对路径> --task-file <任务包绝对路径>")
+  const r = await callRaw(await resolvePort(cfg), {
+    id: "cli", cmd: "session open",
+    role: strFlag(flags.role) || "coder",
+    issue: strFlag(flags.issue),
+    repo: strFlag(flags.repo),
+    taskFile: strFlag(flags["task-file"]),
+    name: strFlag(flags.name),
+  }, 120000)
+  if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
+  return out({ ok: true, ...r })
+}
+
+async function cmdSteer(pos, flags) {
+  const target = String(pos[0] ?? "").trim()
+  const text = strFlag(flags.text) || strFlag(flags.markdown)
+  if (!target || !text) throw new Error("用法：foreman steer <会话名|convId> --text <续说内容>")
+  const cfg = loadConfig(flags.config)
+  const r = await callRaw(await resolvePort(cfg), { id: "cli", cmd: "session steer", target, text }, 120000)
+  if (!r.ok) throw new Error(`${r.error ?? "error"}：${r.message ?? ""}`)
+  return out({ ok: true, ...r })
 }
 
 async function cmdOrch(pos, flags) {
@@ -763,7 +795,7 @@ async function cmdInbox(pos, flags) {
 async function cmdSend(pos, flags) {
   const cfg = loadConfig(flags.config)
   const type = strFlag(flags.type).toLowerCase()
-  if (!["mail", "lark"].includes(type)) throw new Error("用法：foreman send --type mail|lark …")
+  if (!["mail", "lark", "feishu"].includes(type)) throw new Error("用法：foreman send --type mail|lark|feishu …")
   const r = await callRaw(await resolvePort(cfg), {
     id: "cli", cmd: "send", type,
     to: strFlag(flags.to), subject: strFlag(flags.subject), body: strFlag(flags.body),
@@ -873,6 +905,10 @@ async function main() {
       return cmdRun(pos, flags)
     case "orch":
       return cmdOrch(pos, flags)
+    case "session":
+      return cmdSession(pos, flags)
+    case "steer":
+      return cmdSteer(pos, flags)
     case "hand":
       return cmdHand(pos, flags)
     case "route":

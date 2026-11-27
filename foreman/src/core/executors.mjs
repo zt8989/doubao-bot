@@ -12,6 +12,7 @@ const SCRIPT_DEFAULTS = {
   prWatch: { path: path.join(PACKAGE_ROOT, "src", "service.mjs"), exportName: "prPollOnce", args: {} },
   mail: { path: path.join(PACKAGE_ROOT, "src", "mailflow.mjs"), exportName: "mailPollOnce", args: {} },
   router: { path: path.join(PACKAGE_ROOT, "src", "service.mjs"), exportName: "pollOnce", args: {} },
+  apiWatch: { path: path.join(PACKAGE_ROOT, "src", "apiwatch.mjs"), exportName: "apiWatchOnce", args: {} },
 }
 
 const object = (value) => value && typeof value === "object" && !Array.isArray(value)
@@ -70,6 +71,6 @@ export async function runConfiguredScript(ctx, id, { manual = false } = {}) {
   if (typeof run !== "function") {
     throw new Error(`定时脚本 ${definition.path} 没有导出函数 ${definition.exportName}`)
   }
-  const args = ["prWatch", "pickup"].includes(id) ? { ...definition.args, force: manual } : { ...definition.args }
+  const args = ["prWatch", "pickup", "apiWatch"].includes(id) ? { ...definition.args, force: manual } : { ...definition.args }
   return run(ctx, args)
 }

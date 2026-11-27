@@ -23,7 +23,7 @@ test("task.update 入箱保留最终回复并按工单所属编排路由；Worke
     book.setIssue("demo/demo#7", { state: "working", orchestrator: "conv-orch" })
     const watcher = { target: "conv-worker", name: "worker", issueKey: "demo/demo#7", repo: "demo/demo", number: 7 }
     const queued = []
-    const ctx = { cfg, book, inbox, dws: { queue: async (target, text) => queued.push({ target, text }) } }
+    const ctx = { cfg, book, inbox, session: { queue: async (target, text) => queued.push({ target, text }) } }
     const enqueued = enqueueTaskUpdate(ctx, {
       watcher,
       phase: "finished",
@@ -116,7 +116,7 @@ test("回退router agent投递失败必须抛错，不能消费任务更新", as
       book,
       inbox,
       state: {},
-      dws: {
+      session: {
         queue: async () => { throw new Error("queue failed") },
         openNew: async () => { throw new Error("不应新建") },
       },
@@ -142,7 +142,7 @@ test("原编排不在侧边栏：task.update 兜底交 router agent，接收后�
       book,
       inbox,
       state: {},
-      dws: {
+      session: {
         queue: async (target, text) => {
           if (target === "conv-orch") throw new Error(`dws msg ${target} 失败：\n✗ 切换任务失败：侧边栏里没有任务 ${target}`)
           queued.push({ target, text })
@@ -191,7 +191,7 @@ test("其他 queue 异常不兜底路由，保留原错误并重试", async () =
       book,
       inbox,
       state: {},
-      dws: {
+      session: {
         queue: async () => { calls++; throw new Error("temporary queue failure") },
         openNew: async () => { throw new Error("不应新建") },
       },

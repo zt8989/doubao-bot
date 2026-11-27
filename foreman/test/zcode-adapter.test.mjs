@@ -237,6 +237,27 @@ test("herdr blocked：权限待批时立刻报错，archive 收尾", async () =>
   }
 })
 
+test("herdr 会话建好后转 blocked：续说拒投（不把消息敲进吞输入的 pane）", async () => {
+  const { adapter, cleanup } = makeHerdrAdapter({ workMs: 200 })
+  try {
+    const out = await adapter.deliver({ name: "中途卡死的会话", prompt: "开场" })
+    // 等首轮真正跑完（done）再翻 blocked：env 在轮次中途翻会让 fake 轮次永远停在 working
+    for (let i = 0; i < 60; i++) {
+      if (adapter.driver.resolve(out.convId)?.status === "done") break
+      await new Promise((r) => setTimeout(r, 250))
+    }
+    assert.equal(adapter.driver.resolve(out.convId).status, "done")
+    // 之后 pane 卡进 blocked（等子会话审批等）。fake 每次调用现读 env，翻成 blocked。
+    process.env.HERDR_FAKE_BLOCK = "1"
+    await assert.rejects(adapter.driver.send("中途卡死的会话", "续说消息"), /阻塞|blocked|吞/)
+    // 账本记下拒投原因（可见性）；消息留在 Inbox 重试，解除阻塞后重投即恢复
+    const entry = adapter.driver.resolve(out.convId)
+    assert.match(entry.error ?? "", /阻塞|blocked/)
+  } finally {
+    cleanup()
+  }
+})
+
 test("herdr agent 消失（TUI 退出）：续说报 agent_gone，不再把消息敲进空 shell", async () => {
   const { adapter, cleanup } = makeHerdrAdapter({ workMs: 60000, goneMs: 300 })
   try {

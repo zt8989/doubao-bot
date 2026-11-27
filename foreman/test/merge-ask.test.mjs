@@ -96,7 +96,7 @@ test("poll：不解析旧 RESULT 或自动记 PR；只有显式 runMergeTask 才
       info: async () => ({ lastReply: `<RESULT>${JSON.stringify(doneResult)}</RESULT>` }),
       queue: async (target, text) => { sends.push({ target, text }) },
     }
-    server = await startServer({ cfg, book, dws, gitea, log: () => {} })
+    server = await startServer({ cfg, book, driver: dws, gitea, log: () => {} })
 
     // 即使旧会话仍返回 RESULT，poll 也只当普通文本入箱，不自动记 PR、不改状态。
     const r1 = await server.poll()
@@ -114,7 +114,7 @@ test("poll：不解析旧 RESULT 或自动记 PR；只有显式 runMergeTask 才
     // 编排核对后手动合：runMergeTask 直接执行，合完关单，不回执通知。
     const logs = []
     const out = await runMergeTask(
-      { cfg, log: (s) => logs.push(String(s)), gitea, dws: mkDws([], sends) },
+      { cfg, log: (s) => logs.push(String(s)), gitea, session: mkDws([], sends) },
       { key: "demo/demo#12", repo: "demo/demo", pr: 12, issue: 9, notifyTo: "boss", workflow: "own", cleanup: true }
     )
     assert.equal(out.ok, true)
@@ -143,7 +143,7 @@ test("runMergeTask 拆分：默认只合并——不动工作区、不关单，�
       closeIssue: async () => { calls.close++ },
       viewPr: async () => null,
     }
-    const out = await runMergeTask({ cfg, log: () => {}, gitea, dws: {} }, { key: "demo/demo#12", repo: "demo/demo", pr: 12, issue: 12, notify: false })
+    const out = await runMergeTask({ cfg, log: () => {}, gitea, session: {} }, { key: "demo/demo#12", repo: "demo/demo", pr: 12, issue: 12, notify: false })
     assert.equal(out.ok, true)
     assert.equal(calls.merge, 1)
     assert.equal(calls.close, 0, "合并-only 不关单")
@@ -169,7 +169,7 @@ test("runMergeTask：冲突 → 不 force merge、只记失败，不回执通知
       closeIssue: async () => {},
     }
     const out = await runMergeTask(
-      { cfg, log: () => {}, gitea, dws: mkDws([], sends) },
+      { cfg, log: () => {}, gitea, session: mkDws([], sends) },
       { key: "demo/demo#12", repo: "demo/demo", pr: 12, issue: 9, notifyTo: "boss", workflow: "review" }
     )
     assert.equal(out.ok, false)
@@ -197,7 +197,7 @@ test("runMergeTask：没写 workflow 时按账本推断——自有工单落 own
     }
     const gitea = { mergePr: async () => {}, closeIssue: async () => {}, viewPr: async () => null }
     const out = await runMergeTask(
-      { cfg, log: () => {}, gitea, dws: mkDws([], []), engine },
+      { cfg, log: () => {}, gitea, session: mkDws([], []), engine },
       { key: "demo/demo#12", repo: "demo/demo", pr: 12, issue: 9, notify: false }
     )
     assert.equal(out.ok, true)
@@ -215,7 +215,7 @@ test("runMergeTask：没写 workflow 时按账本推断——自有工单落 own
       afterMerge: async ({ workflow }) => { seen2.push(`afterMerge:${workflow}`); return { notes: [] } },
     }
     const out2 = await runMergeTask(
-      { cfg, log: () => {}, gitea, dws: mkDws([], []), engine: engine2 },
+      { cfg, log: () => {}, gitea, session: mkDws([], []), engine: engine2 },
       { key: "demo/demo#13", repo: "demo/demo", pr: 13 }
     )
     assert.equal(out2.ok, true)
@@ -246,7 +246,7 @@ test("runMergeTask：没传 --issue 时按 PR 反查工单，close 节点照样�
     }
     const gitea = { mergePr: async () => {}, closeIssue: async () => {}, viewPr: async () => null }
     const out = await runMergeTask(
-      { cfg, log: () => {}, gitea, dws: mkDws([], []), engine },
+      { cfg, log: () => {}, gitea, session: mkDws([], []), engine },
       { key: "demo/demo#122", repo: "demo/demo", pr: 122, notify: false }
     )
     assert.equal(out.ok, true)
@@ -284,7 +284,7 @@ test("completeIssue：远端已合并时不重复合并，复用 afterMerge 收�
       mergePr: async () => { merges++ },
       closeIssue: async () => {},
     }
-    const out = await completeIssue({ cfg, gitea, engine, dws: mkDws([], []), log: () => {} }, { repo: "demo/demo", number: 9 })
+    const out = await completeIssue({ cfg, gitea, engine, session: mkDws([], []), log: () => {} }, { repo: "demo/demo", number: 9 })
     assert.equal(out.ok, true)
     assert.equal(out.completed, true)
     assert.equal(merges, 0, "手动完成不能再发合并请求")
@@ -333,7 +333,7 @@ test("POST /api/complete：开放 PR 返回 409，不改变账本", async () => 
       mergePr: async () => { merges++ },
       closeIssue: async () => {},
     }
-    server = await startServer({ cfg, dws: mkDws([], []), gitea, log: () => {} })
+    server = await startServer({ cfg, driver: mkDws([], []), gitea, log: () => {} })
     const res = await fetch(`http://127.0.0.1:${server.port}/api/complete`, {
       method: "POST",
       headers: { "content-type": "application/json" },

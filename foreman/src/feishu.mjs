@@ -1,18 +1,16 @@
 // 飞书入站通道（openclaw 式）：官方 SDK 的 WS 长连接收 im.message.receive_v1，
 // 按白名单/群分级筛选后写成 Inbox 的 chat.message 事件——之后复用现有链路
 // （Worker → chat.deliver → routerOnce → router agent），本文件不碰会话编排。
-// 回复推送（FeishuReplyPump）轮询 router 会话的 assistant 增量，经 Outbox feishu 渠道发回飞书；
-// 出站用入站同一个 app 直发（open_id/chat_id 都是 app 作用域的，换 app 发会报 open_id cross app）。
+// 回复发到哪由 router agent 看投递包装里的来源说明自己决定，调 foreman send 入 Outbox
+// （feishu 渠道直发，见 workflow/chat.mjs 的 noticeOf 与 sendOutbound）；机器人自己外发的
+// 消息按 sender=botOpenId 拦回声，防直发循环。出站与入站同一个 app（open_id/chat_id
+// 都是 app 作用域的，换 app 发会报 open_id cross app）。
 //
 // service 里 enabled 才动态 import 本文件，feishu.enabled=false 的机器零加载 SDK。
 import { AppType, Client, Domain, EventDispatcher, WSClient } from "@larksuiteoapi/node-sdk"
 import { Book } from "./book.mjs"
-import { createChatStreamSource } from "./chatstream.mjs"
 import { enqueueOutbound } from "./outbound.mjs"
 import { nowIso } from "./util.mjs"
-
-// 回复推送的单条长度上限：飞书消息太长会被服务端拒绝，超限截断并注明。
-const MAX_PUSH_CHARS = 4000
 
 // WS 重连会重投事件，按 message_id 做带 TTL 的 LRU 去重（同 openclaw 的 MessageDedup）。
 export class MessageDedup {
@@ -69,6 +67,12 @@ export function classifyInbound(feishuCfg, event, identity = {}) {
   if (!messageId) return deny("缺 message_id")
   if (!text) return deny(`暂只收文本消息（收到 ${message.message_type || "未知类型"}）`)
 
+  // 机器人自己外发的消息会从 WS 原样回声进来（agent 直发配方后 p2p 回声全过白名单）：
+  // 按 sender=botOpenId 拦掉，防止「自己回复自己」的循环。botOpenId 没拿到时退化为旧行为。
+  if (identity.botOpenId && senderId === identity.botOpenId) {
+    return deny("机器人自己的消息（外发回声，拦截防循环）")
+  }
+
   if (chatType === "p2p") {
     // allowUsers 留空 = 放行所有私聊（单管理员自用默认）；配了就只放名单内。
     if (feishuCfg.allowUsers.length && !feishuCfg.allowUsers.includes(senderId)) {
@@ -90,7 +94,9 @@ export function classifyInbound(feishuCfg, event, identity = {}) {
   return deny(`未知会话类型：${chatType || "缺 chat_type"}`)
 }
 
-// 账本里的飞书通道状态（回复目标 + 推送断点），重启不丢。
+// 账本里的飞书通道状态（诊断留痕：最近回复目标 + 最近入站时间），重启不丢。
+// 回复推送不再由确定性泵代推：deliver 包装带来源说明与建议命令，router agent 自己
+// 调 foreman send 入 Outbox（见 workflow/chat.mjs noticeOf）。
 function feishuState(book) {
   return book.data.feishu ?? (book.data.feishu = {})
 }
@@ -108,7 +114,26 @@ export class FeishuGateway {
     this.feishuCfg = cfg.feishu ?? {}
     this.dedup = new MessageDedup()
     this.ws = null
-    this.status = { running: false, error: "", lastInboundAt: "", accepted: 0, rejected: 0, duplicates: 0 }
+    this.status = { running: false, error: "", lastInboundAt: "", accepted: 0, rejected: 0, duplicates: 0, processing: null }
+  }
+
+  // bot 处理状态：worker 认领到飞书消息即点亮（控制台 IM 页可见「处理中：…」），
+  // bot 的回复经 Outbox 送出后由 Dispatcher 熄灭；投递失败也熄灭（重试认领会重新点亮）。
+  markProcessing(events = []) {
+    const list = (Array.isArray(events) ? events : [events]).filter((e) => e?.payload?.source === "feishu" && e?.payload?.chatId)
+    if (!list.length) return
+    const last = list[list.length - 1]
+    this.status.processing = {
+      chatId: String(last.payload.chatId),
+      chatType: String(last.payload.chatType || ""),
+      senderId: String(last.payload.senderId || ""),
+      text: String(last.text || "").slice(0, 60),
+      since: nowIso(),
+    }
+  }
+
+  clearProcessing() {
+    this.status.processing = null
   }
 
   async start() {
@@ -128,7 +153,22 @@ export class FeishuGateway {
     const dispatcher = new EventDispatcher({}).register({
       "im.message.receive_v1": (data) => this.onMessage(data),
     })
-    const ws = new WSClient({ appId, appSecret, domain, logger })
+    // pong 看门狗 + 断线回调：SDK 默认全关（pingTimeout=0），半开连接（代理/NAT 静默断）
+    // 会让 running:true 的僵尸长连接一条消息都收不到，且不留任何日志。60s 无入站即判死重建。
+    // wsConfig 在 SDK 里只取 pingTimeout 一个字段，不会动 autoReconnect/pingInterval 默认值。
+    const ws = new WSClient({
+      appId, appSecret, domain, logger,
+      wsConfig: { pingTimeout: 60 },
+      onError: (e) => {
+        this.status.error = String(e?.message || e)
+        this.log(`飞书 WS 错误：${e?.message || e}`)
+      },
+      onReconnecting: () => this.log("飞书 WS 断线，自动重连中…"),
+      onReconnected: () => {
+        this.status.error = ""
+        this.log("飞书 WS 已重连")
+      },
+    })
     this.ws = ws
     await ws.start({ eventDispatcher: dispatcher })
     // @ 识别要机器人自己的 open_id：启动时用凭据自动获取，省掉手配 botName/botOpenId。
@@ -212,9 +252,11 @@ export class FeishuGateway {
         return
       }
       this.status.accepted++
-      // 回复目标跟着来源走：私聊发回发件人（带上会话 id，直发用 chat_id 更稳），群聊发回群；
-      // console/chat-ui 来的消息不改目标。open_id 是 app 作用域的，跨 app 发必被拒。
+      // 诊断留痕：最近一次回复目标 + 入站时间。回复发到哪由 router agent 看来源说明后
+      // 自己调 foreman send 入 Outbox（deliver 包装带 chatId 与建议命令），这里不再记账本环。
+      const clientId = `feishu-${verdict.messageId}`.slice(0, 128)
       const book = new Book(this.cfg.stateFile)
+      book.reload()
       const st = feishuState(book)
       st.replyTarget = verdict.chatType === "p2p"
         ? { kind: "user", id: verdict.senderId, chatId: verdict.chatId }
@@ -222,7 +264,6 @@ export class FeishuGateway {
       st.lastInboundAt = nowIso()
       book.save()
       // client 格式与 chat.send 的 cleanClientId 兼容（字母数字._:-），复用同一套去重与 UI 口径。
-      const clientId = `feishu-${verdict.messageId}`.slice(0, 128)
       this.ctx.inbox.enqueue({
         kind: "chat.message",
         text: verdict.text,
@@ -240,117 +281,6 @@ export class FeishuGateway {
       this.log(`飞书消息已入箱：${verdict.chatType} ${verdict.messageId.slice(-8)}（${verdict.text.length} 字）`)
     } catch (e) {
       this.log(`飞书消息处理失败：${e.message}`)
-    }
-  }
-}
-
-// 回复推送：轮询 router 会话，把新完成的 assistant 回复经 Outbox feishu 渠道发回飞书。
-// console Chat 页是拉模式（自己轮询会话内容），飞书侧必须推，所以单独要这个泵。
-export class FeishuReplyPump {
-  constructor({ cfg, ctx, log = () => {} } = {}) {
-    this.cfg = cfg
-    this.ctx = ctx
-    this.log = log
-    this.timer = null
-    this.running = false
-    this.lastResult = null
-    this.stream = null // zcode 直读转录源（懒建；测试可注入假源）
-  }
-
-  start() {
-    const seconds = Number(this.cfg.feishu?.replyPollSeconds ?? 5)
-    this.timer = setInterval(() => {
-      this.pollOnce().catch((e) => {
-        this.lastResult = { ok: false, error: e.message }
-        this.log(`飞书回复推送失败：${e.message}`)
-      })
-    }, seconds * 1000)
-    this.timer.unref?.()
-  }
-
-  stop() {
-    if (this.timer) clearInterval(this.timer)
-    this.timer = null
-  }
-
-  state() {
-    const book = new Book(this.cfg.stateFile)
-    return { book, st: feishuState(book) }
-  }
-
-  // 回复清单：优先 zcode 库直读转录（真 assistant 消息、completed 标志、行 id 稳定）。
-  // 账本轮次留痕是读屏来的，屏上混着排队提示（【Chat UI 用户消息】标记）和 Thought 渲染，
-  // 归一后角色会错成 user——泵只认 assistant，会静默漏推（2026-11-26 herdr 恢复后实测踩中）。
-  // 非 zcode 载体或直读失败回落 messagesBase（账本轮次）。
-  async #replies() {
-    try {
-      if (!this.stream) this.stream = createChatStreamSource({ ctx: this.ctx, log: this.log })
-      const t = await this.stream.transcript("", 0)
-      if (t.ok && t.carrier === "zcode" && t.conv) {
-        const replies = new Map()
-        for (const r of t.rows) {
-          if (r.kind !== "message" || r.role !== "assistant" || !r.completed) continue
-          replies.set(String(r.id), { id: String(r.id), role: "assistant", text: "" })
-        }
-        for (const p of t.rows) {
-          if (p.kind !== "part" || p.type !== "text") continue
-          const m = replies.get(String(p.messageId))
-          if (m) m.text = m.text ? `${m.text}\n${String(p.text ?? "").trim()}` : String(p.text ?? "").trim()
-        }
-        const list = [...replies.values()].filter((m) => m.text)
-        if (list.length) return { convId: t.conv, messages: list }
-      }
-    } catch (e) {
-      this.log(`飞书回复泵直读转录失败，改用账本留痕：${e.message}`)
-    }
-    return this.ctx.chat.messagesBase()
-  }
-
-  async pollOnce() {
-    if (this.running) return { ok: true, skipped: "busy" }
-    this.running = true
-    try {
-      const { book, st } = this.state()
-      // 还没从飞书收过消息就没有推送目标（飞书回复只发给飞书来过的会话）。
-      const target = st.replyTarget
-      if (!target?.id) return { ok: true, skipped: "no-target" }
-      const base = await this.#replies()
-      if (!base?.convId) return { ok: true, skipped: "no-session" }
-      const replies = (base.messages ?? []).filter(
-        (m) => m.role === "assistant" && m.finished !== false && String(m.text ?? "").trim()
-      )
-      if (!replies.length) return { ok: true, skipped: "empty" }
-
-      const lastId = String(st.lastPushedId ?? "")
-      const idx = lastId ? replies.findIndex((m) => String(m.id) === lastId) : -1
-      if (idx < 0) {
-        // 首次启用或会话重建：锚定最新一条、不回放历史，之后的才是增量（重启/换会话当刻的第一条回复可能被吞，README 有说明）。
-        st.lastPushedId = String(replies[replies.length - 1].id)
-        book.save()
-        this.lastResult = { ok: true, skipped: "armed" }
-        return this.lastResult
-      }
-      const fresh = replies.slice(idx + 1)
-      if (!fresh.length) return { ok: true, skipped: "no-new" }
-      for (const m of fresh) {
-        const text = String(m.text).trim()
-        const body = text.length > MAX_PUSH_CHARS ? `${text.slice(0, MAX_PUSH_CHARS)}\n…（已截断，完整内容见控制台）` : text
-        // 私聊优先发 chat_id（p2p 会话 id，全局唯一）；旧状态里没有 chatId 时回落 open_id——
-        // 出站与入站同 app，open_id 不会跨 app。群聊本来就是 chat id。
-        const recv = target.kind === "user"
-          ? (target.chatId ? { chatId: target.chatId } : { userId: target.id })
-          : { chatId: target.id }
-        enqueueOutbound(
-          this.ctx,
-          { type: "feishu", input: { ...recv, markdown: body }, dedupeKey: `feishu:push:${m.id}` }
-        )
-      }
-      st.lastPushedId = String(fresh[fresh.length - 1].id)
-      book.save()
-      this.lastResult = { ok: true, pushed: fresh.length }
-      return this.lastResult
-    } finally {
-      this.running = false
     }
   }
 }

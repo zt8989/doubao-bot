@@ -89,7 +89,7 @@ test("deliverNewSession：用产品自己的提示词与项目目录，首句带
   const calls = []
   const ctx = {
     cfg,
-    dws: { openNew: async (args) => { calls.push(args); return { convId: "1" } } },
+    session: { openNew: async (args) => { calls.push(args); return { convId: "1" } } },
     log: () => {},
   }
   await deliverNewSession(ctx, { text: "状态：done", kind: "工单结论", watcher: { repo: "yyzl/win-ai-harness" } })
@@ -116,7 +116,7 @@ test("deliverNewSession：查不到产品时用全局提示词（老配置行为
   })
   const cfg = loadConfig(file)
   const calls = []
-  await deliverNewSession({ cfg, dws: { openNew: async (a) => { calls.push(a); return { convId: "1" } } }, log: () => {} }, {
+  await deliverNewSession({ cfg, session: { openNew: async (a) => { calls.push(a); return { convId: "1" } } }, log: () => {} }, {
     text: "PR 待合并", kind: "PR待合并", repo: "someone/else",
   })
   assert.match(calls[0].prompt, /全局提示词/)

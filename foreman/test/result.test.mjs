@@ -71,7 +71,7 @@ test("kickoff 写死编码智能体职责：非保护分支 push、开 PR、按�
   assert.match(p, /按对抗审查意见修复/)
   assert.match(p, /缺工作区：<owner\/name>/)
   assert.match(p, /gitea 技能/)
-  assert.match(p, /dws 技能/)
+  assert.match(p, /foreman steer 续说（会话载体能力）|steer/)
   assert.match(p, /不直接联系其他编码智能体/)
   assert.match(p, /结束时直接给出最终回复/)
   assert.match(p, /直接给出最终回复/)

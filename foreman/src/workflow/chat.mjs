@@ -18,7 +18,7 @@ function routerRecordOf(book) {
 
 function ledgerOf(ctx) {
   // 载体可能是裸驱动（.ledger）或适配器包装（.driver.ledger）。
-  return ctx.dws?.ledger ?? ctx.dws?.driver?.ledger ?? null
+  return ctx.session?.ledger ?? ctx.session?.driver?.ledger ?? null
 }
 
 function chatRole(message) {
@@ -31,6 +31,17 @@ function chatText(message) {
   if (chatRole(message) !== "user") return text
   const marker = "【Chat UI 用户消息】"
   return text.slice(text.indexOf(marker) + marker.length).trim()
+}
+
+// 投递包装：标记头是控制台/账本识别 user 气泡的锚（别改字面）；飞书来源的消息附一行
+// 来源说明 + 建议回复命令——回复发到哪由 router agent 自己决定、自己调 foreman send 入
+// Outbox（直发配方），管道只负责把「inbox 来源是什么、建议推到哪里」说清楚，不代推。
+export function noticeOf(event) {
+  const text = `【Chat UI 用户消息】\n${String(event.text ?? "").trim()}`
+  const p = event.payload ?? {}
+  if (p.source !== "feishu" || !String(p.chatId ?? "").trim()) return text
+  const where = p.chatType === "p2p" ? "飞书私聊" : "飞书群聊"
+  return `${text}\n\n（本条来自${where}，chatId=${p.chatId}。要回复就在飞书发：foreman send --type feishu --chat-id ${p.chatId} --markdown "<回复内容>"；无需回复或只在控制台说明即可的，就不要发。）`
 }
 
 /**
@@ -57,7 +68,7 @@ export function createChatWorkflow(ctx) {
 
     async deliver(events) {
       const batch = Array.isArray(events) ? events : [events]
-      const notices = batch.filter(Boolean).map((event) => `【Chat UI 用户消息】\n${String(event.text ?? "").trim()}`)
+      const notices = batch.filter(Boolean).map(noticeOf)
       if (!notices.length) return { ok: true, skipped: "empty" }
       const result = await routerOnce(ctx, { force: true, scheduled: false, notices })
       if (!result.ok || result.skipped) throw new Error(result.error || `Router Agent 暂时不可投递：${result.skipped}`)
@@ -89,7 +100,7 @@ export function createChatWorkflow(ctx) {
     async archive({ target } = {}) {
       const t = String(target ?? "").trim()
       if (!t) throw new Error("缺少要归档的会话")
-      if (typeof ctx.dws?.archive !== "function") throw new Error("当前载体不支持归档")
+      if (typeof ctx.session?.archive !== "function") throw new Error("当前载体不支持归档")
       const ledger = ledgerOf(ctx)
       const entry = ledger?.resolve?.(t)
       if (!entry) throw new Error("只读围观的子智能体会话不在 foreman 账本里，不归档")
@@ -97,7 +108,7 @@ export function createChatWorkflow(ctx) {
       if (routerConv && ledger.resolve(routerConv)?.key === entry.key) {
         throw new Error("Router 当前会话不允许归档；要换新会话用 /clear，轮换后旧会话才能归档")
       }
-      const r = await ctx.dws.archive(entry.key)
+      const r = await ctx.session.archive(entry.key)
       return { ok: true, archived: entry.name, convId: entry.key, ...(r && typeof r === "object" ? r : {}) }
     },
 
@@ -119,7 +130,7 @@ export function createChatWorkflow(ctx) {
     async messagesFor(target = "") {
       const t = String(target ?? "").trim()
       if (!t) return this.messages()
-      const info = await ctx.dws.info(t)
+      const info = await ctx.session.info(t)
       return {
         ok: true,
         convId: String(info?.sessionId || t),
@@ -142,8 +153,8 @@ export function createChatWorkflow(ctx) {
         .map((event) => ({ id: event.id, text: String(event.text ?? ""), status: event.status }))
       const pending = pendingMessages.length
       if (!router.convId) return { ok: true, convId: "", name: "", messages: [], running: false, pending, pendingMessages }
-      if (typeof ctx.dws?.info !== "function") throw new Error("dws 缺少 info，无法读取 Router Agent 会话")
-      const info = await ctx.dws.info(router.convId)
+      if (typeof ctx.session?.info !== "function") throw new Error("dws 缺少 info，无法读取 Router Agent 会话")
+      const info = await ctx.session.info(router.convId)
       // 通用 message 归一化在适配器契约层（session.mjs）：载体差异（dws 原生对话/zcode 账本留痕）在
       // 这里被抹平成 user/assistant/event 三角色，Chat UI 与本层不再关心载体。
       return {

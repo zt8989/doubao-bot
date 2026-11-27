@@ -185,7 +185,7 @@ test("服务 Schedule 注册每日 03:00 dreaming，并能手动整理前一日"
   }
   let server
   try {
-    server = await startServer({ cfg, dws, log() {} })
+    server = await startServer({ cfg, driver: dws, log() {} })
     const schedule = server.inbox.schedules().find((item) => item.id === "dreaming")
     assert.equal(schedule.enabled, true)
     assert.equal(schedule.cron, "0 3 * * *")

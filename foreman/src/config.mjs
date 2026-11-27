@@ -130,6 +130,23 @@ export const DEFAULTS = {
     // 默认过滤有冲突的 PR（合不了，报了没用）；设 false 则照报。
     filterConflicts: true,
   },
+  // 存量接口变更巡检：定时扫各仓已合并 PR，diff 触及接口定义文件的候选交独立判官会话精判，
+  // 确认改了存量接口出入参的发飞书群（chatIds）。chatIds 留空 = 只扫不发（脚本直接 skip）。
+  apiWatch: {
+    enabled: false,
+    cron: "0 9-18/2 * * 1-5",
+    chatIds: [],
+    // 空 = 全部产品工程（cfg.repos）；配了就只扫这些（owner/name 字符串数组）。
+    repos: [],
+    maxPages: 3,
+    // 每轮最多交判官的候选数 / 最多拉 diff 的新 PR 数（超出留到下一轮）。
+    maxPrsPerRound: 5,
+    maxProcessPerRound: 20,
+    // 单条 PR diff 截断长度（判官提示词里内嵌）。
+    maxDiffChars: 6000,
+    // 粗筛模式：diff 文件路径含这些子串才算候选（大小写不敏感）；空数组回落代码默认。
+    include: [],
+  },
   // 邮件验收：PR 涉及 UI 时发信给测试同学，主题末尾带 [FM-<8位>] 筛选 ID；
   // 服务每 pollSeconds 轮询一次收件箱，把回复按筛选 ID 认回这张单，注回它的编排会话，
   // 收到「验收通过」就地合并（「驳回」保持 PR 打开）。
@@ -399,6 +416,24 @@ export function loadConfig(explicit, env = process.env) {
     cfg.prWatch.ignoreAuthors = [...ignore]
   }
   cfg.prWatch.ignoreAuthors = (cfg.prWatch.ignoreAuthors ?? []).map((x) => String(x).trim()).filter(Boolean)
+  // 存量接口变更巡检：cron 合法、chatIds 是 oc_ 前缀的群聊 id、数值项为正。
+  cfg.apiWatch = isObj(cfg.apiWatch) ? cfg.apiWatch : {}
+  if (cfg.apiWatch.cron != null) {
+    const awCron = validateCron(cfg.apiWatch.cron)
+    if (!awCron.ok) throw new Error(`配置项 apiWatch.cron 不合法：${awCron.error}`)
+    cfg.apiWatch.cron = awCron.expression
+  }
+  cfg.apiWatch.chatIds = (Array.isArray(cfg.apiWatch.chatIds) ? cfg.apiWatch.chatIds : []).map((id) => String(id).trim()).filter(Boolean)
+  for (const id of cfg.apiWatch.chatIds) {
+    if (!id.startsWith("oc_")) throw new Error(`配置项 apiWatch.chatIds 要是飞书群聊 id（oc_ 开头），现在是：${id}`)
+  }
+  cfg.apiWatch.repos = (Array.isArray(cfg.apiWatch.repos) ? cfg.apiWatch.repos : []).map((r) => String(r).trim()).filter(Boolean)
+  cfg.apiWatch.include = (Array.isArray(cfg.apiWatch.include) ? cfg.apiWatch.include : []).map((p) => String(p).trim()).filter(Boolean)
+  for (const key of ["maxPages", "maxPrsPerRound", "maxProcessPerRound", "maxDiffChars"]) {
+    const n = Number(cfg.apiWatch[key])
+    if (!Number.isFinite(n) || n <= 0) throw new Error(`配置项 apiWatch.${key} 要是正数，现在是：${cfg.apiWatch[key]}`)
+    cfg.apiWatch[key] = Math.floor(n)
+  }
   // 先展开 ~ 再判绝对路径：反过来会把 "~/x" 当成相对路径拼成 "<dir>/~/x"。
   cfg.stateFile = expandHome(cfg.stateFile)
   if (!path.isAbsolute(cfg.stateFile)) cfg.stateFile = path.resolve(path.dirname(file), cfg.stateFile)
@@ -422,7 +457,7 @@ export function loadConfig(explicit, env = process.env) {
   cfg.memory.dreaming.cron = dreamingCron.expression
 
   // 自定义 Agent 定时任务：id 唯一且不与内置重名；cron 必须合法；提示词不能为空。
-  const builtinScheduleIds = ["pickup", "prWatch", "mail", "router", "inspector", "dreaming", "workHours"]
+  const builtinScheduleIds = ["pickup", "prWatch", "mail", "router", "inspector", "dreaming", "workHours", "apiWatch"]
   const rawAgentSchedules = Array.isArray(cfg.agentSchedules) ? cfg.agentSchedules : []
   if (rawAgentSchedules.length > 10) throw new Error("配置项 agentSchedules 最多 10 条")
   const seenScheduleIds = new Set()

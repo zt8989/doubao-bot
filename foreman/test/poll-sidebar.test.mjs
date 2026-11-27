@@ -28,7 +28,7 @@ function mkCtx({ runningMap, status, notify }) {
     state: { polling: false, watchers: new Map(), dwsErrors: 0, notifiedCount: 0 },
     log: () => {},
     gitea: {},
-    dws: {
+    session: {
       runningMap,
       status: async (...a) => { calls.status++; return status(...a) },
       info: async () => { calls.info++; return { lastReply: "做完了，已提交并通过测试。" } },
@@ -281,7 +281,7 @@ test("PR 已合并（会话已归档）：不再给编排会话补一条结论�
       log: () => {},
       gitea: {},
       engine: { lifecycle: { emit: async (e, p) => events.push([e, p.kind]) }, emit: async () => {} },
-      dws: {
+      session: {
         runningMap: async () => ({ "conv-a": { running: false, title: "w" } }),
         status: async () => ({ streaming: false, finished: true, chars: 500, head: "H", tail: "T", status: "ok" }),
         info: async () => ({ lastReply: '<RESULT>{"status":"done","pr":12}</RESULT>' }),
@@ -318,7 +318,7 @@ test("普通最终回复：只入 Inbox，由 Worker 投给编排，不拼整段
       log: () => {},
       gitea: {},
       engine: { lifecycle: { emit: async () => {} }, emit: async () => {} },
-      dws: {
+      session: {
         runningMap: async () => ({ "conv-worker": { running: false, title: "w" } }),
         status: async () => ({ streaming: false, finished: true, chars: 500, head: "H", tail: "T", status: "ok" }),
         info: async () => ({
@@ -370,7 +370,7 @@ test("Worker queue 失败：事件留在 Inbox，任务不 idle；重试成功�
       log: () => {},
       gitea: {},
       engine: { lifecycle: { emit: async () => {} }, emit: async () => {} },
-      dws: {
+      session: {
         runningMap: async () => ({ "conv-worker": { running: false, title: "w" } }),
         status: async () => ({ streaming: false, finished: true, chars: 500, head: "H", tail: "T", status: "ok" }),
         info: async () => ({ lastReply: "改完了，已 commit。" }),

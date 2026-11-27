@@ -248,3 +248,19 @@ test("pr-view：state/head/comments 映射正常", async () => {
   assert.equal(pr.filesCount, 2)
   assert.deepEqual(pr.comments, [])
 })
+
+test("pullDiff：.diff 端点返回原始文本（非 JSON 回落字符串）", async () => {
+  const fetchImpl = fakeFetch(({ path }) => {
+    if (path === "/api/v1/repos/o/r/pulls/12.diff") {
+      return new Response("diff --git a/src/X.java b/src/X.java\n--- a/src/X.java\n+++ b/src/X.java\n@@ -1,2 +1,3 @@\n-old\n+new\n", {
+        status: 200,
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      })
+    }
+    return json({}, 500)
+  })
+  const diff = await api.pullDiff("o/r", 12, { opts: { settings: SETTINGS, fetchImpl } })
+  assert.match(diff, /^\+new$/m)
+  const call = fetchImpl.calls[0]
+  assert.equal(call.path, "/api/v1/repos/o/r/pulls/12.diff")
+})

@@ -130,7 +130,7 @@ test("poll：完成回复只入箱并由 Worker queue，不自动开 PR 或改�
       queue: async (target, text) => { sends.push({ target, text }) },
       notify: async () => { throw new Error("旧 notify 不应参与任务状态投递") },
     }
-    server = await startServer({ cfg, book, dws, gitea, log: () => {} })
+    server = await startServer({ cfg, book, driver: dws, gitea, log: () => {} })
 
     const r = await server.poll()
     assert.equal(r.notified, 0)
@@ -163,7 +163,7 @@ test("poll：阻塞文本不自动改 blocked，Worker 只负责投递", async (
       queue: async (target, text) => { sends.push({ target, text }) },
       notify: async () => { throw new Error("旧 notify 不应参与任务状态投递") },
     }
-    server = await startServer({ cfg, book, dws, gitea, log: () => {} })
+    server = await startServer({ cfg, book, driver: dws, gitea, log: () => {} })
     await server.poll()
     await server.worker.idle()
     await server.worker.runOnce()

@@ -4,25 +4,25 @@ import { agentExecutor } from "./executors.mjs"
 import { builtinAgentPromptPath } from "../builtin-prompts.mjs"
 import { memoryBootstrap } from "./memory.mjs"
 
-// 子智能体分配协议：编码/审查不再由 router 亲自干或用无模板的内部 sub agent，
-// 而是用 ZCode 自带 CreateSession 开独立根会话，各自读共享目录里自己的岗位提示词文件。
-// 绝对路径在组装首句时现算（src/dist 各自成立）；delivered 会话无 --cwd，必须绝对路径。
-// 实机探针（2026-11-23）：headless 下 CreateSession/SendToSession/WaitSessions/ReadSession 可用，
-// CreateSession 只有 prompt/model/retryOf——没有 project/工作目录参数，任务包必须自带 worktree 绝对路径。
+// 子智能体分配协议：编码/审查由 foreman 开独立工作会话（yolo，不卡审批，收工自动通知 router）。
+// 不用 CreateSession：它开的子会话是 build 权限模式，每个改动都要审批，必然卡死（2026-11-27 实测）；
+// 不用 Agent 工具：子代理一次性，审查-修复循环无法跨轮续说。
+// 任务包写文件传 --task-file；delivered 会话无 --cwd，任务包必须自带 worktree 绝对路径。
 function agentProtocol() {
   const coder = builtinAgentPromptPath("coder")
   const reviewer = builtinAgentPromptPath("reviewer")
   return [
     "## 子智能体分配协议（编码/审查必须这样派，不要在自己会话内串行写码或审查）",
     "",
-    "用你的 CreateSession 工具为编码与对抗审查各开一条独立根会话：",
-    `1. 编码智能体提示词文件：${coder}`,
-    `2. 审查智能体提示词文件：${reviewer}`,
-    "3. CreateSession 只收 prompt/model/retryOf，没有 project/工作目录参数——新会话工作目录不可指定，任务包必须自带 worktree 绝对路径，让子智能体自己 cd。",
-    "4. 子会话首句固定两段：第一段「先完整阅读你的提示词文件 <对应绝对路径>，严格遵照执行」；第二段注入任务包（工单键与链接、正文与验收标准、涉及工程及基线——含各工程 worktree 绝对路径与工作分支、补充约束、审查意见；审查会话则给 PR 列表与测试报告）。",
-    "5. 等待用 WaitSessions（传 create 返回的 operation），读结果用 ReadSession（view=summary）。",
-    "6. 同一工单始终复用同一条编码会话：审查有阻断时用 SendToSession 把审查 JSON 原文续说给原编码会话逐项修复，修复完成后重开审查会话复审。",
-    "7. 会话工具不可用时才允许回退：改用 Agent 工具创建 sub agent，prompt 同样以「先完整阅读提示词文件 <绝对路径>」开头并注入相同任务包。",
+    "**不要用 CreateSession**（它开的子会话是 build 权限模式，每个改动都要审批，必然卡死）**也不要用 Agent 工具**（子代理一次性，无法跨轮续说）。编码与审查一律用 foreman 开独立工作会话（yolo，不卡审批，收工自动通知你）：",
+    "",
+    "1. 任务包先写成文件（绝对路径）：工单键与链接、正文与验收标准、涉及工程及基线——含各工程 worktree 绝对路径与工作分支、补充约束；审查会话的则给 PR 列表与测试报告。",
+    `2. 开编码会话：\`foreman session open --role coder --issue <owner/repo>#<单号> --repo <worktree 绝对路径> --task-file <任务包绝对路径>\`（coder 岗位提示词：${coder}，foreman 自动装配，工作目录就是 --repo）。`,
+    `3. 开审查会话：同上把 --role 换成 reviewer（reviewer 岗位提示词：${reviewer}）。`,
+    "4. **不要轮询等待结果**：会话收工时 foreman 自动把【工作会话状态变化】连同最终回复原文投进你的收件箱。期间响应用户新消息优先。",
+    "5. 修复循环：审查有阻断时，把审查 JSON 原文用 `foreman steer <会话名> --text \"<审查意见>\"` 续给**原编码会话**逐项修复；修完再开新的审查会话复审。",
+    "6. 同一工单始终复用同一条编码会话（用 steer 续），不要重复 open。",
+    "7. 会话清单与实时状态看 `foreman tasks --json`；open/steer 报错（如 blocked=目标会话卡死）时按报错处理：解除阻塞或换新会话，不要反复重试同一个卡死的会话。",
   ].join("\n")
 }
 
@@ -55,7 +55,7 @@ function saveRouterRecord(book, value) {
 }
 
 async function deliver(ctx, rec, text, { now, action, reason = "", scheduled = false }) {
-  const { cfg, dws } = ctx
+  const { cfg, session } = ctx
   const book = new Book(cfg.stateFile)
   let convId = rec?.convId ?? ""
   let name = rec?.name ?? ""
@@ -73,11 +73,11 @@ async function deliver(ctx, rec, text, { now, action, reason = "", scheduled = f
         : "这是 router agent 的首条事件，请按上面的职责处理。",
       text,
     ].filter(Boolean).join("\n\n")
-    const opened = await dws.openNew({ name, prompt: first, noWait: true })
+    const opened = await session.openNew({ name, prompt: first, noWait: true })
     convId = String(opened?.convId ?? "").trim()
     if (!convId) throw new Error("新建 router agent 会话成功返回但没有 convId")
   } else {
-    await dws.queue(convId, text)
+    await session.queue(convId, text)
   }
 
   const at = now.toISOString()
@@ -117,8 +117,8 @@ export async function routerOnce(ctx, { now = new Date(), force = false, notice 
   const rec = routerRecord(book)
   try {
     if (routerConfig(ctx.cfg).enabled === false && !force) return { ok: true, skipped: "disabled" }
-    if (typeof ctx.dws?.openNew !== "function" || typeof ctx.dws?.queue !== "function") {
-      throw new Error("dws 缺少 openNew/queue，无法投递 router agent")
+    if (typeof ctx.session?.openNew !== "function" || typeof ctx.session?.queue !== "function") {
+      throw new Error("会话适配器缺少 openNew/queue，无法投递 router agent")
     }
     const staleMs = Number(routerConfig(ctx.cfg).recreateAfterHours ?? 24) * 3600000
     const lastSent = Date.parse(rec.lastSentAt ?? "")

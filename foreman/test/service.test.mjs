@@ -456,7 +456,7 @@ test("archiveFinishedOrchestrators：收口的单归档自己的编排会话；�
     const archived = []
     const dws = { archive: async (t) => { archived.push(t) } }
     const notes = await archiveFinishedOrchestrators({
-      dws,
+      session: dws,
       stateFile: cfg.stateFile,
       log: () => {},
       sidebar: { "conv-o2": { running: true } },
@@ -472,11 +472,11 @@ test("archiveFinishedOrchestrators：收口的单归档自己的编排会话；�
     assert.equal(after.session("foreman-编排")?.convId, "conv-global", "全局编排不动")
 
     // 下一轮：上一条已经停了，这一轮才收它（在跑的那轮本来就不该动）。
-    const again = await archiveFinishedOrchestrators({ dws, stateFile: cfg.stateFile, log: () => {} })
+    const again = await archiveFinishedOrchestrators({ session: dws, stateFile: cfg.stateFile, log: () => {} })
     assert.deepEqual(archived, ["conv-o1", "conv-o2"])
     assert.equal(again.length, 1)
     // 第三轮彻底没得收了
-    const third = await archiveFinishedOrchestrators({ dws, stateFile: cfg.stateFile, log: () => {} })
+    const third = await archiveFinishedOrchestrators({ session: dws, stateFile: cfg.stateFile, log: () => {} })
     assert.equal(third.length, 0)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
@@ -491,7 +491,7 @@ test("archiveFinishedOrchestrators：归档真的失败只记账，不推翻工�
     book.setIssue("yyzl/demo#8", { state: "done", orchestrator: "conv-bad" })
     book.record("foreman-demo-8-编排", { convId: "conv-bad", kind: "orchestrator", issueKey: "yyzl/demo#8" })
     const notes = await archiveFinishedOrchestrators({
-      dws: { archive: async () => { throw new Error("dws archive 超时") } },
+      session: { archive: async () => { throw new Error("dws archive 超时") } },
       stateFile: cfg.stateFile,
       log: () => {},
     })
@@ -513,7 +513,7 @@ test("archiveFinishedOrchestrators：会话已不在侧边栏 → 收掉绑定�
     book.record("foreman-demo-9-编排", { convId: "conv-gone", kind: "orchestrator", issueKey: "yyzl/demo#9" })
     const logs = []
     const notes = await archiveFinishedOrchestrators({
-      dws: { archive: async () => { throw new Error("侧边栏里没有任务 conv-gone") } },
+      session: { archive: async () => { throw new Error("侧边栏里没有任务 conv-gone") } },
       stateFile: cfg.stateFile,
       log: (m) => logs.push(m),
     })
@@ -525,7 +525,7 @@ test("archiveFinishedOrchestrators：会话已不在侧边栏 → 收掉绑定�
     assert.ok(after.issue("yyzl/demo#9").orchestratorArchivedAt, "留收掉的时间")
     assert.equal(after.session("foreman-demo-9-编排"), null)
     // 第二轮没有任何要处理的了
-    const again = await archiveFinishedOrchestrators({ dws: { archive: async () => { throw new Error("侧边栏里没有任务") } }, stateFile: cfg.stateFile, log: () => {} })
+    const again = await archiveFinishedOrchestrators({ session: { archive: async () => { throw new Error("侧边栏里没有任务") } }, stateFile: cfg.stateFile, log: () => {} })
     assert.equal(again.length, 0)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })

@@ -4,7 +4,7 @@
 // PR 扫描与合并助手仍是独立通道；合并关单后用 foreman clean 清理。
 import fs from "node:fs"
 import { Book } from "./book.mjs"
-import { builtinPrompt } from "./builtin-prompts.mjs"
+import { builtinPrompt, builtinAgentPromptPath as builtinPromptPath } from "./builtin-prompts.mjs"
 import { repoWorkDir } from "./config.mjs"
 import { nowIso, expandHome } from "./util.mjs"
 import { originalAgentDocs, resume, withAgentDocs } from "./prompts.mjs"
@@ -91,19 +91,19 @@ export function orchestratorPrompt(ctx = {}, { issueKey = "", issue = null } = {
 
 // 起/复用唯一编排会话。幂等：账本里已有 convId 就直接复用，绝不新开第二条。
 export async function ensureOrchestrator(ctx, { name = "" } = {}) {
-  const { cfg, dws, log = () => {} } = ctx
+  const { cfg, session, log = () => {} } = ctx
   const book = new Book(cfg.stateFile)
   const prev = book.data.orchestrator ?? {}
   const convId = String(prev.convId ?? "").trim()
   if (convId) return { ok: true, reused: true, created: false, convId, name: String(prev.name ?? "") }
 
-  if (typeof dws?.openNew !== "function") {
+  if (typeof session?.openNew !== "function") {
     throw Object.assign(new Error("会话适配器没有 openNew，起不了编排会话"), { code: "no-session-adapter" })
   }
   const nm = String(name ?? "").trim() || orchestratorName(cfg)
   const prompt = orchestratorPrompt(ctx)
   const noWait = cfg?.sessionFlow?.waitFirstReply !== true
-  const out = await dws.openNew({ name: nm, prompt, noWait })
+  const out = await session.openNew({ name: nm, prompt, noWait })
   const newConvId = String(out?.convId ?? "").trim()
   book.setOrchestrator({ convId: newConvId, name: nm })
   book.record(nm, { convId: newConvId, kind: "orchestrator", role: "orchestrator", notify: false })
@@ -116,7 +116,7 @@ export async function ensureOrchestrator(ctx, { name = "" } = {}) {
 // 一张自动巡检工单一条编排会话。hand 时把编排职责和工单合进首句，一次发出；
 // 已有绑定直接复用，不重复开会话，也不再 steer 工单。
 export async function ensureIssueOrchestrator(ctx, { issueKey, repoCfg = null, issue = null, withTicket = false, fresh = false } = {}) {
-  const { cfg, dws, log = () => {} } = ctx
+  const { cfg, session, log = () => {} } = ctx
   const key = String(issueKey ?? "").trim()
   if (!key) throw new Error("issueKey 不能为空，无法绑定工单编排会话")
   const book = new Book(cfg.stateFile)
@@ -127,7 +127,7 @@ export async function ensureIssueOrchestrator(ctx, { issueKey, repoCfg = null, i
       || issueOrchestratorName(cfg, key)
     return { ok: true, reused: true, created: false, convId: existing, name }
   }
-  if (typeof dws?.openNew !== "function") {
+  if (typeof session?.openNew !== "function") {
     throw Object.assign(new Error("会话适配器没有 openNew，起不了工单编排会话"), { code: "no-session-adapter" })
   }
 
@@ -142,7 +142,7 @@ export async function ensureIssueOrchestrator(ctx, { issueKey, repoCfg = null, i
   const noWait = cfg?.sessionFlow?.waitFirstReply !== true
   // 会话真实 cwd 跟工单仓库走（repos[].dir，products 摊平后 cfg.repos 就有）：编码 sub agent
   // 继承编排会话的 cwd，工单在哪个仓库活就得在哪个仓库干——绝不能落 foreman 进程自己的 cwd。
-  const out = await dws.openNew({ name, prompt, noWait, repo: repoWorkDir(cfg, repoCfg?.repo ?? prev.repo ?? "") })
+  const out = await session.openNew({ name, prompt, noWait, repo: repoWorkDir(cfg, repoCfg?.repo ?? prev.repo ?? "") })
   const convId = String(out?.convId ?? "").trim()
   if (!convId) throw new Error(`工单编排会话 ${name} 没返回会话 id，不能安全绑定`)
   const number = Number(key.split("#")[1] ?? 0) || null
@@ -180,8 +180,8 @@ export async function steerOrchestrator(ctx, text, { kind = "", target = "" } = 
   if (!to) return { ok: false, reason: "no-orchestrator" }
   const body = String(text ?? "").trim()
   if (!body) return { ok: false, reason: "empty" }
-  if (typeof ctx.dws?.steer !== "function") return { ok: false, reason: "no-steer" }
-  await ctx.dws.steer(to, body)
+  if (typeof ctx.session?.steer !== "function") return { ok: false, reason: "no-steer" }
+  await ctx.session.steer(to, body)
   book.clearIdle(to)
   book.clearGone(to)
   book.markSteer(to, { kind, chars: body.length })
@@ -355,7 +355,7 @@ export async function resumeWorker(ctx, { sessionId } = {}) {
   const rec = book.issue(key)
   if (!rec) return { ok: false, reason: "unknown-session", sessionId: requested }
   if (!target) return { ok: false, reason: "no-worker" }
-  if (typeof ctx.dws?.steer !== "function") return { ok: false, reason: "no-steer" }
+  if (typeof ctx.session?.steer !== "function") return { ok: false, reason: "no-steer" }
   const repo = String(key).split("#")[0]
   const number = Number(String(key).split("#")[1])
   const ws = Array.isArray(rec.workspaces) ? rec.workspaces : []
@@ -371,7 +371,7 @@ export async function resumeWorker(ctx, { sessionId } = {}) {
     repo,
     workspaces,
   }), originalAgentDocs(docRepos))
-  await ctx.dws.steer(target, text)
+  await ctx.session.steer(target, text)
   book.clearIdle(target)
   book.clearGone(target)
   book.setIssue(key, { state: "working", lastFailure: "", attempts: Number(rec.attempts ?? 0) + 1, resumedAt: nowIso() })
@@ -531,9 +531,9 @@ export async function cleanIssue(ctx, { issueKey, archive = true, currentConv = 
     book.delWatch(entry.target)
   }
   for (const { target, name } of targets.values()) {
-    if (archive && typeof ctx.dws?.archive === "function") {
+    if (archive && typeof ctx.session?.archive === "function") {
       try {
-        await ctx.dws.archive(target)
+        await ctx.session.archive(target)
         notes.push(`工作会话已归档：${name || target}`)
         ctx.log?.(`clean：工作会话已归档 ${target}`)
       } catch (e) {
@@ -555,9 +555,9 @@ export async function cleanIssue(ctx, { issueKey, archive = true, currentConv = 
     const caller = String(currentConv ?? "").trim()
     if (caller && (caller === own.convId || caller === own.name)) {
       notes.push(`编排会话 ${own.name || target} 就是当前会话，留给服务在收口后归档`)
-    } else if (archive && typeof ctx.dws?.archive === "function") {
+    } else if (archive && typeof ctx.session?.archive === "function") {
       try {
-        await ctx.dws.archive(target)
+        await ctx.session.archive(target)
         notes.push(`编排会话已归档：${own.name || target}`)
         ctx.log?.(`clean：编排会话已归档 ${target}`)
         book.delSession(own.name)
@@ -594,4 +594,59 @@ export function cleanableIssues(book) {
         !!ownedIssueOrchestrator(book, key),
     )
     .map(([key]) => key)
+}
+
+// foreman 亲自开编码/审查工作会话（2026-11-27 起 router 编排专用）：
+// CreateSession 开的子会话是 build 权限模式（每个改动都要审批，必然卡死，2026-11-27 实测），
+// Agent 工具子代理一次性无法跨轮续说——统一走这里：载体适配器 openNew 的 yolo TUI + 账本 + 自动挂 watch，
+// 会话收工时 task.update（含最终回复原文）自动通知 router，router 不轮询等待。
+// 任务包以 --task-file 传入：foreman 读文件内容注入首条消息（保持 coder/reviewer 岗位提示词
+// 「首条消息分两段：读提示词 + 任务包」的契约），router 不用把大任务包塞进命令行。
+export async function openWorkSession(ctx, req = {}) {
+  const role = String(req.role ?? "coder").trim()
+  if (!["coder", "reviewer"].includes(role)) throw new Error("role 只支持 coder|reviewer")
+  const issueKey = String(req.issue ?? "").trim()
+  const repoDir = expandHome(String(req.repo ?? "").trim())
+  const taskFile = expandHome(String(req.taskFile ?? "").trim())
+  if (issueKey && !/^[^\s#]+#\d+$/.test(issueKey)) throw new Error(`issue 要是 owner/repo#单号 形态：${issueKey}`)
+  if (!repoDir || !fs.existsSync(repoDir)) throw new Error(`repo 要是存在的工作区目录：${repoDir || "（缺）"}`)
+  if (!taskFile || !fs.existsSync(taskFile)) throw new Error(`task-file 要是存在的任务包文件：${taskFile || "（缺）"}`)
+  const { session } = ctx
+  if (typeof session?.openNew !== "function") {
+    throw Object.assign(new Error("会话适配器没有 openNew，起不了工作会话"), { code: "no-session-adapter" })
+  }
+
+  const promptFile = builtinPromptPath(role)
+  const taskPackage = fs.readFileSync(taskFile, "utf8").trim()
+  if (!taskPackage) throw new Error(`任务包文件是空的：${taskFile}`)
+  const verb = role === "coder" ? "编码" : "审查"
+  const slug = (issueKey || `${role}-${Date.now()}`).replace(/[^\w.-]+/g, "-")
+  const pad = (n) => String(n).padStart(2, "0")
+  const at = new Date()
+  const stamp = `${pad(at.getHours())}${pad(at.getMinutes())}`
+  const name = String(req.name ?? "").trim() || `foreman-${verb}-${slug}-${stamp}`
+
+  const prompt = [
+    `先完整阅读你的提示词文件 ${promptFile}，严格遵照执行。`,
+    `任务包：\n\n${taskPackage}`,
+  ].join("\n\n")
+
+  const out = await session.openNew({ name, prompt, noWait: true, repo: repoDir })
+  const convId = String(out?.convId ?? "").trim()
+  if (!convId) throw new Error("工作会话已开但没有 convId")
+
+  // 自动挂 watch：收工即 task.update（含最终回复原文）投给 router（taskOwner 回落 router），不轮询等待。
+  const book = new Book(ctx.cfg.stateFile)
+  const saved = book.setWatch({
+    target: convId,
+    name,
+    issueKey: issueKey || null,
+    repo: issueKey ? issueKey.split("#")[0] : "",
+    number: issueKey ? Number(issueKey.split("#")[1]) : null,
+    notifyTo: "",
+    parent: "",
+  })
+  if (ctx.state?.watchers) ctx.state.watchers.set(convId, { ...saved, source: "work" })
+  ctx.log?.(`工作会话已开（${verb}）：${name} → ${convId}（已挂 watch，收工自动通知 router）`)
+  return { ok: true, convId, name, role, promptFile, taskFile: taskFile, repo: repoDir, watch: saved }
 }

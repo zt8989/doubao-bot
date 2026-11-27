@@ -38,7 +38,7 @@ test("普通邮件回复入 Inbox，Worker steer 命中会话，其余交给 rou
       list: async () => ({ data: messages }),
       read: async (id) => ({ body: `<p>回复 ${id}</p>`, from: messages.find((m) => m.message_id === id).from }),
     },
-    dws: {
+    session: {
       info: async (id) => id === "conv-hit" ? { convId: id } : null,
       steer: async (id, text) => steered.push({ id, text }),
       openNew: async ({ name, prompt }) => {
@@ -130,7 +130,7 @@ test("DWS 临时故障保留邮件事件重试，不错误改投 router", async 
   store.enqueue({ kind: "mail.reply", text: "reply", payload: { sessionId: "conv-hit", messageId: "m-retry" }, dedupeKey: "m-retry" })
   const ctx = {
     cfg: { stateFile: path.join(dir, "state.json") },
-    dws: { info: async () => ({ ok: false, error: "app_busy" }) },
+    session: { info: async () => ({ ok: false, error: "app_busy" }) },
   }
   try {
     const worker = new AgentWorker({ store, handlers: { "mail.reply": (event) => deliverMailReply(ctx, event) }, log: () => {} })

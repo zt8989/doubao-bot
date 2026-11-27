@@ -280,6 +280,14 @@ export async function viewPull(repo, number, { files = false, opts = {} } = {}) 
   return mapped
 }
 
+// PR diff 原文：Gitea 的 .diff 端点返回 text/plain，request() 对非 JSON 响应回落原始字符串。
+// 接口变更巡检用它做粗筛与判官审阅，不落库。
+export async function pullDiff(repo, number, { opts = {} } = {}) {
+  const r = repoParts(repo)
+  const diff = await api(`/api/v1/repos/${enc(r.owner)}/${enc(r.repo)}/pulls/${enc(number)}.diff`, {}, opts)
+  return typeof diff === "string" ? diff : ""
+}
+
 // 项目（Projects）：仓库级与组织级是两套列表，创建工单时两边的项目都能挂。
 export async function listProjects(repo, { state = "open", page = 1, limit = PAGE_LIMIT, opts = {} } = {}) {
   const r = repoParts(repo)

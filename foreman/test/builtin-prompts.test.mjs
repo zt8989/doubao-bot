@@ -20,9 +20,10 @@ test("builtinAgentPromptPath：返回存在的岗位提示词绝对路径；未�
   assert.throws(() => builtinAgentPromptPath("nope"), /未知的智能体提示词/)
 })
 
-test("builtinPrompt：router 提示词含 CreateSession 分配口径（与首句协议呼应）", () => {
+test("builtinPrompt：router 提示词含 foreman 工作会话分配口径（与首句协议呼应）", () => {
   const prompt = builtinPrompt("router")
-  assert.match(prompt, /CreateSession/)
-  assert.match(prompt, /独立子智能体会话/)
+  assert.match(prompt, /foreman session open/)
+  assert.match(prompt, /独立工作会话/)
   assert.match(prompt, /子智能体分配协议/)
+  assert.doesNotMatch(prompt, /CreateSession/)
 })

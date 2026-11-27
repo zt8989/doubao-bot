@@ -213,9 +213,9 @@ export function startConsoleHttp({ store, ctx, dir, host, port, token = "", log 
     // 首页「进行中」按执行会话的真实 running 状态算，不把待收口的 working 账本行算进去。
     // 历史某天仍展示当日状态；读不到侧边栏时退回原账本口径，避免把暂时不可用误报成 0。
     let runningSessions = null
-    if (!day && typeof ctx.dws?.runningMap === "function") {
+    if (!day && typeof ctx.session?.runningMap === "function") {
       try {
-        runningSessions = await ctx.dws.runningMap()
+        runningSessions = await ctx.session.runningMap()
       } catch (e) {
         log(`控制台读实时会话状态失败，进行中暂按账本统计：${e.message}`)
       }
@@ -237,12 +237,12 @@ export function startConsoleHttp({ store, ctx, dir, host, port, token = "", log 
     })
     if (day) return snapshot
     // 当前任务页与 CLI 共用同一份会话树；历史日期仍按事件回放展示旧工单视图。
-    // 复用上面已读的侧边栏，避免一次快照触发两次 dws list。
+    // 复用上面已读的侧边栏，避免一次快照触发两次载体查询。
     const tree = await sessionTasks({
       cfg: ctx.cfg,
-      dws: {
+      session: {
         runningMap: async () => {
-          if (runningSessions === null) throw new Error("DWS 侧边栏状态不可用")
+          if (runningSessions === null) throw new Error("载体侧边栏状态不可用")
           return runningSessions
         },
       },

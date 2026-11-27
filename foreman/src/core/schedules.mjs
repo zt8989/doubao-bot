@@ -7,14 +7,14 @@ import { agentScheduleCwd } from "../config.mjs"
 
 const pad = (n) => String(n).padStart(2, "0")
 
-export const SCHEDULE_IDS = ["pickup", "prWatch", "mail", "router", "dreaming", "workHours"]
+export const SCHEDULE_IDS = ["pickup", "prWatch", "mail", "router", "dreaming", "workHours", "apiWatch"]
 
 /** 配置里登记的自定义 Agent 定时任务（每条到点新开一条豆包会话）。 */
 export function customAgentSchedules(cfg) {
   return Array.isArray(cfg?.agentSchedules) ? cfg.agentSchedules : []
 }
 
-const BUILTIN_SCHEDULE_IDS = ["pickup", "prWatch", "mail", "router", "dreaming"]
+const BUILTIN_SCHEDULE_IDS = ["pickup", "prWatch", "mail", "router", "dreaming", "apiWatch"]
 
 /** 创建自定义 Agent 任务时占用的保留 id：内置任务 + 没有独立 cron 的两项。 */
 const RESERVED_SCHEDULE_IDS = [...BUILTIN_SCHEDULE_IDS, "inspector", "workHours"]
@@ -126,6 +126,7 @@ export function scheduleDefinitions(cfg) {
     script("prWatch", cfg.prWatch?.enabled === true),
     script("mail", cfg.mail?.enabled === true),
     script("router", (cfg.router ?? cfg.inspector)?.enabled === true),
+    script("apiWatch", cfg.apiWatch?.enabled === true),
     { id: "dreaming", kind: "dreaming", executor: "agent", cron: cronOf(cfg, "dreaming"), enabled: cfg.memory?.dreaming?.enabled !== false },
     ...customAgentSchedules(cfg).map((item) => ({
       id: item.id,
@@ -206,6 +207,7 @@ export function cronOf(cfg, id) {
   const section = cfg?.[id] ?? (id === "router" ? cfg?.inspector : id === "dreaming" ? cfg?.memory?.dreaming : null) ?? {}
   if (String(section.cron ?? "").trim()) return String(section.cron).trim()
   if (id === "dreaming") return "0 3 * * *"
+  if (id === "apiWatch") return "0 9-18/2 * * 1-5"
   const seconds = Number(
     section.intervalSeconds ??
       (id === "pickup" ? 1800 : id === "router" ? 60 : id === "mail" ? cfg?.mail?.pollSeconds ?? 300 : 300)
@@ -309,6 +311,23 @@ export function listSchedules(cfg, state = {}) {
       running: state.dreaming?.running === true,
     },
     {
+      id: "apiWatch",
+      label: "存量接口变更巡检",
+      enabled: cfg?.apiWatch?.enabled === true,
+      cron: cronOf(cfg, "apiWatch"),
+      executor: "script",
+      script: scriptExecutor(cfg, "apiWatch"),
+      nextAt: state.apiWatch?.nextAt || "",
+      intervalSeconds: 0,
+      detail: `定时扫各仓已合并 PR，diff 触及接口定义文件的候选交独立判官会话精判；确认改了存量接口出入参的发飞书群（${(cfg?.apiWatch?.chatIds ?? []).length} 个）· chatIds 在 config.json apiWatch 段配置`,
+      lastAt: state.apiWatch?.lastPollAt || "",
+      count: Number(state.apiWatch?.pollCount ?? 0),
+      lastResult: state.apiWatch?.lastResult || "",
+      runnable: true,
+      runLabel: "立即检查",
+      running: state.apiWatch?.polling === true,
+    },
+    {
       id: "workHours",
       label: "工作时间窗",
       // 这里 enabled 表示「现在允许运行」：闭嘴期间就是 false。
@@ -365,7 +384,7 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
     const raw = patch[id]
     const obj = raw && typeof raw === "object" ? raw : { enabled: raw === true || raw === "true" }
     const custom = customAgentSchedules(cfg).find((item) => item.id === id)
-    if ("cron" in obj && !["pickup", "prWatch", "mail", "router", "dreaming"].includes(id) && !custom) throw new Error(`${id} 不是独立定时任务，没有 cron 可改`)
+    if ("cron" in obj && !["pickup", "prWatch", "mail", "router", "dreaming", "apiWatch"].includes(id) && !custom) throw new Error(`${id} 不是独立定时任务，没有 cron 可改`)
     const next = {}
     if ("enabled" in obj) next.enabled = obj.enabled === true || obj.enabled === "true"
     if ("cron" in obj) {
@@ -415,6 +434,11 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
       if ("enabled" in next) dreaming.enabled = next.enabled
       if ("cron" in next) dreaming.cron = next.cron
       cfg.memory = { ...(cfg.memory ?? {}), dreaming }
+    } else if (id === "apiWatch") {
+      cfg.apiWatch = { ...(cfg.apiWatch ?? {}) }
+      if ("enabled" in next) cfg.apiWatch.enabled = next.enabled
+      if ("cron" in next) cfg.apiWatch.cron = next.cron
+      if ("script" in next) cfg.apiWatch.script = next.script
     } else if (id === "workHours") {
       if ("days" in obj || "start" in obj || "end" in obj) cfg.workHours = { ...(cfg.workHours ?? {}), ...normalizeWorkHours(obj, cfg) }
       if ("enabled" in next) cfg.workHours = { ...(cfg.workHours ?? {}), offUntil: next.enabled ? "" : localIso(nextWorkdayStart(cfg, at)) }

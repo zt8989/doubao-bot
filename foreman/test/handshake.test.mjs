@@ -41,7 +41,7 @@ test("真实起服务 → 客户端 ping 通；--no-service 返回 skipped 且�
   let server
   try {
     const cfg = mkCfg(dir)
-    server = await startServer({ cfg, book: new Book(cfg.stateFile), dws: fakeDws(), log: () => {} })
+    server = await startServer({ cfg, book: new Book(cfg.stateFile), driver: fakeDws(), log: () => {} })
 
     // ping 直接通
     const p = await pingOnce(server.port, 1000)
@@ -87,7 +87,7 @@ test("服务不在 → spawnFn 被调用，握手成功返回 started:true", asy
   try {
     const cfg = mkCfg(dir)
     // 先在后台真起一个服务作为 spawnFn 的产物
-    server = await startServer({ cfg, book: new Book(cfg.stateFile), dws: fakeDws(), log: () => {} })
+    server = await startServer({ cfg, book: new Book(cfg.stateFile), driver: fakeDws(), log: () => {} })
     await server.close()
     server = null
     // 此时端口文件/pid 都没了（close 清掉）。spawnFn 里再起一个。
@@ -95,7 +95,7 @@ test("服务不在 → spawnFn 被调用，握手成功返回 started:true", asy
     const r = await ensureService({
       cfg,
       spawnFn: async () => {
-        const s = await startServer({ cfg, book: new Book(cfg.stateFile), dws: fakeDws(), log: () => {} })
+        const s = await startServer({ cfg, book: new Book(cfg.stateFile), driver: fakeDws(), log: () => {} })
         spawned.push(s)
         return { pid: process.pid }
       },
@@ -141,7 +141,7 @@ test("callRaw 走通 ping 帧（id 对齐）", async () => {
   let server
   try {
     const cfg = mkCfg(dir)
-    server = await startServer({ cfg, book: new Book(cfg.stateFile), dws: fakeDws(), log: () => {} })
+    server = await startServer({ cfg, book: new Book(cfg.stateFile), driver: fakeDws(), log: () => {} })
     const r = await callRaw(server.port, { id: "cli", cmd: "ping" }, 2000)
     assert.equal(r.ok, true)
     assert.equal(r.id, "cli")

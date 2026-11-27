@@ -234,7 +234,7 @@ export function isConflicting(view) {
 // 跑一轮 PR 扫描：列 open PR → 过滤作者 → 账本去重 → 查冲突（冲突的过滤掉）→ 交给合并助手核对。
 // push 给了就 steer 进唯一编排会话（会话中心，默认）；deliver 给了才每次新建一条会话；
 // 都没有就塞回 target 那条已有会话。只有发成功才记账；发送失败下一轮重试。
-export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: overrideTarget, inspect = null, deliver = null, push = null, enqueue = null }) {
+export async function prWatchOnce({ cfg, gitea, session, log = () => {}, target: overrideTarget, inspect = null, deliver = null, push = null, enqueue = null }) {
   const pw = cfg?.prWatch ?? {}
   if (pw.enabled === false) return { ok: true, skipped: "disabled" }
 
@@ -389,7 +389,7 @@ export async function prWatchOnce({ cfg, gitea, dws, log = () => {}, target: ove
         mergeTo = (await push(prNotifyText(fresh))) || target
       } else if (!freshByRouter) {
         mergeTo = target
-        await dws.notify(target, prNotifyText(fresh))
+        await session.notify(target, prNotifyText(fresh))
       }
     } catch (e) {
       log(`PR 扫描：他人 PR 投递失败，下轮补发：${e.message}`)

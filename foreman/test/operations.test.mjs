@@ -106,7 +106,7 @@ test("HTTP：首页进行中数量使用执行会话实时状态", async () => {
   const ctx = {
     cfg: { stateFile },
     state: { pr: {} },
-    dws: { runningMap: async () => ({ "conv-orch": { running: false }, "conv-live": { running: true }, "conv-idle": { running: false } }) },
+    session: { runningMap: async () => ({ "conv-orch": { running: false }, "conv-live": { running: true }, "conv-idle": { running: false } }) },
   }
   const h = await startConsoleHttp({ store, ctx, dir, host: "127.0.0.1", port: 0, log: () => {} })
   try {

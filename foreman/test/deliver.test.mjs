@@ -132,7 +132,7 @@ test("deliverNewSession：新建一条会话投递，记账留痕但不进监听
     const cfg = cfgWith(dir, { deliver: { mode: "new", promptFile, projectDir: "/w/win-ai-stack", namePrefix: "foreman" } })
     const calls = []
     const dws = { openNew: async (arg) => { calls.push(arg); return { convId: "conv-new" } } }
-    const out = await deliverNewSession({ cfg, dws, log: () => {} }, { text: "【foreman】结论", kind: "工单结论" })
+    const out = await deliverNewSession({ cfg, session: dws, log: () => {} }, { text: "【foreman】结论", kind: "工单结论" })
 
     assert.equal(calls.length, 1)
     assert.equal(calls[0].noWait, true, "默认只确认送达，不等第一轮回复")
@@ -168,7 +168,7 @@ test("deliverNewSession：合并会话走自己的提示词、自己的命名，
     })
     const calls = []
     const dws = { openNew: async (arg) => { calls.push(arg); return { convId: "conv-merge" } } }
-    const out = await deliverNewSession({ cfg, dws, log: () => {} }, { text: "【foreman】PR 待合并", kind: "合并完成", lane: "merge" })
+    const out = await deliverNewSession({ cfg, session: dws, log: () => {} }, { text: "【foreman】PR 待合并", kind: "合并完成", lane: "merge" })
 
     assert.match(calls[0].name, /^foreman-合并-/)
     assert.match(calls[0].prompt, /只管合 PR/)
@@ -188,7 +188,7 @@ test("deliverNewSession：没配固定提示词就用内置的，照常开会话
     const cfg = cfgWith(dir, { deliver: { mode: "new", projectDir: "/w/win-ai-stack" } })
     const calls = []
     const dws = { openNew: async (arg) => { calls.push(arg); return { convId: "conv-builtin" } } }
-    const out = await deliverNewSession({ cfg, dws, log: () => {} }, { text: "【foreman】结论", kind: "工单结论" })
+    const out = await deliverNewSession({ cfg, session: dws, log: () => {} }, { text: "【foreman】结论", kind: "工单结论" })
 
     assert.equal(calls.length, 1)
     assert.match(calls[0].prompt, /派单会话提示词/)
@@ -290,7 +290,7 @@ test("端到端：任务回复只 queue 给所属 Agent，不走 deliver.new 或
       },
     }
 
-    server = await startServer({ cfg, book, dws, log: () => {} })
+    server = await startServer({ cfg, book, driver: dws, log: () => {} })
     const r = await server.poll()
     assert.equal(r.notified, 0)
     await server.worker.idle()

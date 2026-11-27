@@ -13,12 +13,12 @@ export const FINAL_REPLY_SPEC = `结束时直接给出最终回复，用自然�
 export const WORKER_SKILL_SPEC = `技能调用时机：
 - 需要读取或核对工单、评论、标签或 PR 时调用 gitea 技能，只使用只读能力；
 - 需要创建 PR 时调用 foreman 技能，只使用 pr open；不得调用 PR 合并能力；
-- 需要与所属编排智能体或发起方会话沟通时调用 dws 技能，只联系所属编排或发起方，不直接联系其他编码智能体。`
+- 需要与所属编排智能体或发起方会话沟通时用 foreman steer 续说（会话载体能力），只联系所属编排或发起方，不直接联系其他编码智能体。`
 
 export const DECISION_SKILL_SPEC = `技能调用时机：
 - 需要读取或核对工单、评论、标签或 PR 时调用 gitea 技能；确认可以编码后，只用它修改本单标签，其它工单字段与无关标签保持原样；
 - 需要请用户决策时调用 foreman 技能，只使用 foreman send --type mail 发送邮件；编码完成后只用 pr open 创建 PR，不得调用 PR 合并能力；
-- 需要与发起方会话沟通时调用 dws 技能，不直接联系其他编码智能体。`
+- 需要与发起方会话沟通时用 foreman steer 续说（会话载体能力），不直接联系其他编码智能体。`
 
 // 从原 checkout 而不是 worktree 读根目录约定：worktree 可能基于较旧基线，原工程约定以 repos[].dir 为准。
 // 没有文件或空文件时不占提示词；文件存在但读失败要停止派单，不能悄悄丢掉工程约定。

@@ -36,7 +36,7 @@ function sqliteSchedules() {
 test("listSchedules：我的工单扫描与执行会话轮询都是持久脚本任务", () => {
   const cfg = baseCfg()
   const rows = listSchedules(cfg)
-  assert.deepEqual(rows.map((r) => r.id), ["pickup", "prWatch", "mail", "router", "dreaming", "workHours"])
+  assert.deepEqual(rows.map((r) => r.id), ["pickup", "prWatch", "mail", "router", "dreaming", "apiWatch", "workHours"])
   const pickup = rows.find((r) => r.id === "pickup")
   assert.equal(pickup.enabled, true)
   assert.equal(pickup.cron, "*/30 * * * *")
@@ -72,9 +72,16 @@ test("listSchedules：我的工单扫描与执行会话轮询都是持久脚本�
   assert.match(mailRow.detail, /[FM-…]/)
   assert.deepEqual(mailRow.script, { path: MAILFLOW, exportName: "mailPollOnce", args: {} })
   assert.equal(rows.some((r) => ["merge", "planner"].includes(r.id)), false)
-  assert.deepEqual(rows.filter((r) => r.runnable).map((r) => r.id), ["pickup", "prWatch", "mail", "router", "dreaming"])
+  assert.deepEqual(rows.filter((r) => r.runnable).map((r) => r.id), ["pickup", "prWatch", "mail", "router", "dreaming", "apiWatch"])
   assert.equal(rows.find((r) => r.id === "workHours").runnable, false)
   assert.equal(mailRow.runLabel, "立即收信")
+  // 存量接口变更巡检：默认关、默认工作时段 cron、可开关与改 cron、chatIds 不进 DB（只在 config.json）。
+  const apiRow = rows.find((r) => r.id === "apiWatch")
+  assert.equal(apiRow.enabled, false)
+  assert.equal(apiRow.cron, "0 9-18/2 * * 1-5")
+  assert.equal(apiRow.executor, "script")
+  assert.deepEqual(apiRow.script, { path: fileURLToPath(new URL("../src/apiwatch.mjs", import.meta.url)), exportName: "apiWatchOnce", args: {} })
+  assert.equal(apiRow.runLabel, "立即检查")
   const inside = applySchedules(cfg, {})
   assert.equal(inside.find((r) => r.id === "workHours").enabled, true)
 })
@@ -103,6 +110,24 @@ test("applySchedules：router 代码轮询可改 cron 与开关，非法 cron �
   assert.throws(() => applySchedules(cfg, { router: { cron: "bad" } }), /cron 不合法/)
   assert.equal(cfg.router.cron, "*/15 8-17 * * 1-5")
   assert.throws(() => applySchedules(cfg, { workHours: { cron: "* * * * *" } }), /没有 cron/)
+})
+
+test("applySchedules：存量接口变更巡检可开关与改 cron，chatIds 不被动", () => {
+  const cfg = baseCfg()
+  cfg.apiWatch = { enabled: false, chatIds: ["oc_keep"] }
+  const rows = applySchedules(cfg, { apiWatch: { enabled: true, cron: "0 8 * * *" } })
+  assert.equal(cfg.apiWatch.enabled, true)
+  assert.equal(cfg.apiWatch.cron, "0 8 * * *")
+  assert.deepEqual(cfg.apiWatch.chatIds, ["oc_keep"], "开关只动 enabled/cron，不冲掉群聊 id")
+  assert.equal(rows.find((r) => r.id === "apiWatch").enabled, true)
+  assert.equal(rows.find((r) => r.id === "apiWatch").cron, "0 8 * * *")
+  // 新定义同步进 SQLite，runNow 白名单靠 id 生效由 service 层保证，这里只验 sync 幂等。
+  const { store, save } = sqliteSchedules()
+  save(cfg)
+  const stored = store.schedules().find((s) => s.id === "apiWatch")
+  assert.equal(stored.enabled, true)
+  assert.equal(stored.cron, "0 8 * * *")
+  assert.equal(stored.payload.executor, "script")
 })
 
 test("applySchedules：PR 与代码轮询的脚本路径、参数可编辑并持久化到 SQLite", () => {

@@ -32,7 +32,7 @@ function fixture() {
     state: { router: { running: false } },
     inbox: store,
     log() {},
-    dws: {
+    session: {
       ledger,
       async openNew(args) {
         opened.push(args)

@@ -168,7 +168,7 @@ test("服务 RPC 先持久化，Dispatcher 才调用邮件驱动", async () => {
   try {
     server = await startServer({
       cfg,
-      dws: { runningMap: async () => ({}) },
+      driver: { runningMap: async () => ({}) },
       mail: { send: async (message) => { sent.push(message); return { id: "mail-1" } } },
       log() {},
     })

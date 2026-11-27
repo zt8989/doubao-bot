@@ -208,9 +208,9 @@ export async function sessionTasks(ctx) {
   const book = new Book(ctx.cfg.stateFile)
   let sidebar = null
   let statusError = ""
-  if (typeof ctx.dws?.runningMap === "function") {
+  if (typeof ctx.session?.runningMap === "function") {
     try {
-      sidebar = await ctx.dws.runningMap()
+      sidebar = await ctx.session.runningMap()
     } catch (e) {
       statusError = String(e?.message ?? e)
     }
@@ -231,7 +231,7 @@ export async function sessionTasks(ctx) {
   return {
     ok: true,
     generatedAt: new Date().toISOString(),
-    statusSource: sidebar === null ? "unavailable" : "dws.list",
+    statusSource: sidebar === null ? "unavailable" : "session.list",
     statusError,
     summary: {
       sessions: flat.length,

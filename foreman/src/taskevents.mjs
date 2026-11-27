@@ -76,7 +76,7 @@ async function routeTaskUpdate(ctx, event, { fallbackFrom = "" } = {}) {
   const text = fallbackFrom
     ? [
         "【Foreman · 任务更新路由兜底】",
-        `原归属 Agent ${fallbackFrom} 不在 dws 侧边栏，无法 queue。请接管以下任务更新，核对原编排是否已归档或失联，再决定重派、续跑或其他后续动作。`,
+        `原归属 Agent ${fallbackFrom} 不在载体侧边栏，无法 queue。请接管以下任务更新，核对原编排是否已归档或失联，再决定重派、续跑或其他后续动作。`,
         String(event.text ?? ""),
       ].join("\n\n")
     : event.text
@@ -99,9 +99,9 @@ export async function deliverTaskUpdate(ctx, event) {
     const delivered = await routeTaskUpdate(ctx, event)
     deliveredTarget = delivered.convId || target
   } else {
-    if (typeof ctx.dws?.queue !== "function") throw new Error("dws.queue 不可用")
+    if (typeof ctx.session?.queue !== "function") throw new Error("会话适配器 queue 不可用")
     try {
-      await ctx.dws.queue(target, event.text)
+      await ctx.session.queue(target, event.text)
     } catch (error) {
       if (!SESSION_GONE.test(String(error?.message ?? error))) throw error
       const delivered = await routeTaskUpdate(ctx, event, { fallbackFrom: target })

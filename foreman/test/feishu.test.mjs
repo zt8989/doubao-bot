@@ -5,7 +5,7 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { classifyInbound, MessageDedup, FeishuGateway, FeishuReplyPump, botOpenIdFromInfo } from "../src/feishu.mjs"
+import { classifyInbound, MessageDedup, FeishuGateway, botOpenIdFromInfo } from "../src/feishu.mjs"
 import { loadConfig, normalizeFeishuSection } from "../src/config.mjs"
 import { startServer } from "../src/service.mjs"
 
@@ -184,177 +184,63 @@ test("FeishuGateway.onMessage：命中入箱（payload/dedupeKey/replyTarget）�
   assert.ok(logs.some((m) => m.includes("白名单")))
   assert.equal(gateway.status.lastInboundAt !== "", true)
 
-  // 群聊来源：回复目标切到 chat
+  // 群聊来源：回复目标切到 chat（诊断留痕）
   await gateway.onMessage(evt({ message_id: "om_2" }))
   const st2 = JSON.parse(fs.readFileSync(stateFile, "utf8")).feishu
   assert.deepEqual(st2.replyTarget, { kind: "chat", id: "oc_high" })
 })
 
-function pumpCtx(stateFile, messagesBase) {
-  const pushed = []
-  return {
-    pushed,
-    ctx: {
-      cfg: { stateFile, feishu: { replyPollSeconds: 1 }, outbox: {} },
-      chat: { messagesBase: async () => messagesBase },
-      outbox: { enqueue: (e) => {
-        pushed.push(e)
-        return { ...e, uuid: `u${pushed.length}`, id: pushed.length, status: "pending" }
-      } },
-    },
-  }
-}
-
-const replies = (...texts) => ({
-  convId: "conv_1",
-  messages: texts.map((t, i) => (typeof t === "string"
-    ? { id: `m${i + 1}`, role: "assistant", text: t, finished: true }
-    : { id: `m${i + 1}`, ...t })),
-})
-
-test("FeishuReplyPump：无目标跳过、首次锚定不回放、增量推送且不重推", async () => {
+test("FeishuGateway.onMessage：机器人自己的消息按回声拒收（防直发循环）", async () => {
   const { stateFile } = tmpCtx()
-  const { ctx, pushed } = pumpCtx(stateFile, replies("旧回复一", "旧回复二"))
-  const pump = new FeishuReplyPump({ cfg: ctx.cfg, ctx, log: () => {} })
-
-  // 还没从飞书收过消息：没有推送目标
-  assert.equal((await pump.pollOnce()).skipped, "no-target")
-  assert.equal(pushed.length, 0)
-
-  // 模拟飞书来过一条私聊：目标出现
-  setFeishuState(stateFile, { replyTarget: { kind: "user", id: "ou_boss" } })
-
-  // 首次锚定：不回放历史
-  assert.equal((await pump.pollOnce()).skipped, "armed")
-  assert.equal(pushed.length, 0)
-  let st = JSON.parse(fs.readFileSync(stateFile, "utf8")).feishu
-  assert.equal(st.lastPushedId, "m2")
-
-  // 新回复出现：推给私聊目标（旧状态无 chatId 回落 userId + markdown），断点前移
-  ctx.chat.messagesBase = async () => replies("旧回复一", "旧回复二", "新回复三")
-  const r = await pump.pollOnce()
-  assert.equal(r.ok, true)
-  assert.equal(r.pushed, 1)
-  assert.equal(pushed.length, 1)
-  assert.equal(pushed[0].channel, "feishu")
-  assert.deepEqual(pushed[0].payload, { chatId: "", userId: "ou_boss", markdown: "新回复三" })
-  assert.match(pushed[0].dedupeKey, /feishu:push:m3/)
-  st = JSON.parse(fs.readFileSync(stateFile, "utf8")).feishu
-  assert.equal(st.lastPushedId, "m3")
-
-  // 再轮询：没有新货，不重推
-  assert.equal((await pump.pollOnce()).skipped, "no-new")
-  assert.equal(pushed.length, 1)
-})
-
-test("FeishuReplyPump：replyTarget 带 chatId 时优先发会话 id（不出 open_id）", async () => {
-  const { stateFile } = tmpCtx()
-  const { ctx, pushed } = pumpCtx(stateFile, replies("旧回复"))
-  const pump = new FeishuReplyPump({ cfg: ctx.cfg, ctx, log: () => {} })
-  setFeishuState(stateFile, { replyTarget: { kind: "user", id: "ou_boss", chatId: "oc_dm" } })
-
-  // 锚定旧回复
-  await pump.pollOnce()
-  ctx.chat.messagesBase = async () => replies("旧回复", "带会话回复")
-  assert.equal((await pump.pollOnce()).pushed, 1)
-  assert.deepEqual(pushed[0].payload, { chatId: "oc_dm", userId: "", markdown: "带会话回复" })
-})
-
-test("FeishuReplyPump：zcode 直读转录优先（completed assistant 的 text part），账本留痕只做回落", async () => {
-  const { stateFile } = tmpCtx()
-  const { ctx, pushed } = pumpCtx(stateFile, replies("账本里的旧回复", "账本里的新回复"))
-  const pump = new FeishuReplyPump({ cfg: ctx.cfg, ctx, log: () => {} })
-  setFeishuState(stateFile, { replyTarget: { kind: "user", id: "ou_boss", chatId: "oc_dm" } })
-  // 注入假转录源：屏上带标记的用户气泡不该混进来，reasoning/未完成的不推
-  pump.stream = {
-    transcript: async () => ({
-      ok: true,
-      carrier: "zcode",
-      conv: "sess_z",
-      rows: [
-        { kind: "message", id: 1, role: "user", completed: true },
-        { kind: "part", messageId: 1, type: "text", text: "【Chat UI 用户消息】你是谁？\n◇ Thought · Ctrl+O to expand" },
-        { kind: "message", id: 2, role: "assistant", completed: true },
-        { kind: "part", messageId: 2, type: "reasoning", text: "想一想" },
-        { kind: "part", messageId: 2, type: "text", text: "第一段" },
-        { kind: "part", messageId: 2, type: "text", text: "第二段" },
-        { kind: "message", id: 3, role: "assistant", completed: false },
-        { kind: "part", messageId: 3, type: "text", text: "还没写完" },
-      ],
-    }),
-  }
-
-  // 首次锚定：锚在直读转录的最新 completed 回复（id=2）上，不回放
-  assert.equal((await pump.pollOnce()).skipped, "armed")
-  assert.equal(pushed.length, 0)
-  let st = JSON.parse(fs.readFileSync(stateFile, "utf8")).feishu
-  assert.equal(st.lastPushedId, "2")
-
-  // 新的 completed assistant 消息：多段 text 拼接推送
-  pump.stream.transcript = async () => ({
-    ok: true,
-    carrier: "zcode",
-    conv: "sess_z",
-    rows: [
-      { kind: "message", id: 2, role: "assistant", completed: true },
-      { kind: "part", messageId: 2, type: "text", text: "第一段" },
-      { kind: "part", messageId: 2, type: "text", text: "第二段" },
-      { kind: "message", id: 4, role: "assistant", completed: true },
-      { kind: "part", messageId: 4, type: "text", text: "全新回复" },
-    ],
-  })
-  assert.equal((await pump.pollOnce()).pushed, 1)
-  assert.deepEqual(pushed[0].payload, { chatId: "oc_dm", userId: "", markdown: "全新回复" })
-  st = JSON.parse(fs.readFileSync(stateFile, "utf8")).feishu
-  assert.equal(st.lastPushedId, "4")
-
-  // 直读炸了回落账本留痕：锚点（"4"）对不上账本 id → 重新锚定不回放
-  pump.stream.transcript = async () => { throw new Error("db locked") }
+  const enqueued = []
   const logs = []
-  pump.log = (m) => logs.push(m)
-  assert.equal((await pump.pollOnce()).skipped, "armed")
-  assert.ok(logs.some((m) => m.includes("改用账本留痕")))
+  const gateway = new FeishuGateway({
+    // botOpenId 已就绪（启动时 resolveBotOpenId 拿到的身份）
+    cfg: { stateFile, feishu: feishuCfg({ botOpenId: "ou_self_bot" }) },
+    ctx: { inbox: { enqueue: (e) => enqueued.push(e) } },
+    log: (m) => logs.push(m),
+  })
+  // p2p 回声：agent 直发的回复原样回来（sender = bot 自己），私聊白名单为空本会放行
+  await gateway.onMessage(evt({ chat_type: "p2p", chat_id: "oc_dm", message_id: "om_echo1", sender: { sender_id: { open_id: "ou_self_bot" } } }))
+  assert.equal(enqueued.length, 0)
+  assert.equal(gateway.status.rejected, 1)
+  assert.ok(logs.some((m) => m.includes("回声")))
+  // 群聊回声：机器人自己在群里发的消息（即使带 @ 自己的占位也不收）
+  await gateway.onMessage(evt({ message_id: "om_echo2", sender: { sender_id: { open_id: "ou_self_bot" } }, mentions: [{ key: "@_user_1", name: "bot", id: { open_id: "ou_self_bot" } }] }))
+  assert.equal(enqueued.length, 0)
+  assert.equal(gateway.status.rejected, 2)
 })
 
-test("FeishuReplyPump：只推完成的 assistant 回复；群聊目标发 chatId；超长截断", async () => {
+
+test("FeishuGateway：worker 认领点亮处理中，回复送出/投递失败熄灭，view 透出", () => {
   const { stateFile } = tmpCtx()
-  const { ctx, pushed } = pumpCtx(stateFile, replies())
-  const pump = new FeishuReplyPump({ cfg: ctx.cfg, ctx, log: () => {} })
-  // 群聊目标
-  setFeishuState(stateFile, { replyTarget: { kind: "chat", id: "oc_high" } })
+  const gateway = new FeishuGateway({
+    cfg: { stateFile, feishu: feishuCfg() },
+    ctx: { inbox: { enqueue: () => {} } },
+    log: () => {},
+  })
+  assert.equal(gateway.status.processing, null)
 
-  // 第一轮只有一条完成回复：锚定，不推
-  ctx.chat.messagesBase = async () =>
-    replies(
-      { role: "event", text: "派单事件", finished: true },
-      { role: "assistant", text: "还在跑", finished: false },
-      { role: "assistant", text: "最终回复", finished: true }
-    )
-  assert.equal((await pump.pollOnce()).skipped, "armed")
-  assert.equal(pushed.length, 0)
+  // worker 认领到一批 chat.message（含控制台来源的）：只按飞书来源点亮，取最后一条
+  gateway.markProcessing([
+    { text: "控制台问的", payload: { source: "chat-ui", clientId: "c1" } },
+    { text: "帮我查一下线上问题，比较急，麻烦看下", payload: { source: "feishu", chatType: "p2p", chatId: "oc_dm", senderId: "ou_boss", clientId: "feishu-om_9" } },
+  ])
+  assert.deepEqual(
+    { ...gateway.status.processing, since: "" },
+    { chatId: "oc_dm", chatType: "p2p", senderId: "ou_boss", text: "帮我查一下线上问题，比较急，麻烦看下", since: "" }
+  )
+  // view() 透出给 /api/feishu 与控制台
+  assert.equal(gateway.view().processing.chatId, "oc_dm")
 
-  // event / 未完成的不推；完成的推 chatId；超长截断
-  ctx.chat.messagesBase = async () =>
-    replies(
-      { role: "event", text: "派单事件", finished: true },
-      { role: "assistant", text: "还在跑", finished: false },
-      { role: "assistant", text: "最终回复", finished: true },
-      { role: "assistant", text: "x".repeat(5000), finished: true }
-    )
-  const r = await pump.pollOnce()
-  assert.equal(r.pushed, 1)
-  // 锚定已吃掉 m3，增量只有超长那条：发群聊目标、被截断
-  assert.equal(pushed.length, 1)
-  const long = pushed[0].payload.markdown
-  assert.deepEqual(pushed[0].payload, { chatId: "oc_high", userId: "", markdown: long })
-  assert.ok(long.length < 5000)
-  assert.match(long, /已截断/)
+  // bot 回复经 outbox 送出 → Dispatcher 调 clearProcessing 熄灭
+  gateway.clearProcessing()
+  assert.equal(gateway.status.processing, null)
+  assert.equal(gateway.view().processing, null)
 
-  // 会话重建（断点消失）：重新锚定，不回放
-  ctx.chat.messagesBase = async () => ({ convId: "conv_2", messages: [{ id: "n1", role: "assistant", text: "新会话", finished: true }] })
-  const r2 = await pump.pollOnce()
-  assert.equal(r2.skipped, "armed")
-  assert.equal(pushed.length, 1)
+  // 非飞书批次不点亮
+  gateway.markProcessing([{ text: "x", payload: { source: "chat-ui" } }])
+  assert.equal(gateway.status.processing, null)
 })
 
 test("feishu 配置归一：默认关闭不要求凭据；开启缺凭据/入口/@识别直接报错", () => {
@@ -422,7 +308,7 @@ function startServerCfg(obj = {}) {
 test("applyFeishu：保存写回 config.json + 通道热启停（enabled 开关当场生效）", async () => {
   delete process.env.FOREMAN_SERVE
   const { cfg, dir } = startServerCfg()
-  const server = await startServer({ cfg, book: null, dws: { runningMap: async () => ({}) }, log: () => {} })
+  const server = await startServer({ cfg, book: null, driver: { runningMap: async () => ({}) }, log: () => {} })
   try {
     // 默认关闭：view 里 enabled=false、无 gateway
     assert.equal(server.ctx.feishu, null)
@@ -462,7 +348,7 @@ test("applyFeishu：保存写回 config.json + 通道热启停（enabled 开关�
 test("/api/feishu：GET 读配置与状态，POST 保存/校验失败返回 400", async () => {
   delete process.env.FOREMAN_SERVE
   const { cfg, dir } = startServerCfg()
-  const server = await startServer({ cfg, book: null, dws: { runningMap: async () => ({}) }, log: () => {} })
+  const server = await startServer({ cfg, book: null, driver: { runningMap: async () => ({}) }, log: () => {} })
   try {
     const get1 = await (await fetch(`http://127.0.0.1:${server.port}/api/feishu`)).json()
     assert.equal(get1.ok, true)

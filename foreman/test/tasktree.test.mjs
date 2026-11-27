@@ -36,7 +36,7 @@ test("tasks 以已分配会话为主体，按编排父会话展示编码与补�
     let statusCalls = 0
     const result = await sessionTasks({
       cfg: { stateFile },
-      dws: {
+      session: {
         runningMap: async () => ({
           "conv-orch": { running: false, title: "编排一", active: true },
           "conv-worker": { running: true, title: "编码一", active: true },
@@ -88,7 +88,7 @@ test("同一会话兼有 router 与编排职责时保留多重角色", async () 
     book.setIssue("yyzl/demo#4", { state: "pr-open", orchestrator: "conv-shared" })
     const result = await sessionTasks({
       cfg: { stateFile },
-      dws: { runningMap: async () => ({ "conv-shared": { running: false } }) },
+      session: { runningMap: async () => ({ "conv-shared": { running: false } }) },
     })
     assert.deepEqual(result.sessions[0].roles, ["router", "orchestrator"])
     assert.match(result.sessions[0].roleName, /路由智能体/)
@@ -103,7 +103,7 @@ test("DWS 状态不可用时明确 unknown，不回退成工单 working", async 
   try {
     const result = await sessionTasks({
       cfg: { stateFile },
-      dws: { runningMap: async () => { throw new Error("sidebar unavailable") } },
+      session: { runningMap: async () => { throw new Error("sidebar unavailable") } },
     })
     const nodes = flatten(result.sessions)
     assert.ok(nodes.length > 0)

@@ -39,7 +39,7 @@ function startServerCfg(obj = {}) {
 test("/api/products：GET 读当前产品；POST 改 base 写盘 + 热替换 cfg.repos（实时生效）", async () => {
   delete process.env.FOREMAN_SERVE
   const { cfg, dir } = startServerCfg()
-  const server = await startServer({ cfg, book: null, dws: { runningMap: async () => ({}) }, log: () => {} })
+  const server = await startServer({ cfg, book: null, driver: { runningMap: async () => ({}) }, log: () => {} })
   try {
     const get1 = await (await fetch(`http://127.0.0.1:${server.port}/api/products`)).json()
     assert.equal(get1.ok, true)
@@ -78,7 +78,7 @@ test("/api/products：GET 读当前产品；POST 改 base 写盘 + 热替换 cfg
 test("/api/products：缺 base、清空 products 都 400", async () => {
   delete process.env.FOREMAN_SERVE
   const { cfg, dir } = startServerCfg()
-  const server = await startServer({ cfg, book: null, dws: { runningMap: async () => ({}) }, log: () => {} })
+  const server = await startServer({ cfg, book: null, driver: { runningMap: async () => ({}) }, log: () => {} })
   try {
     const bad = await fetch(`http://127.0.0.1:${server.port}/api/products`, {
       method: "POST",
@@ -104,7 +104,7 @@ test("/api/products：缺 base、清空 products 都 400", async () => {
 test("/api/products：在途工单——改 base 出 warnings；删工程 409 需 force", async () => {
   delete process.env.FOREMAN_SERVE
   const { cfg, dir } = startServerCfg()
-  const server = await startServer({ cfg, book: null, dws: { runningMap: async () => ({}) }, log: () => {} })
+  const server = await startServer({ cfg, book: null, driver: { runningMap: async () => ({}) }, log: () => {} })
   try {
     // 种一条在途工单（state=working 记着 repo-b）
     fs.writeFileSync(cfg.stateFile, JSON.stringify({

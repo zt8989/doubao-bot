@@ -204,7 +204,7 @@ test("发验收邮件：strategy=all 两个一起发；发信失败记 send-fail
 test("收信：按筛选 ID 认回 PR，注回编排会话，通过后合并", async () => {
   const cfg = baseCfg()
   const driver = fakeDriver()
-  const ctx = { cfg, mail: driver, log: () => {}, dws: { steers: [], async steer(id, text) { this.steers.push({ id, text }) } } }
+  const ctx = { cfg, mail: driver, log: () => {}, session: { steers: [], async steer(id, text) { this.steers.push({ id, text }) } } }
   const merged = []
   ctx.merge = async (task) => {
     merged.push(task)
@@ -243,10 +243,10 @@ test("收信：按筛选 ID 认回 PR，注回编排会话，通过后合并", a
   assert.equal(req.replies[0].verdict, "approved")
   assert.match(req.replies[0].summary, /验收通过/)
 
-  assert.equal(ctx.dws.steers.length, 1)
-  assert.equal(ctx.dws.steers[0].id, "conv-orch-9")
-  assert.match(ctx.dws.steers[0].text, /邮件验收回复/)
-  assert.match(ctx.dws.steers[0].text, /验收通过/)
+  assert.equal(ctx.session.steers.length, 1)
+  assert.equal(ctx.session.steers[0].id, "conv-orch-9")
+  assert.match(ctx.session.steers[0].text, /邮件验收回复/)
+  assert.match(ctx.session.steers[0].text, /验收通过/)
   assert.equal(merged.length, 1)
   assert.equal(merged[0].approvedBy, "mail:tester-a@corp.test")
   assert.equal(merged[0].pr, 21)
@@ -260,7 +260,7 @@ test("收信：按筛选 ID 认回 PR，注回编排会话，通过后合并", a
 test("收信：驳回只注回会话，不合并", async () => {
   const cfg = baseCfg()
   const driver = fakeDriver()
-  const ctx = { cfg, mail: driver, log: () => {}, dws: { steers: [], async steer(id, text) { this.steers.push({ id, text }) } } }
+  const ctx = { cfg, mail: driver, log: () => {}, session: { steers: [], async steer(id, text) { this.steers.push({ id, text }) } } }
   let mergeCalls = 0
   ctx.merge = async () => {
     mergeCalls++
@@ -285,7 +285,7 @@ test("收信：驳回只注回会话，不合并", async () => {
   const req = requestOf(new Book(cfg.stateFile), "demo/web", 31)
   assert.equal(req.status, "rejected")
   assert.equal(mergeCalls, 0)
-  assert.match(ctx.dws.steers[0].text, /保持打开/)
+  assert.match(ctx.session.steers[0].text, /保持打开/)
   assert.equal(new Book(cfg.stateFile).approval("demo/web#31"), null)
 })
 

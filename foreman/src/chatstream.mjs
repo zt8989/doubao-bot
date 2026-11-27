@@ -2,7 +2,7 @@
 // consolehttp 的 /api/chat/sessions、/api/chat/transcript、/api/chat/stream 三个路由共用。
 //
 // 根会话来源（都是账本/Book 已有的记录，不新增状态）：
-//   - zcode 载体的会话账本（ctx.dws.ledger，适配器一直在写）；
+//   - zcode 载体的会话账本（ctx.session.ledger，适配器一直在写）；
 //   - Book 的 router 记录（chat workflow 老口径 book.data.router ?? inspector）。
 // 账本条目首轮后才回查到真 sessionId；缺的时候就用目录+时间窗兜底（zctranscript.resolveSessionId）。
 // 非 zcode 载体一切返回空——前端拿到 carrier != "zcode" 就回退老的账本视图。
@@ -17,7 +17,7 @@ export function createChatStreamSource({ ctx, log = () => {} } = {}) {
   const carrier = () => String(ctx?.cfg?.agent ?? "").trim().toLowerCase()
 
   // 账本：载体可能是裸驱动（.ledger）或适配器包装（.driver.ledger）。
-  const ledgerOf = () => ctx?.dws?.ledger ?? ctx?.dws?.driver?.ledger ?? null
+  const ledgerOf = () => ctx?.session?.ledger ?? ctx?.session?.driver?.ledger ?? null
 
   // 根集合：sessionId → { name, status }（账本口径的名字/状态，展示用）。
   async function roots() {

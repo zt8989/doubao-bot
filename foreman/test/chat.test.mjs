@@ -5,7 +5,7 @@ import os from "node:os"
 import path from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { AgentWorker, InboxStore } from "../src/core/inbox.mjs"
-import { createChatWorkflow } from "../src/workflow/chat.mjs"
+import { createChatWorkflow, noticeOf } from "../src/workflow/chat.mjs"
 import { startConsoleHttp } from "../src/consolehttp.mjs"
 import { handleRequest } from "../src/service.mjs"
 
@@ -19,7 +19,7 @@ function fixture() {
     state: { router: { running: false } },
     inbox: store,
     log() {},
-    dws: {
+    session: {
       async openNew(args) {
         opened.push(args)
         return { convId: "router-1" }
@@ -41,6 +41,19 @@ function fixture() {
   ctx.chat = createChatWorkflow(ctx)
   return { dir, store, ctx, opened, queued, chat: ctx.chat }
 }
+
+test("noticeOf：飞书来源附来源说明与建议回复命令，控制台消息不带尾巴", () => {
+  const feishu = noticeOf({ text: "帮我查一下", payload: { source: "feishu", chatType: "p2p", chatId: "oc_dm", senderId: "ou_boss" } })
+  assert.match(feishu, /^【Chat UI 用户消息】\n帮我查一下/)
+  assert.match(feishu, /本条来自飞书私聊，chatId=oc_dm/)
+  assert.match(feishu, /foreman send --type feishu --chat-id oc_dm --markdown/)
+  const group = noticeOf({ text: "群里问的", payload: { source: "feishu", chatType: "group", chatId: "oc_high" } })
+  assert.match(group, /本条来自飞书群聊，chatId=oc_high/)
+  // 控制台消息与缺 chatId 的来源：只有标记头，不带尾巴（回复留在控制台）
+  const consoleMsg = noticeOf({ text: "控制台问的", payload: { source: "chat-ui", clientId: "c1" } })
+  assert.equal(consoleMsg, "【Chat UI 用户消息】\n控制台问的")
+  assert.equal(noticeOf({ text: "缺来源", payload: { source: "feishu" } }), "【Chat UI 用户消息】\n缺来源")
+})
 
 test("Chat 消息先持久化到 Inbox，Worker 消费后才投递 Router Agent", async (t) => {
   const f = fixture()
@@ -97,7 +110,7 @@ test("最后一条是 Foreman 事件时，Chat 仍保持正在回复状态", asy
   await f.chat.send({ text: "你好", clientId: "browser-message-event" })
   const worker = new AgentWorker({ store: f.store, handlers: { "chat.message": (batch) => f.chat.deliver(batch) } })
   await worker.runOnce()
-  f.ctx.dws.info = async () => ({
+  f.ctx.session.info = async () => ({
     messages: [
       { id: "a1", role: "assistant", text: "先收到", finished: false },
       { id: "e1", role: "user", text: "Foreman 事件：任务已更新" },
@@ -148,7 +161,7 @@ test("zcode 账本留痕经 messages() 归一化：派活 prompt 是事件气泡
   const book = new Book(f.ctx.cfg.stateFile)
   book.data.router = { convId: "router-1", name: "foreman-router-test" }
   book.save()
-  f.ctx.dws.info = async () => ({
+  f.ctx.session.info = async () => ({
     status: "running",
     messages: [
       { role: "user", text: "# Foreman 路由智能体\n\n【Foreman · 接单】工单 demo/demo#1" },
@@ -167,7 +180,7 @@ test("messagesFor：按目标会话读（契约归一化），空目标回退 ro
   const f = fixture()
   t.after(() => fs.rmSync(f.dir, { recursive: true, force: true }))
   const seen = []
-  f.ctx.dws.info = async (target) => {
+  f.ctx.session.info = async (target) => {
     seen.push(target)
     return {
       name: `会话-${target}`,

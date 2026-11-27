@@ -1,10 +1,10 @@
 // Gitea 工单/PR 适配器：workflow 只通过它读写工单与 PR。
 // 换 Jira / GitLab 时照这个形状再写一个即可。
-import { listPulls, listIssues, viewIssue, viewPr, mergePr, closeIssue, createPr, commentIssue, editLabels, createIssue, editIssue } from "../../gitea.mjs"
+import { listPulls, listIssues, viewIssue, viewPr, pullPrDiff, mergePr, closeIssue, createPr, commentIssue, editLabels, createIssue, editIssue } from "../../gitea.mjs"
 
 export class GiteaTrackerAdapter {
   constructor({ impl = {} } = {}) {
-    this.impl = { listPulls, listIssues, viewIssue, viewPr, mergePr, closeIssue, createPr, commentIssue, editLabels, createIssue, editIssue, ...impl }
+    this.impl = { listPulls, listIssues, viewIssue, viewPr, pullPrDiff, mergePr, closeIssue, createPr, commentIssue, editLabels, createIssue, editIssue, ...impl }
     // 能力位：issueRef = 工单有「右侧分支」字段（Gitea 有；GitHub/Jira 没有，实现时别硬造）。
     this.capabilities = { issueRef: true }
   }
@@ -15,6 +15,11 @@ export class GiteaTrackerAdapter {
 
   viewPr(repo, number) {
     return this.impl.viewPr(repo, number)
+  }
+
+  // PR diff 原文：存量接口变更巡检（apiWatch）用。
+  pullPrDiff(repo, number) {
+    return this.impl.pullPrDiff(repo, number)
   }
 
   listIssues(repo, opts) {

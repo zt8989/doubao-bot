@@ -30,7 +30,7 @@ test("setAgent：写回配置 + 热换适配器；同值 no-op；坏值报错；
   const { cfg, file } = tmpCfg({ agent: "noop" })
   const log = []
   const dwsFake = { runningMap: async () => ({}) }
-  const server = await startServer({ cfg, book: null, dws: dwsFake, log: (m) => log.push(m) })
+  const server = await startServer({ cfg, book: null, driver: dwsFake, log: (m) => log.push(m) })
   try {
     const ctxSet = server.setAgent ?? null
     assert.equal(typeof ctxSet, "function", "startServer 应绑 setAgent")
@@ -75,7 +75,7 @@ test("setAgent：写回配置 + 热换适配器；同值 no-op；坏值报错；
 test("/api/agent：GET 当前值；POST 切换与 409/400 路径", async () => {
   const { cfg, file } = tmpCfg({ agent: "noop" })
   const dwsFake = { runningMap: async () => ({}) }
-  const server = await startServer({ cfg, book: null, dws: dwsFake, log: () => {} })
+  const server = await startServer({ cfg, book: null, driver: dwsFake, log: () => {} })
   try {
     const port = fs.readFileSync(cfg.service?.http?.portFile ?? path.join(path.dirname(file), "service.port"), "utf8").trim()
     const url = `http://127.0.0.1:${port}`

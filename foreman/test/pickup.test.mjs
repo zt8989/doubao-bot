@@ -231,7 +231,7 @@ test("自动巡检：队列空了只写一句话，不记派单", async () => {
 test("自动巡检：开启 pauseWhileRunning 时，有被监听会话还在跑就不开新会话（豆包单实例）", async () => {
   const { ctx, logs } = pickupCtx({ pickup: { auto: true, intervalSeconds: 1800, maxPerRound: 2, pauseWhileRunning: true } })
   ctx.state.watchers = new Map([["conv-running", { target: "conv-running" }]])
-  ctx.dws = { runningMap: async () => ({ "conv-running": { running: true } }) }
+  ctx.session = { runningMap: async () => ({ "conv-running": { running: true } }) }
   let called = 0
   const r = await pickupOnce(ctx, { run: async () => { called++; return [] } })
   assert.equal(r.skipped, "window-busy")
@@ -243,7 +243,7 @@ test("自动巡检：开启 pauseWhileRunning 时，有被监听会话还在跑�
 test("自动巡检：默认不因窗口在跑就停派，空两个槽就一轮补两条", async () => {
   const { ctx } = pickupCtx({ pickup: { auto: true, intervalSeconds: 1800, maxPerRound: 2, maxRunning: 2 } })
   ctx.state.watchers = new Map([["conv-running", { target: "conv-running" }]])
-  ctx.dws = { runningMap: async () => ({ "conv-running": { running: true } }) }
+  ctx.session = { runningMap: async () => ({ "conv-running": { running: true } }) }
   let maxTotal = 0
   const r = await pickupOnce(ctx, { run: async (c) => { maxTotal = c.maxTotal; return [] } })
   assert.equal(r.ok, true)
@@ -291,7 +291,7 @@ test("自动巡检：只剩一个槽就只补一条；派单失败待重试的�
 test("自动巡检：侧边栏读不到不拦派单（dws open 自己有兜底）", async () => {
   const { ctx } = pickupCtx()
   ctx.state.watchers = new Map([["conv-x", { target: "conv-x" }]])
-  ctx.dws = { runningMap: async () => { throw new Error("list 失败") } }
+  ctx.session = { runningMap: async () => { throw new Error("list 失败") } }
   const r = await pickupOnce(ctx, { run: async () => [] })
   assert.equal(r.ok, true)
   assert.equal(r.skipped, undefined)

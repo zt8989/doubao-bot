@@ -28,7 +28,7 @@ test("PR 全合完：通知会话自动归档，账本里的 notice 记录摘掉
   })
 
   const { calls, dws } = archived()
-  const notes = await archiveMergedNotices({ dws, stateFile: file })
+  const notes = await archiveMergedNotices({ session: dws, stateFile: file })
 
   assert.deepEqual(calls, ["foreman-PR待合并-20261112-1402"])
   assert.equal(notes.length, 1)
@@ -46,7 +46,7 @@ test("还有没合的 PR：不归档", async () => {
   })
 
   const { calls, dws } = archived()
-  const notes = await archiveMergedNotices({ dws, stateFile: file })
+  const notes = await archiveMergedNotices({ session: dws, stateFile: file })
 
   assert.deepEqual(calls, [])
   assert.equal(notes.length, 0)
@@ -60,7 +60,7 @@ test("归档失败：预留记录下轮重试，不抛错", async () => {
   b.markNotice("foreman-PR待合并-20261112-1116", { name: "foreman-PR待合并-20261112-1116", prs: ["yyzl/win-ai-harness#270"] })
 
   const dws = { archive: async () => { throw new Error("app_busy") } }
-  const notes = await archiveMergedNotices({ dws, stateFile: file })
+  const notes = await archiveMergedNotices({ session: dws, stateFile: file })
 
   assert.equal(notes.length, 1)
   assert.match(notes[0], /归档失败/)
@@ -78,7 +78,7 @@ test("会话已不在侧边栏：收掉记录，不再每轮刷失败日志", as
 
   const dws = { archive: async (name) => { throw new Error("侧边栏里没有任务 " + name) } }
   const logs = []
-  const notes = await archiveMergedNotices({ dws, stateFile: file, log: (m) => logs.push(m) })
+  const notes = await archiveMergedNotices({ session: dws, stateFile: file, log: (m) => logs.push(m) })
 
   assert.equal(notes.length, 1)
   assert.match(notes[0], /已不在侧边栏/)
@@ -86,6 +86,6 @@ test("会话已不在侧边栏：收掉记录，不再每轮刷失败日志", as
   assert.equal(new Book(file).notices["foreman-合并-20261113-1400"], undefined, "记录收掉，不再重试")
   assert.match(logs.join("\n"), /不再重试/)
   // 第二轮：没有任何要处理的
-  const again = await archiveMergedNotices({ dws, stateFile: file, log: () => {} })
+  const again = await archiveMergedNotices({ session: dws, stateFile: file, log: () => {} })
   assert.equal(again.length, 0)
 })

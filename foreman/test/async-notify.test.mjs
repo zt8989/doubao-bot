@@ -86,7 +86,7 @@ test("runRound：派单改投 router（routeIssue），不开会话、不登记 
     const ctx = {
       cfg,
       book,
-      dws,
+      session: dws,
       log: () => {},
       gitea: fakeGitea(),
       once: true,
@@ -159,7 +159,7 @@ test("端到端：状态经 Inbox/Worker 投递，同指纹与重启都不重复
       notify: async () => { throw new Error("旧 notify 不应参与任务状态投递") },
     }
 
-    server = await startServer({ cfg, book, dws, log: () => {} })
+    server = await startServer({ cfg, book, driver: dws, log: () => {} })
 
     const drain = async () => { await server.worker.idle(); await server.worker.runOnce() }
     // 第一轮 running：只落本地账本，不入箱、不投递编排
@@ -194,7 +194,7 @@ test("端到端：状态经 Inbox/Worker 投递，同指纹与重启都不重复
     server = null
 
     // 新起一个服务（新进程状态），但 notified 已持久化
-    const server2 = await startServer({ cfg, book: new Book(cfg.stateFile), dws, log: () => {} })
+    const server2 = await startServer({ cfg, book: new Book(cfg.stateFile), driver: dws, log: () => {} })
     try {
       r = await server2.poll()
       assert.equal(r.notified, 0, "重启后不重发")
@@ -231,7 +231,7 @@ test("notify 抛错 → dwsErrors 计数 + 不崩", async () => {
         throw new Error("smtp down")
       },
     }
-    server = await startServer({ cfg, book, dws, log: () => {} })
+    server = await startServer({ cfg, book, driver: dws, log: () => {} })
     const r = await server.poll()
     // notify 失败：notified 不计数，但 poll 不崩
     assert.equal(r.checked, 1)
@@ -261,7 +261,7 @@ test("任务状态只经 queue：首轮投递后，后续同指纹不重复", as
       queue: async (target, text) => { sent.push({ target, text }) },
       notify: async () => { throw new Error("旧 notify 不应参与任务状态投递") },
     }
-    server = await startServer({ cfg, book, dws, log: () => {} })
+    server = await startServer({ cfg, book, driver: dws, log: () => {} })
     await server.poll()
     await server.worker.idle()
     await server.worker.runOnce()

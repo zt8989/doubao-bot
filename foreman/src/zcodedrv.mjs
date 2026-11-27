@@ -310,7 +310,7 @@ const HERDR_ERRORS = {
   bin_missing: "找不到 herdr 可执行文件（可配 herdr.bin；brew install herdr）",
   herdr_server_down: "herdr server 没在跑（跑一次 `herdr server` 或 foreman doctor --start 会自动拉起）",
   herdr_not_ready: "zcode TUI 没能在 herdr pane 里就绪（检查 herdr-zcode 插件是否装好：~/.zcode/cli/setting.json 的 plugins.dirs）",
-  agent_blocked: "zcode 在等权限确认（去 herdr 的那个 pane 批一下，或 foreman zcode-stop 后重派）",
+  agent_blocked: "zcode 卡在阻塞态（权限确认/子会话审批等待）——pane run 的输入会被静默吞掉；去 pane 上解除阻塞，或用 /clear 轮换 Router 会话/重派该会话",
   agent_stalled: "prompt 提交后 zcode 没有开始干活（插件没上报 working；检查 herdr-zcode 插件）",
   agent_gone: "会话的 herdr pane 上已经没有 agent（TUI 进程退了，pane 剩个空 shell）——继续投递只会把消息当 shell 命令敲进去；用 /clear 轮换 Router 会话或重派该会话",
 }
@@ -440,6 +440,12 @@ export class ZcodeHerdrDriver extends ZcodeDriverBase {
     // prompt 当 shell 命令敲进去（2026-11-26 飞书无回复事故的根因）。agent_gone 直接抛。
     const reg = await this.#agentState(entry.paneId)
     if (!reg.status && !reg.seq) throw new ZcodeError(HERDR_ERRORS.agent_gone, { code: "agent_gone" })
+    // blocked = zcode 卡在阻塞态（权限确认/子会话审批等待），pane run 的输入会被静默吞掉
+    // （2026-11-27 实测：router 等 #18/#20 审批时 blocked，三条消息投递报「成功」但转录里根本
+    // 没有）。拒投让 Inbox 走重试（日志可见），直到阻塞解除或会话被轮换。
+    if (reg.status === "blocked") {
+      throw new ZcodeError(`${HERDR_ERRORS.agent_blocked}（pane ${entry.paneId} agent_status=blocked）`, { code: "agent_blocked" })
+    }
     const text = String(prompt ?? "")
     let body = text
     let scratch = null

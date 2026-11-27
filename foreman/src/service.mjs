@@ -1,4 +1,4 @@
-// 常驻服务：HTTP 单通道（RPC + 控制台）；按 pollSeconds 轮询 dws status，跑完才异步通知。
+// 常驻服务：HTTP 单通道（RPC + 控制台）；按 pollSeconds 轮询载体状态，跑完才异步通知。
 // 写账本一律 new Book(cfg.stateFile) 现读现写，不长期持有（run 也在写同一个 state.json）。
 import fs from "node:fs"
 import os from "node:os"
@@ -16,6 +16,7 @@ import {
   orchestratorTarget,
   ownedIssueOrchestrator,
   sessionFlowEnabled,
+  openWorkSession,
   TERMINAL_ISSUE_STATES,
 } from "./sessionflow.mjs"
 import { enqueueTaskUpdate, deliverTaskUpdate } from "./taskevents.mjs"
@@ -26,6 +27,7 @@ import { makeSessionAdapter } from "./workflow/adapters/session.mjs"
 import { createChatWorkflow } from "./workflow/chat.mjs"
 import { GiteaTrackerAdapter } from "./workflow/adapters/gitea.mjs"
 import { prWatchOnce, prWatchTarget, mergeFailureReason, prNotifyText, shouldReport, ownedPrKeys, prKey, uiReviewers, uiReviewersReady, isOwnPr, isUiPrView } from "./prwatch.mjs"
+import { deliverApiBreakCandidates } from "./apiwatch.mjs"
 import { pickupWatchOnce } from "./pickupwatch.mjs"
 import { MailDriver, realRecipients } from "./mail.mjs"
 import { acceptanceGate, detectUiChange, mailPollOnce, requestAcceptance, mailAcceptanceSent, mailAcceptanceFailed, deliverMailReply } from "./mailflow.mjs"
@@ -198,7 +200,7 @@ export function readFixedPrompt(cfg, repo = "", { lane = "dispatch" } = {}) {
 // 两条通道各投各的：派单会话（续跑/接单）与合并会话（合 PR）用不同提示词、不同命名。
 // 记账留痕但 notify:false——它们是编排者，不是被监听的执行会话，纳入监听会自己通知自己。
 export async function deliverNewSession(ctx, { text = "", kind = "", repo = "", watcher = null, lane = "dispatch" } = {}) {
-  const { cfg, dws, log = () => {} } = ctx
+  const { cfg, session, log = () => {} } = ctx
   const book = new Book(cfg.stateFile)
   const laneName = lane === "merge" ? "merge" : "dispatch"
   const dc = deliverContextFor(cfg, repo || watcher?.repo || "")
@@ -215,7 +217,7 @@ export async function deliverNewSession(ctx, { text = "", kind = "", repo = "", 
   const key = watcher?.issueKey || repo || ""
   const op = startOperation(ctx, "deliver", `投递${kind || "通知"}`, { key, detail: name })
   try {
-    const out = await dws.openNew({ name, prompt, noWait, repo: repoWorkDir(cfg, repo || watcher?.repo || "") })
+    const out = await session.openNew({ name, prompt, noWait, repo: repoWorkDir(cfg, repo || watcher?.repo || "") })
     const convId = String(out?.convId ?? "").trim()
     // notice 记触发类型：「PR待合并」会话核对后直接执行 foreman pr merge，不交 RESULT。
     // 「合并完成」那类会话只做汇报，不再触发一次合并。
@@ -237,7 +239,7 @@ export async function deliverNewSession(ctx, { text = "", kind = "", repo = "", 
 // 服务侧判定该不该发。env 默认 process.env，便于测试注入。
 export function notifyDecision({ cfg, watcher, book, env = process.env, result }) {
   const notify = cfg?.notify ?? {}
-  // event 映射：跑完时用 dws.info 读最后回复并 parseResult。
+  // event 映射：跑完时用载体 info 读最后回复并 parseResult。
   let event = "session-done"
   if (result && result.status) {
     event =
@@ -454,16 +456,16 @@ export async function pickupOnce(ctx, { run = runRound, force = false } = {}) {
   }
   // 保守开关（默认关）：豆包单实例下，被监听的会话还在跑就别开新会话。
   // 关掉才能同时有 2 张单在跑；窗口互相抢时在配置里打开 pickup.pauseWhileRunning。
-  if (cfg.pickup?.pauseWhileRunning === true && typeof ctx.dws?.runningMap === "function") {
+  if (cfg.pickup?.pauseWhileRunning === true && typeof ctx.session?.runningMap === "function") {
     try {
-      const sidebar = await ctx.dws.runningMap()
+      const sidebar = await ctx.session.runningMap()
       const busyIds = [...(state.watchers?.keys() ?? [])].filter((id) => sidebar?.[id]?.running)
       if (busyIds.length) {
         log(`自动巡检：${busyIds.join("、")} 还在跑，本轮不派新会话（pickup.pauseWhileRunning）`)
         return { ok: true, skipped: "window-busy", busy: busyIds }
       }
     } catch {
-      // 侧边栏读不到不拦派单：dws open 自己有「没切到新会话就报错」的兜底。
+      // 侧边栏读不到不拦派单：载体 open 自己有「没切到新会话就报错」的兜底。
     }
   }
   // 和 CLI 的 foreman run 抢同一把锁：两边同时捞会把同一条单派两次。
@@ -480,7 +482,7 @@ export async function pickupOnce(ctx, { run = runRound, force = false } = {}) {
     const handled = await run({
       cfg,
       book,
-      dws: ctx.dws,
+      session: ctx.session,
       log,
       consoleStore: ctx.consoleStore,
       maxTotal,
@@ -490,7 +492,7 @@ export async function pickupOnce(ctx, { run = runRound, force = false } = {}) {
     // 会话中心：捞到的单先交给编排会话（handed），工作会话等编排调 dispatch 才开。
     // 这里只推「已接单」，session.dispatched 由 dispatch 那条 RPC 自己推。
     const handed = handled.filter((h) => h.state === "handed")
-    const engine = ctx.engine ?? new WorkflowEngine({ cfg, session: ctx.dws, log })
+    const engine = ctx.engine ?? new WorkflowEngine({ cfg, session: ctx.session, log })
     for (const h of [...dispatched, ...handed]) {
       const issueKey = `${h.repo}#${h.number}`
       await engine.emit("issue.picked", { issueKey, workflow: "own" })
@@ -790,7 +792,7 @@ export async function pickIssue(ctx, { repo = "", number = 0 } = {}) {
 // 起服务：HTTP 单通道（CLI 的 RPC + 控制台页面同一个端口），端口写到文件里给 CLI 读。
 // book 参数只用于初始加载，poll/write 时一律 new Book 重开。
 // gitea 只在 PR 监听里用，测试可直接注入假的 { listPulls }。
-export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea = { listPulls, viewPr, mergePr, closeIssue, createPr, commentIssue, viewIssue, createIssue, editIssue }, mail = null }) {
+export async function startServer({ cfg, book: _book, driver, log = () => {}, gitea = { listPulls, viewPr, mergePr, closeIssue, createPr, commentIssue, viewIssue, createIssue, editIssue }, mail = null }) {
   const paths = servicePaths(cfg)
   fs.mkdirSync(path.dirname(paths.pidFile), { recursive: true })
   fs.mkdirSync(path.dirname(paths.logFile), { recursive: true })
@@ -838,6 +840,8 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     mail: { lastPollAt: null, pollCount: 0, polling: false, lastResult: null, nextAt: "" },
     mailInterval: null,
     mailKick: null,
+    // 存量接口变更巡检运行时
+    apiWatch: { lastPollAt: null, pollCount: 0, candidates: 0, lastResult: "", polling: false, nextAt: "" },
     // 合并通道运行时（与派单通道分开：各排各的队，各用各的并发）
     merge: { lastSweepAt: null, sweeps: 0, lastResult: null, interval: null, kick: null },
   }
@@ -848,18 +852,18 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     for (const w of watchersFor(b, cfg)) state.watchers.set(String(w.target), { ...w })
   }
 
-  // 通用 workflow：生命周期 + 适配器。ctx.dws / ctx.gitea 现在是**适配器**（旧调用面保留）。
+  // 通用 workflow：生命周期 + 适配器。ctx.session / ctx.gitea 现在是**适配器**（旧调用面保留）。
   // agent 相关的一切（单实例护栏、读状态、归档）都收在适配器里：dws = 豆包，zcode = ZCode CLI，noop = 不碰任何前端。
   const engine = new WorkflowEngine({
     cfg,
-    session: makeSessionAdapter(cfg, { driver: dws, log }),
+    session: makeSessionAdapter(cfg, { driver, log }),
     tracker: new GiteaTrackerAdapter({ impl: gitea }),
     log,
   })
-  const ctx = { state, cfg, dws: engine.session, gitea: engine.tracker, engine, log, close: null, prPoll: null, httpUrl: "", consoleStore: null }
+  const ctx = { state, cfg, session: engine.session, gitea: engine.tracker, engine, log, close: null, prPoll: null, httpUrl: "", consoleStore: null }
   // 执行载体查看/热切换（控制台 UI 用）：写回配置文件 + 当场换 session 适配器，不用重启服务。
-  // 适配器有三个引用处要一起换：engine.session、lifecycle.adapters.session、ctx.dws（其余消费方
-  // 都在调用时现读 ctx.dws，不存在闭包捕获）。旧载体还有在跑的会话时默认拒绝——切走后旧会话
+  // 适配器有三个引用处要一起换：engine.session、lifecycle.adapters.session、ctx.session（其余消费方
+  // 都在调用时现读 ctx.session，不存在闭包捕获）。旧载体还有在跑的会话时默认拒绝——切走后旧会话
   // 不再被监控（watch 会报 gone）；确认要弃就带 force。
   ctx.getAgent = () => ({
     agent: String(cfg.agent ?? "noop").trim().toLowerCase(),
@@ -874,7 +878,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     if (v === current) return { ok: true, agent: current, changed: false }
     let running = 0
     try {
-      const map = await ctx.dws.runningMap()
+      const map = await ctx.session.runningMap()
       running = Object.values(map ?? {}).filter((s) => s?.running === true).length
     } catch {}
     if (running > 0 && !force) {
@@ -882,10 +886,10 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     }
     const file = persistAgent(cfg, v)
     cfg.agent = v
-    const session = makeSessionAdapter(cfg, { driver: dws, log })
+    const session = makeSessionAdapter(cfg, { driver, log })
     engine.session = session
     if (engine.lifecycle?.adapters) engine.lifecycle.adapters.session = session
-    ctx.dws = session
+    ctx.session = session
     log(`agent 载体切换：${current} → ${v}（配置写进 ${file}${running > 0 ? `；${running} 个旧会话不再被监控` : ""}）`)
     return { ok: true, agent: v, previous: current, changed: true, runningLeft: running }
   }
@@ -1040,7 +1044,7 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
   // 页面上的「立即执行」：不看开关和 cron 现在是什么状态，立刻跑一轮这类任务。
   // 只 bypass「没开 / 不在工作时间」；容量、busy、锁、节点暂停这些保护仍然生效。
   ctx.runSchedule = async (id) => {
-    if (["pickup", "prWatch", "mail", "router", "inspector", "dreaming"].includes(id)) return scheduler.runNow(id === "inspector" ? "router" : id)
+    if (["pickup", "prWatch", "mail", "router", "inspector", "dreaming", "apiWatch"].includes(id)) return scheduler.runNow(id === "inspector" ? "router" : id)
     if (customAgentSchedules(cfg).some((item) => item.id === id)) return scheduler.runNow(id)
     throw Object.assign(new Error(`${id} 没有可以立即执行的动作`), { code: "schedule_not_runnable" })
   }
@@ -1061,10 +1065,15 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
       lark: (event) => larkDriver.send({ ...event.payload, idempotencyKey: `fm-${event.uuid}` }),
       // feishu 渠道：入站同一个 app 的 SDK client 直发（lark 渠道是 lark-cli 的另一个 app，
       // open_id/chat 成员关系都跨不过去——飞书回复推送必须走这个渠道）。
-      feishu: (event) => {
+      feishu: async (event) => {
         const gw = ctx.feishu
         if (!gw || typeof gw.sendOutbound !== "function") throw new Error("飞书通道未启用（feishu.enabled=false 或启动失败），feishu 渠道不可外发")
-        return gw.sendOutbound(event.payload)
+        const r = await gw.sendOutbound(event.payload)
+        // bot 本轮回复已送达：熄灭「处理中」（下一次 worker 认领会重新点亮）
+        try {
+          gw.clearProcessing?.()
+        } catch {}
+        return r
       },
     },
     onSent: (event) => mailAcceptanceSent(ctx, event),
@@ -1083,7 +1092,19 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
     handlers: {
       // 兼容旧的定时 router 事件；新定时轮询由 Schedule 的 script 执行器运行 pollOnce。
       router: ({ scheduled, notices }) => routerOnce(ctx, { force: true, scheduled, notices }),
-      "chat.message": (batch) => ctx.chat.deliver(batch),
+      // worker 认领到聊天消息即把飞书 bot 置为「处理中」（控制台 IM 页可见）；
+      // bot 的回复经 Outbox 送出后由 feishu 渠道 handler 熄灭，投递失败也熄灭（重试认领会重新点亮）。
+      "chat.message": (batch) => {
+        try {
+          ctx.feishu?.markProcessing?.(Array.isArray(batch) ? batch : [batch])
+        } catch {}
+        return ctx.chat.deliver(batch).catch((e) => {
+          try {
+            ctx.feishu?.clearProcessing?.()
+          } catch {}
+          throw e
+        })
+      },
       "mail.reply": (event) => deliverMailReply(ctx, event),
       // 他人 PR 合并：扫描只写 pr.merge 事件，这里只把请求转投 router（不再建合并助手会话）。
       "pr.merge": async (batch) => {
@@ -1096,6 +1117,8 @@ export async function startServer({ cfg, book: _book, dws, log = () => {}, gitea
         for (const event of batch) delivered.push(await deliverTaskUpdate(ctx, event))
         return delivered
       },
+      // 存量接口变更候选：不为它注册 router 语义（用户要独立判断），直接开一次性判官会话。
+      "apibreak.candidates": (event) => deliverApiBreakCandidates(ctx, event),
     },
   })
   ctx.inboxWorker = worker
@@ -1144,7 +1167,7 @@ ${String(item.prompt ?? "").trim()}
     const session = `foreman-${item.id}-${stamp}`
     try {
       // cwd 跟配置走（agentScheduleCwd）：提示词里宣称的工作目录必须是会话真实 cwd。
-      const delivered = await ctx.dws.openNew({ name: session, prompt: agentSchedulePrompt(item, session, at), noWait: true, repo: agentScheduleCwd(item.cwd) })
+      const delivered = await ctx.session.openNew({ name: session, prompt: agentSchedulePrompt(item, session, at), noWait: true, repo: agentScheduleCwd(item.cwd) })
       if (delivered?.ok === false) throw new Error(delivered.error || `Agent 定时任务 ${item.id} 投递失败`)
       runtime.lastAt = nowIso()
       runtime.count++
@@ -1156,7 +1179,7 @@ ${String(item.prompt ?? "").trim()}
     }
   }
   const syncScheduleState = (items) => {
-    const ids = { pickup: "pickup", prWatch: "pr", mail: "mail", router: "router", dreaming: "dreaming" }
+    const ids = { pickup: "pickup", prWatch: "pr", mail: "mail", router: "router", dreaming: "dreaming", apiWatch: "apiWatch" }
     for (const [id, key] of Object.entries(ids)) {
       state[key].nextAt = items.find((item) => item.id === id)?.nextAt || ""
     }
@@ -1170,6 +1193,8 @@ ${String(item.prompt ?? "").trim()}
     mail: { type: "script", run: () => recordMailPoll(() => runConfiguredScript(ctx, "mail")) },
     router: { type: "script", run: () => runConfiguredScript(ctx, "router") },
     dreaming: { type: "agent", run: recordDream },
+    // 存量接口变更巡检：cron 已限定工作时段，不走工作时间窗 allow 门。
+    apiWatch: { type: "script", run: (_, { manual }) => runConfiguredScript(ctx, "apiWatch", { manual }) },
     ...Object.fromEntries(
       customAgentSchedules(cfg).map((item) => [item.id, { type: "agent", run: () => runAgentSchedule(item) }])
     ),
@@ -1192,35 +1217,28 @@ ${String(item.prompt ?? "").trim()}
   armSchedules()
   scheduler.start(Number(cfg.inbox?.schedulePollMs ?? 1000))
 
-  // 飞书通道（openclaw 式入站）：enabled 才动态加载 SDK；WS 长连接收消息 → Inbox chat.message，
-  // 回复由泵轮询 router 会话增量经 Outbox lark 推回。启动失败只记日志，不挡服务。
-  // 设备授权（控制台扫码/链接授权拿 open_id）独立于通道开关，常驻创建、随时可发起。
+  // 飞书通道（openclaw 式入站）：enabled 才动态加载 SDK；WS 长连接收消息 → Inbox chat.message。
+  // 回复不代推：deliver 包装带来源说明与建议命令，router agent 自己 foreman send 入 Outbox。
+  // 机器人自己的外发消息按 sender=botOpenId 拦回声。启动失败只记日志，不挡服务。
   ctx.feishu = null
-  ctx.feishuPump = null
   const startFeishuChannel = async () => {
     if (!cfg.feishu?.enabled) return
     try {
-      const { FeishuGateway, FeishuReplyPump } = await import("./feishu.mjs")
+      const { FeishuGateway } = await import("./feishu.mjs")
       const feishuGateway = new FeishuGateway({ cfg, ctx, log })
       await feishuGateway.start()
       ctx.feishu = feishuGateway
-      const feishuPump = new FeishuReplyPump({ cfg, ctx, log })
-      feishuPump.start()
-      ctx.feishuPump = feishuPump
     } catch (e) {
       log(`飞书通道启动失败：${e.message}`)
       ctx.feishu = null
-      ctx.feishuPump = null
       ctx.feishuError = e.message
     }
   }
   const stopFeishuChannel = () => {
     try {
-      ctx.feishuPump?.stop()
       ctx.feishu?.stop()
     } catch {}
     ctx.feishu = null
-    ctx.feishuPump = null
   }
   await startFeishuChannel()
 
@@ -1353,7 +1371,6 @@ ${String(item.prompt ?? "").trim()}
     await dispatcher?.stop()
     await worker?.stop()
     try {
-      ctx.feishuPump?.stop()
       ctx.feishu?.stop()
     } catch {}
     await new Promise((r) => consoleHttp.server.close(r))
@@ -1556,7 +1573,7 @@ export async function pickupPollOnce(ctx, { force = false } = {}) {
 // 由 Worker 派合并助手；本人 UI 候选与评论更新才写 router agent Inbox。
 // force 是页面上的「立即执行」：即使 prWatch.enabled 是 false（默认关）也扫这一轮。
 export async function prPollOnce(ctx, { force = false } = {}) {
-  const { state, cfg, dws, gitea, log } = ctx
+  const { state, cfg, session, gitea, log } = ctx
   if (cfg.prWatch?.enabled === false && !force) return { ok: true, skipped: "disabled" }
   if (state.pr.polling) return { ok: true, skipped: "busy" }
   // 「他人 PR 扫描」节点被暂停：这一轮不扫，已经扫到的 PR 照常由编排核对合并。
@@ -1572,7 +1589,7 @@ export async function prPollOnce(ctx, { force = false } = {}) {
       // 他人 PR 只写 pr.merge Inbox，扫描不建会话；Worker 的 pr.merge handler 才派合并助手。
       // 本人 UI 候选与评论更新仍交 router agent。没有 Inbox 时退回直投（旧部署/测试）。
       const enqueueMerge = ctx.inbox ? (event) => ctx.inbox.enqueue(event) : null
-      out = await prWatchOnce({ cfg, gitea, dws, log, target, inspect: notifyRouter, enqueue: enqueueMerge })
+      out = await prWatchOnce({ cfg, gitea, session, log, target, inspect: notifyRouter, enqueue: enqueueMerge })
     } catch (e) {
       log(`PR 扫描失败：${e.message}`)
       return { ok: false, error: e.message }
@@ -1584,7 +1601,7 @@ export async function prPollOnce(ctx, { force = false } = {}) {
     // 通知会话收尾：它报过的 PR 都合完了就归档，别把「PR待合并」会话一直留在侧边栏。
     // 放在每轮扫描后统一扫一遍，自动合并、手动合并、已经合过（skipped=merged）都能收干净。
     try {
-      const archivedNotes = await archiveMergedNotices({ dws, stateFile: cfg.stateFile, log })
+      const archivedNotes = await archiveMergedNotices({ session, stateFile: cfg.stateFile, log })
       if (archivedNotes.length) out.cleanup = [...(out.cleanup ?? []), ...archivedNotes]
     } catch (e) {
       log(`归档通知会话失败：${e.message}`)
@@ -1612,9 +1629,9 @@ export async function prPollOnce(ctx, { force = false } = {}) {
 
 // 跑一轮：现读 book → 观察 watcher 状态与最终回复 → 只写 task.update Inbox；Worker 投递后才消费指纹。
 export async function pollOnce(ctx) {
-  const { state, cfg, dws, log, gitea } = ctx
+  const { state, cfg, session, log, gitea } = ctx
   // 直接构造 ctx 的调用方（测试/脚本）没有 engine 时补一个，保证流程事件照样发。
-  const engine = ctx.engine ?? new WorkflowEngine({ cfg, session: dws, tracker: gitea, log })
+  const engine = ctx.engine ?? new WorkflowEngine({ cfg, session, tracker: gitea, log })
   if (state.polling) return { checked: 0, settled: 0, notified: 0, steered: 0, skipped: "busy" }
   state.polling = true
   const out = { checked: 0, settled: 0, notified: 0, steered: 0 }
@@ -1623,12 +1640,12 @@ export async function pollOnce(ctx) {
     const watchers = watchersFor(book, cfg)
     state.watchers = new Map(watchers.map((w) => [String(w.target), { ...w }]))
 
-    // 先读一次侧边栏（不切窗口）：还在跑的会话只看这里，不逐条 dws status。
+    // 先读一次侧边栏（不切窗口）：还在跑的会话只看这里，不逐条 status。
     // 否则每 20s 轮询都会把用户窗口 goto 到被监听的会话上（表现为「一直被切回某条会话」）。
     let sidebar = null
-    if (typeof dws.runningMap === "function") {
+    if (typeof session.runningMap === "function") {
       try {
-        sidebar = await dws.runningMap()
+        sidebar = await session.runningMap()
       } catch (e) {
         // 读不到侧边栏就退化为老行为（逐条 status），不因此漏掉通知。
         log(`读侧边栏状态失败，本轮退回逐条 status：${e.message}`)
@@ -1684,14 +1701,14 @@ export async function pollOnce(ctx) {
       const park = () => new Book(cfg.stateFile).markIdle(key)
       let status
       try {
-        status = await dws.status(w.target)
+        status = await session.status(w.target)
       } catch (e) {
         state.dwsErrors++
-        log(`dws status ${w.target} 失败：${e.message}`)
+        log(`载体 status ${w.target} 失败：${e.message}`)
         continue
       }
       const prev = book.notified[key] ?? {}
-      // 同一指纹最多尝试 maxAttempts 次：dws.send 会「消息到了却报发送失败」，
+      // 同一指纹最多尝试 maxAttempts 次：载体 send 会「消息到了却报发送失败」，
       // 不封顶就会每轮 poll 补发一次，把调用方会话刷成重复通知。
       const decision = judgePoll(prev, status, { maxAttempts: notifyMaxAttempts(cfg) })
       rec.lastPhase = decision.phase
@@ -1720,11 +1737,11 @@ export async function pollOnce(ctx) {
       // 推进工单业务状态、push/开 PR 或直接给编排发消息；这些决定统一交给所属编排。
       let finalText = ""
       try {
-        const info = await dws.info(w.target)
+        const info = await session.info(w.target)
         finalText = String(info?.lastReply ?? "").trim()
       } catch (e) {
         state.dwsErrors++
-        log(`dws info ${w.target} 失败：${e.message}`)
+        log(`载体 info ${w.target} 失败：${e.message}`)
       }
 
       if (ctx.engine?.paused?.("notify")) {
@@ -1766,7 +1783,7 @@ export async function pollOnce(ctx) {
     // 收口工单的编排会话也在这轮收：工单 done 之后它没有下一件事了，
     // 不收就会每张单在侧边栏留一条「工单编排」，越积越多。复用同一份侧边栏判断在不在跑。
     try {
-      const orchNotes = await archiveFinishedOrchestrators({ dws, stateFile: cfg.stateFile, log, sidebar })
+      const orchNotes = await archiveFinishedOrchestrators({ session, stateFile: cfg.stateFile, log, sidebar })
       if (orchNotes.length) out.orchestratorArchive = orchNotes
     } catch (e) {
       log(`归档收口工单的编排会话失败：${e.message}`)
@@ -1938,7 +1955,7 @@ export async function runMergeTask(ctx, task = {}) {
   let archivedNotes = []
   if (doCleanup) {
     try {
-      archivedNotes = await archiveMergedNotices({ dws: ctx.dws, stateFile: cfg.stateFile, log })
+      archivedNotes = await archiveMergedNotices({ session: ctx.session, stateFile: cfg.stateFile, log })
     } catch (e) {
       log(`归档通知会话失败：${e.message}`)
     }
@@ -2140,13 +2157,13 @@ export async function cleanupPrArtifacts({ repoDir, worktree, branch = "" } = {}
 // 早先只有执行会话会在 pr.merged 上被归档，通知会话没人管：一条条留在侧边栏里、
 // 既没人读也没人收（#235 与重复投递出的两条 #238 会话就是这么积下来的）。
 // 只动 foreman 自己新建的投递会话（notices 账本里登记的），不碰执行会话与用户自己的会话。
-// 会话已经不存在的错误文案（dws 侧边栏找不到这条任务）。这类错误重试多少次都一样，
+// 会话已经不存在的错误文案（载体侧边栏找不到这条任务）。这类错误重试多少次都一样，
 // 归档/收记录按「已经收过了」处理，别再每轮刷失败日志。
 const SESSION_GONE = /侧边栏里没有任务/
 
-export async function archiveMergedNotices({ dws, stateFile, log = () => {} } = {}) {
+export async function archiveMergedNotices({ session, stateFile, log = () => {} } = {}) {
   const notes = []
-  if (!dws || typeof dws.archive !== "function" || !stateFile) return notes
+  if (!session || typeof session.archive !== "function" || !stateFile) return notes
   const b = new Book(stateFile)
   for (const [target, info] of Object.entries(b.notices)) {
     const prs = Array.isArray(info?.prs) ? info.prs : []
@@ -2158,7 +2175,7 @@ export async function archiveMergedNotices({ dws, stateFile, log = () => {} } = 
     if (!allDone) continue
     const name = String(info?.name || target)
     try {
-      await dws.archive(name)
+      await session.archive(name)
       new Book(stateFile).delNotice(target)
       notes.push(`通知会话 ${name} 已归档`)
       log(`已归档通知会话（它报的 PR 都合完了）：${name}`)
@@ -2185,10 +2202,10 @@ export async function archiveMergedNotices({ dws, stateFile, log = () => {} } = 
 // 「foreman-<仓库>-<单号>-编排」，一天几条，越积越多，而且点进去全是已经收尾的对话。
 // 只动账本里 kind=orchestrator 且带这张单 issueKey 的会话：全局编排（book.orchestrator）
 // 与用户自己发起后被绑成编排的会话一律不碰。还在跑的不收（它可能正拿着「下一步 clean」这一轮），
-// 这一轮跳过、下一轮再试；dws 归档失败也留着账，不推翻工单状态。
-export async function archiveFinishedOrchestrators({ dws, stateFile, log = () => {}, sidebar = null } = {}) {
+// 这一轮跳过、下一轮再试；载体归档失败也留着账，不推翻工单状态。
+export async function archiveFinishedOrchestrators({ session, stateFile, log = () => {}, sidebar = null } = {}) {
   const notes = []
-  if (!dws || typeof dws.archive !== "function" || !stateFile) return notes
+  if (!session || typeof session.archive !== "function" || !stateFile) return notes
   for (const [key, rec] of Object.entries(new Book(stateFile).issues ?? {})) {
     if (!TERMINAL_ISSUE_STATES.includes(String(rec?.state ?? ""))) continue
     const book = new Book(stateFile)
@@ -2198,7 +2215,7 @@ export async function archiveFinishedOrchestrators({ dws, stateFile, log = () =>
     // 侧边栏说还在跑：这一轮不动它（编排可能正拿着 clean 收尾）。
     if (sidebar && (sidebar[target]?.running || sidebar[String(own.convId ?? "")]?.running)) continue
     try {
-      await dws.archive(target)
+      await session.archive(target)
       const after = new Book(stateFile)
       after.delSession(own.name)
       after.setIssue(key, { orchestrator: "", orchestratorArchivedAt: nowIso() })
@@ -2545,6 +2562,31 @@ export async function handleRequest(ctx, req) {  const id = req?.id
   // ---- 以工单绑定的编排会话为中心（每单独立编排 → 派单 → steer 回本单编排 → merge → clean）----
 
   // orch show：整条链路现在绑在哪条会话上、最近 steer 了什么。
+  // router 编排专用：foreman 亲自开编码/审查工作会话（yolo，不卡审批），收工自动通知 router。
+  // CreateSession 子会话是 build 模式必然卡审批（2026-11-27 实测），协议已弃用。
+  if (cmd === "session open") {
+    try {
+      return ok(await openWorkSession(ctx, req))
+    } catch (e) {
+      return fail(e.code || "session-open-failed", e.message)
+    }
+  }
+
+  // router 编排专用：把审查意见等续说给既有工作会话（输入排队，立即返回）。
+  if (cmd === "session steer") {
+    const target = String(req?.target ?? "").trim()
+    const text = String(req?.text ?? "").trim()
+    if (!target || !text) return fail("bad_request", "session steer 需要 target 与 text")
+    if (typeof ctx.session?.steer !== "function") return fail("no-session-adapter", "当前载体不支持 steer（会话载体才有）")
+    try {
+      const r = await ctx.session.steer(target, text)
+      ctx.log?.(`工作会话续说：${target}（${text.length} 字）`)
+      return ok(r)
+    } catch (e) {
+      return fail(e.code || "session-steer-failed", e.message)
+    }
+  }
+
   if (cmd === "orch show") {
     const book = new Book(ctx.cfg.stateFile)
     const target = orchestratorTarget(book)
@@ -2714,7 +2756,7 @@ export async function handleRequest(ctx, req) {  const id = req?.id
     })
   }
 
-  // 统一外发：send --type mail|lark 只写 Outbox，Dispatcher 异步送达。
+  // 统一外发：send --type mail|lark|feishu 只写 Outbox，Dispatcher 异步送达。
   if (cmd === "send") {
     try {
       const event = enqueueOutbound(ctx, { type: req.type, input: req, dedupeKey: String(req.dedupeKey ?? "") })
@@ -2975,7 +3017,7 @@ export async function handleRequest(ctx, req) {  const id = req?.id
         now: nowIso(),
       },
       feishu: ctx.feishu
-        ? { ...(ctx.feishu.view?.() ?? { enabled: true, running: true }), replyPump: ctx.feishuPump?.lastResult ?? null }
+        ? { ...(ctx.feishu.view?.() ?? { enabled: true, running: true }) }
         : {
             enabled: ctx.cfg.feishu?.enabled === true,
             running: false,
@@ -3213,7 +3255,7 @@ export async function handleRequest(ctx, req) {  const id = req?.id
       const handled = await runRound({
         cfg: ctx.cfg,
         book: new Book(ctx.cfg.stateFile),
-        dws: ctx.dws,
+        session: ctx.session,
         log: ctx.log,
         consoleStore: ctx.consoleStore,
         engine: ctx.engine,
