@@ -7,6 +7,7 @@ import crypto from "node:crypto"
 import { nowIso, sleep, inWorkHours } from "./util.mjs"
 import { Book } from "./book.mjs"
 import { deliverPrompt, noticeSessionName, issueBranch, runtimeEnvSection } from "./prompts.mjs"
+import { createChatStreamSource } from "./chatstream.mjs"
 import { builtinPrompt } from "./builtin-prompts.mjs"
 import { notifyTarget, shouldNotify, notifyText, runRound, acquireLock, releaseLock, bucketOf, CLOSED_STATES } from "./orchestrator.mjs"
 import {
@@ -206,6 +207,44 @@ export function readFixedPrompt(cfg, repo = "", { lane = "dispatch" } = {}) {
   }
   if (!text.trim()) throw new Error(`固定提示词是空文件：${file}`)
   return text
+}
+
+// 聊天消息投递确认：轮询 router 转录，直到每条消息的归一化前缀都出现在新增 user 消息里。
+// transcript 直读优先，非 zcode 载体/直读失败回落 messagesBase；超时抛错 → 事件回 Inbox 重试。
+export async function confirmChatDelivered(ctx, events, sinceMs, { timeoutMs = 30000, pollMs = 2000, stream = null, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  const need = (Array.isArray(events) ? events : [events])
+    .map((e) => String(e?.text ?? "").replace(/\s+/g, " ").trim().slice(0, 80))
+    .filter(Boolean)
+  if (!need.length) return
+  const src = stream ?? createChatStreamSource({ ctx, log: ctx.log ?? (() => {}) })
+  const deadline = Date.now() + timeoutMs
+  let lastErr = "转录里尚未出现"
+  while (Date.now() < deadline) {
+    await sleep(pollMs)
+    try {
+      // 直读抛错（db locked 等）回落账本，与泵的优先级口径一致
+      const t = await src.transcript("", sinceMs).catch(() => null)
+      let blob = ""
+      if (t?.ok && t.carrier === "zcode") {
+        const texts = new Map()
+        for (const r of t.rows) if (r.kind === "message" && r.role === "user") texts.set(String(r.id), "")
+        for (const p of t.rows) {
+          if (p.kind !== "part" || p.type !== "text") continue
+          const m = texts.get(String(p.messageId))
+          if (m !== undefined) texts.set(String(p.messageId), m ? `${m}\n${String(p.text ?? "")}` : String(p.text ?? ""))
+        }
+        blob = [...texts.values()].map((x) => String(x).replace(/\s+/g, " ").trim()).join("\n")
+      } else {
+        const base = await ctx.chat.messagesBase()
+        blob = (base?.messages ?? []).map((m) => String(m.text ?? "").replace(/\s+/g, " ").trim()).join("\n")
+      }
+      if (need.every((n) => blob.includes(n))) return
+      lastErr = "转录里尚未出现"
+    } catch (e) {
+      lastErr = String(e?.message ?? e)
+    }
+  }
+  throw new Error(`投递确认失败（${Math.round(timeoutMs / 1000)}s 内${lastErr}）：事件回 Inbox 重试`)
 }
 
 // deliverNewSession：把核对完的结论/PR 交给一条新会话。
@@ -1108,16 +1147,26 @@ export async function startServer({ cfg, book: _book, driver, log = () => {}, gi
       router: ({ scheduled, notices }) => routerOnce(ctx, { force: true, scheduled, notices }),
       // worker 认领到聊天消息即把飞书 bot 置为「处理中」（控制台 IM 页可见）；
       // bot 的回复经 Outbox 送出后由 feishu 渠道 handler 熄灭，投递失败也熄灭（重试认领会重新点亮）。
+      // 明确投递成功才算完成：deliver 只代表「键入了 pane」，还要轮询 router 转录确认消息真的
+      // 进了会话（2026-11-27 #353 实测 pane run 报成功但输入被吞），超时未出现就回 Inbox 重试。
       "chat.message": (batch) => {
+        const events = Array.isArray(batch) ? batch : [batch]
         try {
-          ctx.feishu?.markProcessing?.(Array.isArray(batch) ? batch : [batch])
+          ctx.feishu?.markProcessing?.(events)
         } catch {}
-        return ctx.chat.deliver(batch).catch((e) => {
-          try {
-            ctx.feishu?.clearProcessing?.()
-          } catch {}
-          throw e
-        })
+        const since = Date.now() - 2000
+        return ctx.chat
+          .deliver(events)
+          .then(async (result) => {
+            await confirmChatDelivered(ctx, events, since)
+            return result
+          })
+          .catch((e) => {
+            try {
+              ctx.feishu?.clearProcessing?.()
+            } catch {}
+            throw e
+          })
       },
       "mail.reply": (event) => deliverMailReply(ctx, event),
       // 他人 PR 合并：扫描只写 pr.merge 事件，这里只把请求转投 router（不再建合并助手会话）。

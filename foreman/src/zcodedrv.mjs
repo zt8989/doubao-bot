@@ -499,10 +499,16 @@ export class ZcodeHerdrDriver extends ZcodeDriverBase {
   }
 
   // zcode 的会话 id：从它的 sqlite 尽力回查（目录 + 建会话时间窗）。
-  async #latestSessionId(dir, sinceMs) {
-    if (!dir) return ""
+  // 会话认领（带归属校验）：共享兜底目录里常有多条会话（判官/别的 router 也在开），
+  // 纯「时间窗内最新」会抢别人的 id（2026-11-27 router 认领判官会话实测，转录确认连环误判）。
+  // 选择顺序：① 现役 sessionId 仍在候选里（它确实还在本目录与时间窗内）→ 延续现役；
+  // ② 候选里首条 user 消息与本次 open prompt 前缀吻合的那条 → 认领；
+  // ③ 都对不上 → 保持现役（宁可不更新，也别指到别人家）。
+  async #latestSessionId(entry, sinceMs, promptText = "") {
+    const dir = entry?.cwd
+    if (!dir) return entry?.sessionId ?? ""
     const dbPath = process.env.ZCODE_SESSION_DB_PATH || path.join(expandHome("~/.zcode"), "cli", "db", "db.sqlite")
-    if (!fs.existsSync(dbPath)) return ""
+    if (!fs.existsSync(dbPath)) return entry?.sessionId ?? ""
     // /tmp 与 /private/tmp 这类 symlink 要归一，否则对不上库里存的目录。
     let real = String(dir)
     try {
@@ -510,12 +516,26 @@ export class ZcodeHerdrDriver extends ZcodeDriverBase {
     } catch {}
     const since = Number.isFinite(sinceMs) ? sinceMs - 60_000 : 0
     const esc = real.replace(/'/g, "''")
+    const norm = (v) => String(v ?? "").replace(/\s+/g, " ").trim()
+    const probe = norm(promptText).slice(0, 60)
+    let ids = []
     try {
-      const r = await exec("sqlite3", [dbPath, `SELECT id FROM session WHERE directory='${esc}' AND time_created>=${since} ORDER BY time_created DESC LIMIT 1`], { timeout: 15000 })
-      return String(r.stdout ?? "").trim()
+      const r = await exec("sqlite3", [dbPath, `SELECT id FROM session WHERE directory='${esc}' AND time_created>=${since} ORDER BY time_created DESC`], { timeout: 15000 })
+      ids = String(r.stdout ?? "").split("\n").map((x) => x.trim()).filter(Boolean)
     } catch {
-      return ""
+      return entry?.sessionId ?? ""
     }
+    if (entry?.sessionId && ids.includes(entry.sessionId)) return entry.sessionId
+    if (probe) {
+      for (const id of ids) {
+        const eq = id.replace(/'/g, "''")
+        try {
+          const r = await exec("sqlite3", [dbPath, `SELECT substr(replace(group_concat(CASE WHEN json_extract(p.data,'$.type')='text' THEN replace(json_extract(p.data,'$.text'), char(10), ' ') END, ' '), '  ', ' '), 1, 80) FROM message m LEFT JOIN part p ON p.message_id=m.id WHERE m.session_id='${eq}' AND json_extract(m.data,'$.role')='user' ORDER BY m.time_created LIMIT 1`], { timeout: 15000 })
+          if (norm(r.stdout).startsWith(probe.slice(0, 60))) return id
+        } catch {}
+      }
+    }
+    return entry?.sessionId ?? ids[0] ?? ""
   }
 
   // 阻塞一轮：拿回复 → 回填账本。
@@ -527,7 +547,7 @@ export class ZcodeHerdrDriver extends ZcodeDriverBase {
       await this.#submit(entry, prompt)
       await this.#waitTurn(entry)
       const text = await this.#readPane(entry.paneId, 120)
-      this.ledger.adoptSessionId(entry, await this.#latestSessionId(entry.cwd, startedAt))
+      this.ledger.adoptSessionId(entry, await this.#latestSessionId(entry, startedAt, prompt))
       this.ledger.recordTurn(entry, { reply: text.trim().slice(-4000), prompt })
       this.#cleanupScratch(entry)
       return { response: entry.lastReply }
@@ -578,7 +598,7 @@ export class ZcodeHerdrDriver extends ZcodeDriverBase {
         if (st === "idle" || st === "done") {
           try {
             const text = await this.#readPane(entry.paneId, 120)
-            this.ledger.adoptSessionId(entry, await this.#latestSessionId(entry.cwd, startedAt))
+            this.ledger.adoptSessionId(entry, await this.#latestSessionId(entry, startedAt, prompt))
             this.ledger.recordTurn(entry, { reply: text.trim().slice(-4000), prompt })
           } catch (e) {
             this.ledger.recordTurn(entry, { status: "error", error: `这轮跑完了但读屏失败：${e.message}`, prompt })

@@ -753,7 +753,7 @@ class FmTasks extends LitElement {
 /* ---------------- Inbox / Outbox 持久队列 ---------------- */
 const QUEUE_STATUS_LABEL = {
   pending: "待处理",
-  processing: "处理中",
+  processing: "投递中",
   done: "已完成",
   dropped: "已丢弃",
   sent: "已发送",
