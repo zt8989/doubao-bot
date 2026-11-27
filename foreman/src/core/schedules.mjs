@@ -7,14 +7,14 @@ import { agentScheduleCwd } from "../config.mjs"
 
 const pad = (n) => String(n).padStart(2, "0")
 
-export const SCHEDULE_IDS = ["pickup", "prWatch", "mail", "router", "dreaming", "workHours", "apiWatch"]
+export const SCHEDULE_IDS = ["pickup", "prWatch", "mail", "router", "workHours", "apiWatch"]
 
 /** 配置里登记的自定义 Agent 定时任务（每条到点新开一条豆包会话）。 */
 export function customAgentSchedules(cfg) {
   return Array.isArray(cfg?.agentSchedules) ? cfg.agentSchedules : []
 }
 
-const BUILTIN_SCHEDULE_IDS = ["pickup", "prWatch", "mail", "router", "dreaming", "apiWatch"]
+const BUILTIN_SCHEDULE_IDS = ["pickup", "prWatch", "mail", "router", "apiWatch"]
 
 /** 创建自定义 Agent 任务时占用的保留 id：内置任务 + 没有独立 cron 的两项。 */
 const RESERVED_SCHEDULE_IDS = [...BUILTIN_SCHEDULE_IDS, "inspector", "workHours"]
@@ -73,13 +73,6 @@ export function hydrateSchedules(cfg, store) {
   for (const id of BUILTIN_SCHEDULE_IDS) {
     const row = byId.get(id)
     if (!row) continue
-    if (id === "dreaming") {
-      cfg.memory = {
-        ...(cfg.memory ?? {}),
-        dreaming: { ...(cfg.memory?.dreaming ?? {}), enabled: row.enabled, cron: row.cron },
-      }
-      continue
-    }
     cfg[id] = {
       ...(cfg[id] ?? {}),
       [id === "pickup" ? "auto" : "enabled"]: row.enabled,
@@ -88,7 +81,7 @@ export function hydrateSchedules(cfg, store) {
     }
   }
 
-  const customRows = rows.filter((row) => row.kind === "agent" && !["dreaming", "inspector"].includes(row.id))
+  const customRows = rows.filter((row) => row.kind === "agent" && row.id !== "inspector")
   if (initialized || customRows.length) {
     const legacy = customAgentSchedules(cfg)
     cfg.agentSchedules = customRows.map((row) => {
@@ -127,7 +120,6 @@ export function scheduleDefinitions(cfg) {
     script("mail", cfg.mail?.enabled === true),
     script("router", (cfg.router ?? cfg.inspector)?.enabled === true),
     script("apiWatch", cfg.apiWatch?.enabled === true),
-    { id: "dreaming", kind: "dreaming", executor: "agent", cron: cronOf(cfg, "dreaming"), enabled: cfg.memory?.dreaming?.enabled !== false },
     ...customAgentSchedules(cfg).map((item) => ({
       id: item.id,
       kind: "agent",
@@ -204,9 +196,8 @@ const localIso = (d) =>
  * 会话监听是 20 秒一轮，不在这里（cron 最小粒度是分钟）。
  */
 export function cronOf(cfg, id) {
-  const section = cfg?.[id] ?? (id === "router" ? cfg?.inspector : id === "dreaming" ? cfg?.memory?.dreaming : null) ?? {}
+  const section = cfg?.[id] ?? (id === "router" ? cfg?.inspector : null) ?? {}
   if (String(section.cron ?? "").trim()) return String(section.cron).trim()
-  if (id === "dreaming") return "0 3 * * *"
   if (id === "apiWatch") return "0 9-18/2 * * 1-5"
   const seconds = Number(
     section.intervalSeconds ??
@@ -295,22 +286,6 @@ export function listSchedules(cfg, state = {}) {
       running: state.polling === true,
     },
     {
-      id: "dreaming",
-      label: "每日记忆 dreaming",
-      enabled: cfg?.memory?.dreaming?.enabled !== false,
-      cron: cronOf(cfg, "dreaming"),
-      executor: "agent",
-      nextAt: state.dreaming?.nextAt || "",
-      intervalSeconds: 0,
-      detail: "每天整理前一日日记：Light 去重、REM 反思、Deep 受控提升；独立 Agent 只能通过 memory 命令写核心记忆，DREAMS.md 供审阅",
-      lastAt: state.dreaming?.lastAt || "",
-      count: Number(state.dreaming?.count ?? 0),
-      lastResult: state.dreaming?.lastResult ?? null,
-      runnable: true,
-      runLabel: "立即整理",
-      running: state.dreaming?.running === true,
-    },
-    {
       id: "apiWatch",
       label: "存量接口变更巡检",
       enabled: cfg?.apiWatch?.enabled === true,
@@ -384,7 +359,7 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
     const raw = patch[id]
     const obj = raw && typeof raw === "object" ? raw : { enabled: raw === true || raw === "true" }
     const custom = customAgentSchedules(cfg).find((item) => item.id === id)
-    if ("cron" in obj && !["pickup", "prWatch", "mail", "router", "dreaming", "apiWatch"].includes(id) && !custom) throw new Error(`${id} 不是独立定时任务，没有 cron 可改`)
+    if ("cron" in obj && !["pickup", "prWatch", "mail", "router", "apiWatch"].includes(id) && !custom) throw new Error(`${id} 不是独立定时任务，没有 cron 可改`)
     const next = {}
     if ("enabled" in obj) next.enabled = obj.enabled === true || obj.enabled === "true"
     if ("cron" in obj) {
@@ -429,11 +404,6 @@ export function applySchedules(cfg, patch = {}, at = new Date()) {
       if ("enabled" in next) cfg.router.enabled = next.enabled
       if ("cron" in next) cfg.router.cron = next.cron
       if ("script" in next) cfg.router.script = next.script
-    } else if (id === "dreaming") {
-      const dreaming = { ...(cfg.memory?.dreaming ?? {}) }
-      if ("enabled" in next) dreaming.enabled = next.enabled
-      if ("cron" in next) dreaming.cron = next.cron
-      cfg.memory = { ...(cfg.memory ?? {}), dreaming }
     } else if (id === "apiWatch") {
       cfg.apiWatch = { ...(cfg.apiWatch ?? {}) }
       if ("enabled" in next) cfg.apiWatch.enabled = next.enabled

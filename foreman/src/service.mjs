@@ -33,7 +33,6 @@ import { MailDriver, realRecipients } from "./mail.mjs"
 import { acceptanceGate, detectUiChange, mailPollOnce, requestAcceptance, mailAcceptanceSent, mailAcceptanceFailed, deliverMailReply } from "./mailflow.mjs"
 import { runningIssues, inflightIssues } from "./planner.mjs"
 import { routerOnce } from "./core/router.mjs"
-import { dreamOnce } from "./dreaming.mjs"
 import { listPulls, viewPr, mergePr, closeIssue, createPr, commentIssue, viewIssue, createIssue, editIssue, READY_FOR_AGENT } from "./gitea.mjs"
 import { ConsoleStore } from "./console.mjs"
 import { InboxStore, AgentWorker, ScheduleRunner } from "./core/inbox.mjs"
@@ -849,7 +848,6 @@ export async function startServer({ cfg, book: _book, driver, log = () => {}, gi
     // router agent 巡检运行时（持久会话与成功投递时间在 Book.router）
     router: { lastAt: null, count: 0, lastResult: null, running: false, nextAt: "" },
     routerInterval: null,
-    dreaming: { lastAt: null, count: 0, lastResult: null, running: false, nextAt: "" },
     // 自定义 Agent 定时任务运行时：id -> { lastAt, count, lastResult, running, nextAt }
     agentSchedules: {},
     // 验收邮件轮询运行时
@@ -1060,7 +1058,7 @@ export async function startServer({ cfg, book: _book, driver, log = () => {}, gi
   // 页面上的「立即执行」：不看开关和 cron 现在是什么状态，立刻跑一轮这类任务。
   // 只 bypass「没开 / 不在工作时间」；容量、busy、锁、节点暂停这些保护仍然生效。
   ctx.runSchedule = async (id) => {
-    if (["pickup", "prWatch", "mail", "router", "inspector", "dreaming", "apiWatch"].includes(id)) return scheduler.runNow(id === "inspector" ? "router" : id)
+    if (["pickup", "prWatch", "mail", "router", "inspector", "apiWatch"].includes(id)) return scheduler.runNow(id === "inspector" ? "router" : id)
     if (customAgentSchedules(cfg).some((item) => item.id === id)) return scheduler.runNow(id)
     throw Object.assign(new Error(`${id} 没有可以立即执行的动作`), { code: "schedule_not_runnable" })
   }
@@ -1139,21 +1137,6 @@ export async function startServer({ cfg, book: _book, driver, log = () => {}, gi
   })
   ctx.inboxWorker = worker
   inbox.onChange = () => worker.wake()
-  const recordDream = async () => {
-    if (state.dreaming.running) return { ok: true, skipped: "busy" }
-    state.dreaming.running = true
-    try {
-      const result = await dreamOnce(ctx)
-      if (result?.ok !== false) {
-        state.dreaming.lastAt = nowIso()
-        state.dreaming.count++
-        state.dreaming.lastResult = result.skipped ? `跳过：${result.skipped}` : `已派发 ${result.day} · ${result.session}`
-      }
-      return result
-    } finally {
-      state.dreaming.running = false
-    }
-  }
   // 自定义 Agent 定时任务：到点新开一条豆包会话，把提示词当首句投递；不等第一轮跑完。
   const agentScheduleRuntime = (id) =>
     (state.agentSchedules[id] ??= { lastAt: null, count: 0, lastResult: null, running: false, nextAt: "" })
@@ -1195,7 +1178,7 @@ ${String(item.prompt ?? "").trim()}
     }
   }
   const syncScheduleState = (items) => {
-    const ids = { pickup: "pickup", prWatch: "pr", mail: "mail", router: "router", dreaming: "dreaming", apiWatch: "apiWatch" }
+    const ids = { pickup: "pickup", prWatch: "pr", mail: "mail", router: "router", apiWatch: "apiWatch" }
     for (const [id, key] of Object.entries(ids)) {
       state[key].nextAt = items.find((item) => item.id === id)?.nextAt || ""
     }
@@ -1208,7 +1191,6 @@ ${String(item.prompt ?? "").trim()}
     prWatch: { type: "script", run: (_, { manual }) => runConfiguredScript(ctx, "prWatch", { manual }) },
     mail: { type: "script", run: () => recordMailPoll(() => runConfiguredScript(ctx, "mail")) },
     router: { type: "script", run: () => runConfiguredScript(ctx, "router") },
-    dreaming: { type: "agent", run: recordDream },
     // 存量接口变更巡检：cron 已限定工作时段，不走工作时间窗 allow 门。
     apiWatch: { type: "script", run: (_, { manual }) => runConfiguredScript(ctx, "apiWatch", { manual }) },
     ...Object.fromEntries(

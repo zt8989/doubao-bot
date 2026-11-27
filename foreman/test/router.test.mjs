@@ -123,34 +123,6 @@ test("router agent首轮新建，后续巡检复用同一条会话", async () =>
   }
 })
 
-test("每次新建 router agent 都注入 MEMORY.md 与 USER.md，复用会话不重复注入", async () => {
-  const f = fixture()
-  try {
-    const dir = path.join(f.dir, "memory")
-    fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(path.join(dir, "MEMORY.md"), "- 旧部署约定 <!-- key:deploy; observed:2026-11-18; status:active -->\n")
-    fs.writeFileSync(path.join(dir, "USER.md"), "- 始终简短回复 <!-- key:style; observed:2026-11-18; status:active -->\n")
-
-    await routerOnce(f, { now: new Date("2026-11-19T00:00:00Z") })
-    await routerOnce(f, { now: new Date("2026-11-19T00:10:00Z") })
-    fs.writeFileSync(path.join(dir, "MEMORY.md"), "- 新部署约定 <!-- key:deploy; observed:2026-11-19; status:active -->\n")
-    await routerOnce(f, { now: new Date("2026-11-20T00:11:00Z") })
-
-    assert.equal(f.opened.length, 2)
-    assert.match(f.opened[0].prompt, /### MEMORY\.md[\s\S]*旧部署约定/)
-    assert.match(f.opened[0].prompt, /### USER\.md[\s\S]*始终简短回复/)
-    assert.match(f.opened[0].prompt, /foreman memory set/)
-    assert.match(f.opened[0].prompt, /foreman memory note/)
-    assert.match(f.opened[0].prompt, /foreman memory search/)
-    assert.match(f.opened[0].prompt, /不要直接.*(?:写入|编辑|覆盖)|禁止直接.*(?:写入|编辑|覆盖)/)
-    assert.match(f.opened[1].prompt, /新部署约定/)
-    assert.doesNotMatch(f.opened[1].prompt, /旧部署约定/)
-    assert.doesNotMatch(f.queued[0].text, /旧部署约定|始终简短回复|### MEMORY\.md/)
-  } finally {
-    fs.rmSync(f.dir, { recursive: true, force: true })
-  }
-})
-
 test("PR 候选通知复用同一路由会话并 queue，不夹带主动巡检", async () => {
   const f = fixture()
   try {

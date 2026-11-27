@@ -987,7 +987,7 @@ class FmSchedules extends LitElement {
     }
     if (schedule.agent) {
       patch.agent = { prompt: value("agent-prompt")?.value ?? "" }
-      // 只有自定义 Agent 任务才有 cwd；内置（如 dreaming）不带这个字段，别顺手改掉。
+      // 只有自定义 Agent 任务才有 cwd；内置任务不带这个字段，别顺手改掉。
       if (schedule.agent.custom) patch.agent.cwd = value("agent-cwd")?.value.trim() ?? ""
     }
     this.formError = ""

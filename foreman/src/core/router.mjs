@@ -2,7 +2,6 @@
 import { Book } from "../book.mjs"
 import { agentExecutor } from "./executors.mjs"
 import { builtinAgentPromptPath } from "../builtin-prompts.mjs"
-import { memoryBootstrap } from "./memory.mjs"
 import { runtimeEnvSection } from "../prompts.mjs"
 
 // 子智能体分配协议：编码/审查全部经由 foreman 工作会话（yolo，开工不受审批阻塞，收工自动通知 router）。
@@ -73,7 +72,6 @@ async function deliver(ctx, rec, text, { now, action, reason = "", scheduled = f
     })
     const first = [
       agentExecutor(cfg).prompt,
-      memoryBootstrap(cfg),
       projectDir ? `监控项目目录：${projectDir}` : "",
       agentProtocol(),
       env,

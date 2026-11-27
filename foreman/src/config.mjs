@@ -205,14 +205,6 @@ export const DEFAULTS = {
     leaseSeconds: 120,
     maxAttempts: 8,
   },
-  // Always-on 记忆：核心文件启动时注入；日记只按需检索。超限只拒绝写入，不自动精简。
-  memory: {
-    dir: "memory",
-    maxEntryChars: 240,
-    memoryMaxBytes: 4000,
-    userMaxBytes: 2000,
-    dreaming: { enabled: true, cron: "0 3 * * *" },
-  },
   // 自定义 Agent 定时任务：到点新开一条豆包会话，把 prompt 当作首句投递。
   // 每项 { id, label, cron, enabled, prompt, detail? }；id 不能与内置定时任务重名。
   agentSchedules: [],
@@ -377,8 +369,6 @@ export function loadConfig(explicit, env = process.env) {
   if (configDir) {
     const userService = isObj(normalizedUser.service) ? normalizedUser.service : {}
     const userHttp = isObj(userService.http) ? userService.http : {}
-    const userMemory = isObj(normalizedUser.memory) ? normalizedUser.memory : {}
-    if (userMemory.dir === undefined) cfg.memory.dir = path.join(configDir, "memory")
     if (userService.pidFile === undefined) cfg.service.pidFile = path.join(configDir, "foreman.pid")
     if (userService.logFile === undefined) cfg.service.logFile = path.join(configDir, "service.log")
     if (userHttp.portFile === undefined) cfg.service.http.portFile = path.join(configDir, "service.port")
@@ -441,23 +431,8 @@ export function loadConfig(explicit, env = process.env) {
   // 服务三路径：同 stateFile 的解析规则（~ 展开；相对路径落到配置文件同目录）。
   const baseDir = configDir || (fs.existsSync(file) ? path.dirname(file) : process.cwd())
 
-  // 记忆目录按配置文件解析；长度上限必须为正数，避免 NaN 让写入校验静默失效。
-  cfg.memory = isObj(cfg.memory) ? cfg.memory : {}
-  const rawMemoryDir = expandHome(String(cfg.memory.dir ?? "memory").trim() || "memory")
-  cfg.memory.dir = path.isAbsolute(rawMemoryDir) ? rawMemoryDir : path.resolve(baseDir, rawMemoryDir)
-  for (const key of ["maxEntryChars", "memoryMaxBytes", "userMaxBytes"]) {
-    const n = Number(cfg.memory[key])
-    if (!Number.isFinite(n) || n <= 0) throw new Error(`配置项 memory.${key} 要是正数，现在是：${cfg.memory[key]}`)
-    cfg.memory[key] = Math.floor(n)
-  }
-  cfg.memory.dreaming = isObj(cfg.memory.dreaming) ? cfg.memory.dreaming : { enabled: cfg.memory.dreaming !== false }
-  cfg.memory.dreaming.enabled = cfg.memory.dreaming.enabled !== false
-  const dreamingCron = validateCron(cfg.memory.dreaming.cron ?? "0 3 * * *")
-  if (!dreamingCron.ok) throw new Error(`配置项 memory.dreaming.cron 不合法：${dreamingCron.error}`)
-  cfg.memory.dreaming.cron = dreamingCron.expression
-
   // 自定义 Agent 定时任务：id 唯一且不与内置重名；cron 必须合法；提示词不能为空。
-  const builtinScheduleIds = ["pickup", "prWatch", "mail", "router", "inspector", "dreaming", "workHours", "apiWatch"]
+  const builtinScheduleIds = ["pickup", "prWatch", "mail", "router", "inspector", "workHours", "apiWatch"]
   const rawAgentSchedules = Array.isArray(cfg.agentSchedules) ? cfg.agentSchedules : []
   if (rawAgentSchedules.length > 10) throw new Error("配置项 agentSchedules 最多 10 条")
   const seenScheduleIds = new Set()

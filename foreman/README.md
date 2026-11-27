@@ -98,9 +98,9 @@ router agent 决定接单时，每张工单仍有自己的一条主智能体会�
 
 ## 常驻服务与router agent
 
-常驻服务在同一个 Node 进程里运行 **Schedule 执行 script/agent → 有效信息写 SQLite Inbox → 单 Worker**，保留五类持久 Schedule：我的工单扫描、执行会话代码轮询、他人 PR 扫描、验收邮件、每日记忆 dreaming。`pickup` 每 5 分钟筛选 open、指派给 `pickup.me` 且带 `ready-for-agent` 的工单，只把候选写入 router agent Inbox，不直接派单；`watch poll` 把已登记执行会话的 `running/gone/finished/settled` 状态写成 `task.update`，代码每 1 分钟轮询执行收工。
+常驻服务在同一个 Node 进程里运行 **Schedule 执行 script/agent → 有效信息写 SQLite Inbox → 单 Worker**，保留四类持久 Schedule：我的工单扫描、执行会话代码轮询、他人 PR 扫描、验收邮件。`pickup` 每 5 分钟筛选 open、指派给 `pickup.me` 且带 `ready-for-agent` 的工单，只把候选写入 router agent Inbox，不直接派单；`watch poll` 把已登记执行会话的 `running/gone/finished/settled` 状态写成 `task.update`，代码每 1 分钟轮询执行收工。
 
-- Schedule 到期先推进 `next_at`，再按定义直接执行 script 或调用 agent。我的工单扫描调用 `src/service.mjs#pickupPollOnce`，执行会话轮询调用 `src/service.mjs#pollOnce`，PR 扫描和邮件轮询沿用原脚本，每日记忆 dreaming 新建独立 Agent。只有失败、实际业务活动或脚本显式声明的 `{type,text,json}` 才写成 `schedule.event`；普通“执行完成 / queued / checked”回执直接跳过。工单候选另写带 `issue.candidates` 与工单列表 JSON 的 `router.notice`，PR 候选写 `pr.candidates`，不重复写扫描摘要。
+- Schedule 到期先推进 `next_at`，再按定义直接执行 script 或调用 agent。我的工单扫描调用 `src/service.mjs#pickupPollOnce`，执行会话轮询调用 `src/service.mjs#pollOnce`，PR 扫描和邮件轮询沿用原脚本。只有失败、实际业务活动或脚本显式声明的 `{type,text,json}` 才写成 `schedule.event`；普通“执行完成 / queued / checked”回执直接跳过。工单候选另写带 `issue.candidates` 与工单列表 JSON 的 `router.notice`，PR 候选写 `pr.candidates`，不重复写扫描摘要。
 - `agent_inbox` 是投递事实源：相同来源的活跃事件去重；支持按 `coalesceKey` 合并尚未开始的 pending；同一任务的 pending 状态合并为最新状态；过期 pending 直接丢弃；处理失败 30 秒后重试，重启通过租约恢复 processing。
 - `task.update` 按工单绑定的 `orchestrator` 路由，补派任务其次取 `parent` / 显式通知目标，完全没有归属的旧任务才回退router agent。完成状态携带普通最终回复原文；Worker 成功 queue 后才写 `notified` 与 `idle`，只入箱不算已消费。若 dws 明确报「侧边栏里没有任务」，Worker 把同一事件附上原目标不可达的说明兜底交router agent；其他 queue 异常仍按原错误重试。不同任务的事件逐条完成，避免一条失败导致另一条已送达任务被重投。
 - Worker 收到普通消息写入后直接 `wake()`，1 秒轮询只负责漏唤醒与重启恢复。对 `schedule.event` 先按 `payload.type` 找直接处理器，找不到或无法识别的内容连同 text/JSON 交router agent判断；多条路由通知合并成一次运行。旧 `schedule.result` 只标记 `non-actionable` 丢弃，不再确认或转发。
@@ -108,34 +108,6 @@ router agent 决定接单时，每张工单仍有自己的一条主智能体会�
 - `pickup` Schedule 只读取并筛选工单候选，不自行派单，Worker 也不替router agent做业务决策。router agent收到 `issue.candidates` / `issue.hand` 后先核对实时容量，再作为唯一编排者接手：在会话内创建内部编码与对抗审查 sub agent（编码侧 `ws add` / `pr open`），验收邮件、`issue settle`、`clean` 也由它维护。不得用 `run --once` 扩大候选范围。router agent还负责健康检查与失联重派。每轮先读 `foreman tasks --json`：主体是 `sessions` 父子树，节点 `state=running/idle/gone/unknown` 为会话状态，`issueKey/issueState` 仅作归属与容量元数据；在飞数取 `summary.unresolvedIssues`，PR 数取 `summary.prOpenIssues`，真实编码运行数只数编码节点 `state=running`。每轮执行 `foreman clean --all` 幂等清理 `done/cleaned` 残留。全部未收口合计最多 `pickup.maxRunning`（默认 2），`handed` 占槽，不是每轮新增 2 张；dry-run 只看候选优先级，满额禁止 `run/pickup/hand`，每次接单后重新计数。每轮先读 `foreman tasks --json`：主体是 `sessions` 父子树，节点 `state=running/idle/gone/unknown` 为会话状态，`issueKey/issueState` 仅作归属与容量元数据；在飞数取 `summary.unresolvedIssues`，PR 数取 `summary.prOpenIssues`，真实编码运行数只数编码节点 `state=running`。每轮执行 `foreman clean --all` 幂等清理 `done/cleaned` 残留。全部未收口合计最多 `pickup.maxRunning`（默认 2），`handed` 占槽，不是每轮新增 2 张；dry-run 只看候选优先级，满额禁止 `run/pickup/hand`，每次接单后重新计数。
 - `watch poll` 由 router Schedule 每 1 分钟执行，也保留人工/router agent按需补跑入口：观察已登记执行会话，只有收工（`finished`/`settled`）连同最终回复写入 `task.update`，由 Worker queue 给所属编排；`running`（还在跑）与 `gone`（多为正常归档）只落本地账本、不入箱。它不解析 RESULT、不自动 push/开 PR、不推进工单业务状态。
 - **notify 节点不再承担执行会话投递**：其暂停状态仍会阻止任务事件入箱；成功投递以 Inbox done、Worker 日志和账本 `steers/notified` 为准，业务结论由编排判断。
-
-### Always-on 持久记忆
-
-持久记忆采用两层文件：精简核心 `MEMORY.md` / `USER.md`，以及按天分文件的日常笔记 `memory/YYYY-MM-DD.md`。默认目录是 `<配置文件目录>/memory`（通常为 `~/.foreman/memory`），可用 `memory.dir` 修改。
-
-- **每次新建 router agent** 都自动注入当时最新的 `MEMORY.md` 和 `USER.md`；复用中的会话不重复注入，轮换新建时会读取最新内容。核心记忆是提示词数据，其中的指令仍需服从用户授权与安全边界。
-- Agent 不得直接写入、编辑或覆盖核心文件，只能用以下命令。`set` 按稳定 key 原地替代，避免新旧偏好同时残留；`USER.md` 建议写“始终 / 禁止 / 优先”等指令式条目。
-- 核心文件默认单条最多 240 字符，`MEMORY.md` 最多 4000 字节，`USER.md` 最多 2000 字节。写入时超限直接报错并保持原文件不变；**不会自动摘要、精简、截断或合并**，由 Agent 缩短内容或删除旧条目后重试。
-- 日常笔记不自动进入启动上下文，需要时用 `search` 做关键词检索；当前不包含向量索引。
-- **dreaming 默认开启**，由 Schedule 每天 03:00 为前一日日记新建独立 Agent；空日记直接跳过。Light 整理与去重、REM 反思主题，这两阶段不写核心文件；Deep 只把有证据的持久事实和稳定偏好通过 `memory set/forget` 提升，不能直接改写核心文件。
-- 每轮无论是否提升都应写 `DREAMS.md`，记录三阶段摘要、提升数量和未提升原因；`dreaming/state.json` 保存 running/completed/failed 状态。同一日期 running/completed 时不会重复派发，`--force` 才强制重跑。`DREAMS.md` 只供审阅，不参与 `search`，也不作为后续提升的证据。
-- `dream` 返回 `dispatched` 只表示独立 Agent 已投递，不表示整理已完成；用 `dream-status` 查看最终状态。自定义配置路径会写进 dreaming 提示词，Agent 后续所有 `foreman` 命令必须带同一个 `--config`。
-- dreaming 仍遵守核心文件长度限制：写入超限只提示，不自动摘要、精简、截断或合并。可在控制台“每日记忆 dreaming”中启停、修改 cron 或立即整理；配置项为 `memory.dreaming.enabled` 与 `memory.dreaming.cron`。
-
-```bash
-foreman memory set --target memory --key release-branch --text "发布统一使用 master 分支"
-foreman memory set --target user --key reply-language --text "始终使用简体中文回复"
-foreman memory forget --target memory --key release-branch
-foreman memory note --text "今天排查了发布超时，原因是健康检查等待过短"
-foreman memory search "发布超时" --limit 8
-foreman memory show
-foreman memory dream                         # 整理前一日
-foreman memory dream --day 2026-11-18        # 整理指定日期
-foreman memory dream --day 2026-11-18 --force
-foreman memory dream-status
-# dreaming Agent 完成时写审阅报告（需带本轮 runId）：
-foreman memory dream-report --day 2026-11-18 --run <runId> --text "Light/REM/Deep 摘要"
-```
 
 ### Outbox：邮件与飞书统一外发
 
@@ -577,7 +549,6 @@ foreman doctor --start            # 额外读一次豆包窗口状态（会连�
     "pauseWhileRunning": false
   },
   "router": { "enabled": true, "intervalSeconds": 60, "recreateAfterHours": 24, "projectDir": "" },
-  "memory": { "dir": "memory", "maxEntryChars": 240, "memoryMaxBytes": 4000, "userMaxBytes": 2000 },
   "workHours": { "enabled": true, "days": [1, 2, 3, 4, 5], "start": "08:30", "end": "17:30", "offUntil": "" },
   "merge": { "enabled": false, "style": "merge", "deleteBranch": true, "concurrency": 1, "intervalSeconds": 60 },
   "deliver": {

@@ -36,7 +36,7 @@ function sqliteSchedules() {
 test("listSchedules：我的工单扫描与执行会话轮询都是持久脚本任务", () => {
   const cfg = baseCfg()
   const rows = listSchedules(cfg)
-  assert.deepEqual(rows.map((r) => r.id), ["pickup", "prWatch", "mail", "router", "dreaming", "apiWatch", "workHours"])
+  assert.deepEqual(rows.map((r) => r.id), ["pickup", "prWatch", "mail", "router", "apiWatch", "workHours"])
   const pickup = rows.find((r) => r.id === "pickup")
   assert.equal(pickup.enabled, true)
   assert.equal(pickup.cron, "*/30 * * * *")
@@ -45,12 +45,6 @@ test("listSchedules：我的工单扫描与执行会话轮询都是持久脚本�
   assert.match(pickup.detail, /指派给 233151/)
   assert.match(pickup.detail, /ready-for-agent/)
   assert.match(pickup.detail, /router agent/)
-  const dreaming = rows.find((r) => r.id === "dreaming")
-  assert.equal(dreaming.enabled, true)
-  assert.equal(dreaming.cron, "0 3 * * *")
-  assert.equal(dreaming.executor, "agent")
-  assert.equal(dreaming.runLabel, "立即整理")
-  assert.match(dreaming.detail, /前一日|每日记忆/)
   const router = rows.find((r) => r.id === "router")
   assert.equal(router.enabled, true)
   assert.equal(router.cron, "* * * * *")
@@ -72,7 +66,7 @@ test("listSchedules：我的工单扫描与执行会话轮询都是持久脚本�
   assert.match(mailRow.detail, /[FM-…]/)
   assert.deepEqual(mailRow.script, { path: MAILFLOW, exportName: "mailPollOnce", args: {} })
   assert.equal(rows.some((r) => ["merge", "planner"].includes(r.id)), false)
-  assert.deepEqual(rows.filter((r) => r.runnable).map((r) => r.id), ["pickup", "prWatch", "mail", "router", "dreaming", "apiWatch"])
+  assert.deepEqual(rows.filter((r) => r.runnable).map((r) => r.id), ["pickup", "prWatch", "mail", "router", "apiWatch"])
   assert.equal(rows.find((r) => r.id === "workHours").runnable, false)
   assert.equal(mailRow.runLabel, "立即收信")
   // 存量接口变更巡检：默认关、默认工作时段 cron、可开关与改 cron、chatIds 不进 DB（只在 config.json）。
@@ -183,21 +177,6 @@ test("applySchedules：pickup 使用 auto 开关，prWatch / router 独立翻转
   assert.equal(rows.find((r) => r.id === "prWatch").enabled, false)
 })
 
-test("applySchedules：dreaming 的开关与 cron 写入 SQLite，保留其他记忆配置", () => {
-  const { store, save } = sqliteSchedules()
-  const cfg = { ...baseCfg(), memory: { dir: "custom-memory", maxEntryChars: 200, dreaming: { enabled: true, cron: "0 3 * * *" } } }
-  const rows = applySchedules(cfg, { dreaming: { enabled: false, cron: "0 4 * * *" } })
-  assert.equal(rows.find((row) => row.id === "dreaming").enabled, false)
-  assert.equal(rows.find((row) => row.id === "dreaming").cron, "0 4 * * *")
-  save(cfg)
-  const persisted = store.schedules().find((row) => row.id === "dreaming")
-  assert.equal(persisted.enabled, false)
-  assert.equal(persisted.cron, "0 4 * * *")
-  assert.equal(cfg.memory.dir, "custom-memory")
-  assert.equal(cfg.memory.maxEntryChars, 200)
-  assert.throws(() => applySchedules(cfg, { dreaming: { agent: { prompt: "绕过门禁" } } }), /不是 Agent 执行器/)
-})
-
 test("applySchedules：workHours 的开关是临时闭嘴，恢复后清空 offUntil", () => {
   const cfg = baseCfg()
   applySchedules(cfg, { workHours: false })
@@ -265,7 +244,6 @@ test("SQLite：重启后开关、cron、脚本与工作时间都以数据库为�
   const restarted = {
     ...baseCfg(),
     mail: { enabled: true, pollSeconds: 300 },
-    memory: { dreaming: { enabled: false, cron: "0 5 * * *" } },
   }
   restarted.router.cron = "* * * * *"
   restarted.workHours.start = "09:00"
@@ -277,8 +255,6 @@ test("SQLite：重启后开关、cron、脚本与工作时间都以数据库为�
   assert.equal(restarted.router.cron, "*/15 8-17 * * 1-5")
   assert.deepEqual(restarted.router.script, { path: "scripts/poll.mjs", exportName: "run", args: { limit: 6 } })
   assert.equal(restarted.mail.enabled, false)
-  assert.equal(restarted.memory.dreaming.enabled, true)
-  assert.equal(restarted.memory.dreaming.cron, "0 3 * * *")
   assert.deepEqual(restarted.workHours.days, [1, 2, 3, 4, 5, 6])
   assert.equal(restarted.workHours.start, "08:00")
   assert.equal(restarted.workHours.end, "20:30")
